@@ -38,9 +38,16 @@ final class GameClientController {
 
     func chooseTrump(_ suit: Suit) { sendAction(.chooseTrump(suit)) }
 
-    func playCard(_ cardID: String) {
+    /// velocity: the flick in points/sec on this screen — presentation
+    /// data for the table's physics, never game state.
+    func playCard(_ cardID: String, velocity: CGSize = .zero) {
         pendingIllegal = nil
         lastAttemptedCardID = cardID
+        if velocity != .zero {
+            session.send(.throwInfo(cardID: cardID,
+                                    vx: Double(velocity.width),
+                                    vy: Double(velocity.height)))
+        }
         sendAction(.playCard(cardID: cardID, force: false))
     }
 
@@ -90,7 +97,7 @@ final class GameClientController {
             }
         case .rejected(let reason):
             lastRejection = reason
-        case .hello, .seatClaim, .action, .heartbeat:
+        case .hello, .seatClaim, .action, .heartbeat, .throwInfo:
             break // client-outbound only
         }
     }

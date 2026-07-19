@@ -25,6 +25,10 @@ final class GameHostController {
     /// landing from the right edge. Table-side memory only, never synced.
     private(set) var seatByPlayedCard: [String: Int] = [:]
 
+    /// Flick kinematics from the thrower's phone (points/sec), keyed by
+    /// card. Consumed once by the physics when the card lands.
+    var throwVelocityByCard: [String: CGSize] = [:]
+
     /// Free play, table-local physics: where the humans have slid each
     /// card (normalized coords) and which they've flipped face-down.
     var freePlayLayout: [String: CGPoint] = [:]
@@ -117,6 +121,10 @@ final class GameHostController {
                   let deviceID = deviceByPeer[peer],
                   let seat = seatByDevice[deviceID] else { return }
             emit(engine.apply(action, from: seat))
+
+        case .throwInfo(let cardID, let vx, let vy):
+            throwVelocityByCard[cardID] = CGSize(width: vx, height: vy)
+            if throwVelocityByCard.count > 64 { throwVelocityByCard.removeAll() } // stale-flick hygiene
 
         case .seatClaim, .heartbeat:
             break // lobby order is claim order in v1; heartbeats unused (MCSession states suffice)

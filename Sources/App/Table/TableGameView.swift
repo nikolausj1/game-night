@@ -36,6 +36,13 @@ struct TableGameView: View {
                 .onChange(of: state.phase) { _, newPhase in
                     autoAdvance(from: newPhase)
                 }
+                .onChange(of: state.discardPile.count) { _, _ in
+                    // A card that leaves the felt (buried, handed off,
+                    // shuffled back) gets a fresh toss if it returns.
+                    let current = Set(state.discardPile.map(\.id))
+                    seenCardIDs.formIntersection(current)
+                    rotationByCard = rotationByCard.filter { current.contains($0.key) }
+                }
             }
         }
     }
@@ -157,27 +164,37 @@ struct TableGameView: View {
             let sweeping = winnerSeat != nil
             let target = sweeping ? anchors[winnerSeat!] : pose.position
 
+            // Entry vector: from this player's edge, so the slide-in
+            // direction always matches who threw it.
+            let entryOffset = CGSize(
+                width: ((anchors[play.seat].x - 0.5) * 1.22 + 0.5 - pose.position.x) * size.width,
+                height: ((anchors[play.seat].y - 0.47) * 1.22 + 0.47 - pose.position.y) * size.height)
+
             CardView(card: play.card, faceUp: true, elevation: sweeping ? 0.3 : 0)
                 .frame(width: cardWidth)
                 .rotationEffect(pose.rotation)
                 .position(x: target.x * size.width, y: target.y * size.height)
                 .opacity(sweeping ? 0 : 1)
                 .transition(.asymmetric(
-                    insertion: .offset(y: 60).combined(with: .scale(scale: 1.15)).combined(with: .opacity),
+                    insertion: .offset(entryOffset)
+                        .animation(FeltPhysics.slide(duration: 0.45)),
                     removal: .identity))
                 .animation(.spring(response: 0.5, dampingFraction: 0.8), value: sweeping)
-                .animation(.spring(response: 0.38, dampingFraction: 0.75), value: trick.count)
+                .animation(FeltPhysics.slide(duration: 0.45), value: trick.count)
         }
     }
 
-    /// Free play: played cards are PHYSICAL. They fly in from their
-    /// player's edge, then live on the felt: drag to slide them anywhere,
-    /// tap to flip, drop on the deck to bury them, drop on a nameplate to
-    /// hand them to that player's phone.
+    /// Free play: played cards are PHYSICAL. Arrivals run the felt physics
+    /// (friction slide + damped spin, scaled by the real flick velocity),
+    /// then cards live on the felt: drag to slide them anywhere, tap to
+    /// flip, drop on the deck to bury them, drop on a nameplate to hand
+    /// them to that player's phone.
     @State private var touchedCardID: String?
+    @State private var seenCardIDs: Set<String> = []
+    @State private var rotationByCard: [String: Double] = [:]
+    @State private var slidingCards: Set<String> = []
 
     private func freePlayCards(state: GameState, size: CGSize) -> some View {
-        let anchors = TableGeometry.seatAnchors(count: state.seats.count)
         let recent = state.discardPile.suffix(20)
         let cardWidth = min(size.width * 0.105, 120)
         return ForEach(Array(recent.enumerated()), id: \.element.id) { index, card in
@@ -187,29 +204,18 @@ struct TableGameView: View {
             let restPos = host.freePlayLayout[card.id].map {
                 CGPoint(x: $0.x * size.width, y: $0.y * size.height)
             } ?? CGPoint(x: (0.52 + dx) * size.width, y: (0.47 + dy) * size.height)
-            let fromSeat = host.seatByPlayedCard[card.id]
-            let origin: CGSize = {
-                guard let seat = fromSeat, anchors.indices.contains(seat) else {
-                    return CGSize(width: 0, height: 80)
-                }
-                // Start just OUTSIDE the felt on that player's side.
-                let anchor = anchors[seat]
-                return CGSize(width: (anchor.x - 0.5) * size.width * 1.35 - (restPos.x - size.width * 0.5),
-                              height: (anchor.y - 0.5) * size.height * 1.35 - (restPos.y - size.height * 0.5))
-            }()
             let isTouched = touchedCardID == card.id
+            let isSliding = slidingCards.contains(card.id)
 
             CardView(card: card,
                      faceUp: !host.faceDownCards.contains(card.id),
-                     elevation: isTouched ? 0.8 : 0)
+                     elevation: isTouched ? 0.8 : (isSliding ? 0.45 : 0))
                 .frame(width: cardWidth)
-                .rotationEffect(.degrees(jitter * 2.2))
+                .rotationEffect(.degrees(rotationByCard[card.id] ?? jitter * 2.2))
                 .position(restPos)
-                .zIndex(isTouched ? 500 : Double(index))
-                .transition(.asymmetric(
-                    insertion: .offset(origin).combined(with: .scale(scale: 1.15)).combined(with: .opacity),
-                    removal: .opacity))
-                .animation(.spring(response: 0.5, dampingFraction: 0.78), value: state.discardPile.count)
+                .zIndex(isTouched ? 500 : (isSliding ? 400 : Double(index)))
+                .transition(.opacity)
+                .onAppear { animateArrivalIfNew(card: card, state: state, size: size) }
                 .onTapGesture {
                     Haptics.tick()
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
@@ -230,6 +236,7 @@ struct TableGameView: View {
                         }
                         .onEnded { value in
                             touchedCardID = nil
+                            let anchors = TableGeometry.seatAnchors(count: state.seats.count)
                             // Dropped on the deck: bury it back in the pile.
                             let deckPos = CGPoint(x: deckAnchor.x * size.width,
                                                   y: deckAnchor.y * size.height)
@@ -237,7 +244,7 @@ struct TableGameView: View {
                                      deckPos.y - value.location.y) < 110 {
                                 Haptics.play()
                                 host.moveTableCard(card.id, to: .deck,
-                                                   seat: fromSeat ?? state.seats[0].id)
+                                                   seat: host.seatByPlayedCard[card.id] ?? state.seats[0].id)
                                 return
                             }
                             // Dropped on a nameplate: into that player's hand.
@@ -245,9 +252,57 @@ struct TableGameView: View {
                                                     size: size, seats: state.seats) {
                                 Haptics.play()
                                 host.moveTableCard(card.id, to: .hand, seat: target)
+                                return
+                            }
+                            // Otherwise: released mid-slide — let momentum
+                            // carry it a little farther on the felt.
+                            let v = value.velocity
+                            let vMag = hypot(v.width, v.height)
+                            if vMag > 120 {
+                                let glide = min(0.22, Double(vMag) / 9000.0)
+                                let rest = CGPoint(
+                                    x: min(0.94, max(0.06, (value.location.x + v.width * glide) / size.width)),
+                                    y: min(0.92, max(0.08, (value.location.y + v.height * glide) / size.height)))
+                                let duration = 0.25 + glide * 1.3
+                                slidingCards.insert(card.id)
+                                withAnimation(FeltPhysics.slide(duration: duration)) {
+                                    host.freePlayLayout[card.id] = rest
+                                    slidingCards.remove(card.id)
+                                }
                             }
                         }
                 )
+        }
+    }
+
+    /// First sighting of a card on the felt → run its toss. Uses the real
+    /// flick velocity when the thrower's phone sent one.
+    private func animateArrivalIfNew(card: Card, state: GameState, size: CGSize) {
+        guard state.gameKind == .freePlay, !seenCardIDs.contains(card.id) else { return }
+        seenCardIDs.insert(card.id)
+        // Cards present before this view existed (rejoin, relaunch) stay put.
+        guard host.freePlayLayout[card.id] == nil else { return }
+
+        let anchors = TableGeometry.seatAnchors(count: state.seats.count)
+        let seat = host.seatByPlayedCard[card.id]
+        let toss = FeltPhysics.toss(
+            cardID: card.id,
+            seatAnchor: seat.flatMap { anchors.indices.contains($0) ? anchors[$0] : nil },
+            throwVelocity: host.throwVelocityByCard.removeValue(forKey: card.id),
+            tableSize: size)
+
+        // Phase 1: materialize at the entry edge, mid-spin, lifted.
+        host.freePlayLayout[card.id] = toss.entry
+        rotationByCard[card.id] = toss.restRotation - toss.spin
+        slidingCards.insert(card.id)
+
+        // Phase 2: friction takes it from there.
+        DispatchQueue.main.async {
+            withAnimation(FeltPhysics.slide(duration: toss.duration)) {
+                host.freePlayLayout[card.id] = toss.rest
+                rotationByCard[card.id] = toss.restRotation
+                _ = slidingCards.remove(card.id)
+            }
         }
     }
 

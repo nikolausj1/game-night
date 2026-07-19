@@ -25,6 +25,10 @@ public enum NetMessage: Codable, Sendable, Equatable {
     case events([GameEvent])
     case heartbeat
     case rejected(reason: String)
+    /// Presentation-only kinematics sent just before a playCard action:
+    /// the flick velocity in points/sec on the thrower's screen. The table
+    /// uses it to give the card a matching slide; the engine never sees it.
+    case throwInfo(cardID: String, vx: Double, vy: Double)
 }
 
 public enum NetCodec {

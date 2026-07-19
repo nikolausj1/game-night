@@ -108,7 +108,7 @@ struct HandView: View {
                 let flicked = value.predictedEndTranslation.height < -size.height * 0.35
                     && value.translation.height < -20
                 if progress >= 1 || flicked {
-                    playSelectedCard(card, in: size)
+                    playSelectedCard(card, in: size, velocity: value.velocity)
                 } else {
                     withAnimation(.spring(response: 0.45, dampingFraction: 0.68)) {
                         dragState = CardDragState()
@@ -118,13 +118,13 @@ struct HandView: View {
             }
     }
 
-    private func playSelectedCard(_ card: Card, in size: CGSize) {
+    private func playSelectedCard(_ card: Card, in size: CGSize, velocity: CGSize = .zero) {
         Haptics.play()
         withAnimation(.easeIn(duration: 0.22)) {
             dragState.translation.height = -size.height
             departingCardID = card.id
         }
-        client.playCard(card.id)
+        client.playCard(card.id, velocity: velocity)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             dragState = CardDragState()
             selectedCardID = nil

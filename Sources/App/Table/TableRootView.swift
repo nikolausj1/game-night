@@ -24,6 +24,10 @@ struct TableRootView: View {
             }
             if DemoData.wantsFreePlayDemo, host.state == nil {
                 host.adoptDemoEngine(DemoData.makeFreePlayEngine())
+                // One card face-down so screenshots exercise the back.
+                if let first = host.state?.discardPile.first {
+                    host.faceDownCards.insert(first.id)
+                }
             }
         }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }

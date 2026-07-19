@@ -8,35 +8,25 @@ struct CardBackView: View {
         GeometryReader { geo in
             let w = geo.size.width
             let radius = CardStyle.cornerRadius(width: w)
+            let border = w * 0.045 // narrow printed ivory margin, like real stock
             ZStack {
-                // Parchment stock edge.
+                // The printed back: SAME rectangle as the face, art running
+                // full-bleed to a thin margin — not a sheet sitting on top.
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(LinearGradient(colors: [CardStyle.stockTop, CardStyle.stockBottom],
-                                         startPoint: .top, endPoint: .bottom))
-                // Printed field: generated guilloché art when present,
-                // programmatic green underneath either way.
-                RoundedRectangle(cornerRadius: radius * 0.55, style: .continuous)
-                    .fill(
-                        LinearGradient(colors: [CardStyle.feltGreen,
-                                                CardStyle.feltGreen.opacity(0.85)],
-                                       startPoint: .topLeading, endPoint: .bottomTrailing)
-                    )
-                    .overlay(
-                        Image("CardBackArt")
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .clipShape(RoundedRectangle(cornerRadius: radius * 0.55,
-                                                        style: .continuous))
-                    )
-                    .padding(w * 0.06)
-                // Programmatic lattice + medallion only when no printed art
-                // shipped — the fallback must stand on its own.
-                if UIImage(named: "CardBackArt") == nil {
+                    .fill(LinearGradient(colors: [CardStyle.feltGreen,
+                                                  CardStyle.feltGreen.opacity(0.85)],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                if UIImage(named: "CardBackArt") != nil {
+                    Image("CardBackArt")
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+                } else {
+                    // Programmatic fallback, also full-bleed.
                     LatticePattern(cell: w * 0.13)
                         .stroke(CardStyle.gold.opacity(0.55), lineWidth: max(0.5, w * 0.006))
-                        .clipShape(RoundedRectangle(cornerRadius: radius * 0.55, style: .continuous)
-                            .inset(by: w * 0.06))
-                        .padding(w * 0.06)
+                        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
                     ZStack {
                         Circle()
                             .fill(CardStyle.feltGreen)
@@ -48,8 +38,11 @@ struct CardBackView: View {
                             .frame(width: w * 0.20, height: w * 0.20)
                     }
                 }
+                // The ivory printed border frames the art from above.
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(.black.opacity(0.08), lineWidth: 0.5)
+                    .strokeBorder(CardStyle.stockTop, lineWidth: border)
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(.black.opacity(0.10), lineWidth: 0.5)
             }
         }
         .aspectRatio(CardStyle.aspectRatio, contentMode: .fit)

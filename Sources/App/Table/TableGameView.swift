@@ -193,6 +193,8 @@ struct TableGameView: View {
     @State private var seenCardIDs: Set<String> = []
     @State private var rotationByCard: [String: Double] = [:]
     @State private var slidingCards: Set<String> = []
+    /// 3D flip angle per card while a flip is in motion.
+    @State private var flipAngle: [String: Double] = [:]
 
     private func freePlayCards(state: GameState, size: CGSize) -> some View {
         let recent = state.discardPile.suffix(20)
@@ -207,25 +209,22 @@ struct TableGameView: View {
             let isTouched = touchedCardID == card.id
             let isSliding = slidingCards.contains(card.id)
 
+            let flip = flipAngle[card.id] ?? 0
+
             CardView(card: card,
                      faceUp: !host.faceDownCards.contains(card.id),
                      elevation: isTouched ? 0.8 : (isSliding ? 0.45 : 0))
                 .frame(width: cardWidth)
+                // A real flip: the card turns over its own long axis and
+                // lifts slightly at the apex, like a thumb turning it.
+                .rotation3DEffect(.degrees(flip), axis: (x: 0, y: 1, z: 0), perspective: 0.35)
+                .scaleEffect(1 + abs(flip) / 90 * 0.06)
                 .rotationEffect(.degrees(rotationByCard[card.id] ?? jitter * 2.2))
                 .position(restPos)
-                .zIndex(isTouched ? 500 : (isSliding ? 400 : Double(index)))
+                .zIndex(isTouched ? 500 : (isSliding || flip != 0 ? 400 : Double(index)))
                 .transition(.opacity)
                 .onAppear { animateArrivalIfNew(card: card, state: state, size: size) }
-                .onTapGesture {
-                    Haptics.tick()
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                        if host.faceDownCards.contains(card.id) {
-                            host.faceDownCards.remove(card.id)
-                        } else {
-                            host.faceDownCards.insert(card.id)
-                        }
-                    }
-                }
+                .onTapGesture { flipCard(card.id) }
                 .gesture(
                     DragGesture(minimumDistance: 3)
                         .onChanged { value in
@@ -272,6 +271,27 @@ struct TableGameView: View {
                             }
                         }
                 )
+        }
+    }
+
+    /// A literal flip: rotate to edge-on (90°), swap the printed side
+    /// while the card is invisible, then finish the turn from −90° back
+    /// to flat. One continuous motion to the eye.
+    private func flipCard(_ id: String) {
+        guard (flipAngle[id] ?? 0) == 0 else { return } // one flip at a time
+        Haptics.tick()
+        withAnimation(.easeIn(duration: 0.14)) {
+            flipAngle[id] = 90
+        } completion: {
+            if host.faceDownCards.contains(id) {
+                host.faceDownCards.remove(id)
+            } else {
+                host.faceDownCards.insert(id)
+            }
+            flipAngle[id] = -90
+            withAnimation(.easeOut(duration: 0.16)) {
+                flipAngle[id] = 0
+            }
         }
     }
 

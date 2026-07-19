@@ -13,6 +13,9 @@ struct TableLobbyView: View {
         host.lobbyPlayers.count <= selectedGame.maxPlayers
     }
 
+    /// Sim-verify hook: -autoStart deals free play as soon as anyone sits.
+    private var autoStarts: Bool { CommandLine.arguments.contains("-autoStart") }
+
     var body: some View {
         VStack(spacing: 28) {
             VStack(spacing: 4) {
@@ -44,6 +47,11 @@ struct TableLobbyView: View {
             .animation(.easeInOut(duration: 0.2), value: canStart)
         }
         .padding(40)
+        .onChange(of: host.lobbyPlayers.count) { _, count in
+            if autoStarts, count >= 1 {
+                host.startGame(kind: .freePlay, rules: rules)
+            }
+        }
     }
 
     private var neededLabel: String {

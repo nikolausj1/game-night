@@ -108,17 +108,22 @@ final class ClientSession: NSObject {
         watchdog = timer
     }
 
-    func send(_ msg: NetMessage) {
+    /// Returns false when the message could not be handed to the session —
+    /// callers treat that as "the link is lying about being alive".
+    @discardableResult
+    func send(_ msg: NetMessage) -> Bool {
         guard let table = tablePeer, session.connectedPeers.contains(table) else {
             log.error("send while not connected — dropped")
-            return
+            return false
         }
         outSeq += 1
         do {
             let data = try NetCodec.encode(NetEnvelope(v: 1, seq: outSeq, msg: msg))
             try session.send(data, toPeers: [table], with: .reliable)
+            return true
         } catch {
             log.error("send failed: \(error.localizedDescription)")
+            return false
         }
     }
 

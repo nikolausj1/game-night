@@ -13,7 +13,10 @@ struct TableGameView: View {
     private let deckAnchor = CGPoint(x: 0.20, y: 0.47)
 
     var body: some View {
-        GeometryReader { geo in
+        // Tracked read: every engine mutation bumps this, every bump
+        // redraws the felt. Without it, landings wait for unrelated events.
+        let _ = host.stateVersion
+        return GeometryReader { geo in
             if let state = host.state {
                 ZStack {
                     seatPlates(state: state, size: geo.size)

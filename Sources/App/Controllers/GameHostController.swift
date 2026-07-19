@@ -30,6 +30,11 @@ final class GameHostController {
     var freePlayLayout: [String: CGPoint] = [:]
     var faceDownCards: Set<String> = []
 
+    /// Monotonic bump on EVERY engine mutation. The engine itself is not
+    /// @Observable, so this is what guarantees the table redraws the
+    /// instant a card lands — views read it, Observation tracks it.
+    private(set) var stateVersion = 0
+
     var state: GameState? { engine?.state }
 
     init(tableName: String = "Game Night Table") {
@@ -126,7 +131,7 @@ final class GameHostController {
         guard let deviceID = deviceByPeer[peer] else { return }
         if let engine, let seat = seatByDevice[deviceID] {
             engine.setConnected(seat: seat, connected: false)
-            pushSnapshots()
+            emit([])
         } else if engine == nil {
             lobbyPlayers.removeAll { $0.deviceID == deviceID }
         }
@@ -137,6 +142,7 @@ final class GameHostController {
     /// After every mutation: events to everyone (and the table), then each
     /// seat its own private view of the world.
     private func emit(_ events: [GameEvent]) {
+        stateVersion += 1
         for event in events {
             if case .cardPlayed(let seat, let card, _) = event {
                 seatByPlayedCard[card.id] = seat

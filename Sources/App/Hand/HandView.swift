@@ -100,9 +100,14 @@ struct HandView: View {
                 let isArmed = dragState.playProgress(handHeight: size.height) >= 1
                 if isArmed != wasArmed { Haptics.arm() }
             }
-            .onEnded { _ in
+            .onEnded { value in
+                // Two ways to play: drag past the threshold, OR flick — a
+                // fast upward snap whose momentum would have carried it
+                // there. The flick is the signature move; honor velocity.
                 let progress = dragState.playProgress(handHeight: size.height)
-                if progress >= 1 {
+                let flicked = value.predictedEndTranslation.height < -size.height * 0.35
+                    && value.translation.height < -20
+                if progress >= 1 || flicked {
                     playSelectedCard(card, in: size)
                 } else {
                     withAnimation(.spring(response: 0.45, dampingFraction: 0.68)) {

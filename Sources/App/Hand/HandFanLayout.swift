@@ -53,10 +53,11 @@ struct CardDragState {
     var isDragging = false
 
     /// How far along the "this is a play" gesture we are, 0…1.
-    /// Crossing 1 and releasing = play the card.
+    /// Crossing 1 and releasing = play the card. (Fast flicks can also
+    /// play via predicted momentum — see HandView's gesture.)
     func playProgress(handHeight: CGFloat) -> CGFloat {
         let liftDistance = -translation.height
-        let threshold = handHeight * 0.32
+        let threshold = handHeight * 0.26
         return max(0, min(1, liftDistance / threshold))
     }
 

@@ -34,30 +34,40 @@ final class GameClientController {
 
     // MARK: actions from the hand UI
 
-    func placeBid(_ bid: Int) { session.send(.action(.placeBid(bid))) }
+    func placeBid(_ bid: Int) { sendAction(.placeBid(bid)) }
 
-    func chooseTrump(_ suit: Suit) { session.send(.action(.chooseTrump(suit))) }
+    func chooseTrump(_ suit: Suit) { sendAction(.chooseTrump(suit)) }
 
     func playCard(_ cardID: String) {
         pendingIllegal = nil
         lastAttemptedCardID = cardID
-        session.send(.action(.playCard(cardID: cardID, force: false)))
+        sendAction(.playCard(cardID: cardID, force: false))
     }
 
     /// The deliberate second step after an illegal warning.
     func forcePlayPendingCard() {
         guard let pending = pendingIllegal else { return }
         pendingIllegal = nil
-        session.send(.action(.playCard(cardID: pending.cardID, force: true)))
+        sendAction(.playCard(cardID: pending.cardID, force: true))
     }
 
     func cancelPendingPlay() { pendingIllegal = nil }
 
-    func declareSuit(_ suit: Suit) { session.send(.action(.declareSuit(suit))) }
+    func declareSuit(_ suit: Suit) { sendAction(.declareSuit(suit)) }
 
-    func drawCard() { session.send(.action(.drawCard)) }
+    func drawCard() { sendAction(.drawCard) }
 
-    func requestUndo() { session.send(.action(.requestUndo)) }
+    func requestUndo() { sendAction(.requestUndo) }
+
+    /// Every game action goes through here: a failed hand-off means the
+    /// session is wedged, so start rebuilding IMMEDIATELY — the card stays
+    /// in the hand (no snapshot confirms it left) and the very next swipe
+    /// after the pill clears will land.
+    private func sendAction(_ action: PlayerAction) {
+        if !session.send(.action(action)) {
+            session.refresh()
+        }
+    }
 
     // MARK: inbound
 
@@ -67,6 +77,7 @@ final class GameClientController {
             mySeat = seat
         case .snapshot(let snap):
             snapshot = snap
+            runAutoPlayIfAsked(snap)
         case .events(let events):
             recentEvents = events
             for event in events {
@@ -86,4 +97,21 @@ final class GameClientController {
 
     // The last card we tried, so an illegalAttempt event ties back to it.
     private var lastAttemptedCardID: String?
+
+    // Sim-verify hook (-autoPlay): draw once, then play the first card —
+    // exercises the full phone→table pipeline with no taps.
+    private var autoPlayStage = 0
+    private func runAutoPlayIfAsked(_ snap: ClientSnapshot) {
+        guard CommandLine.arguments.contains("-autoPlay"),
+              snap.gameKind == .freePlay, snap.phase == .playing else { return }
+        if autoPlayStage == 0, snap.myHand.isEmpty {
+            autoPlayStage = 1
+            drawCard()
+        } else if autoPlayStage == 1, let first = snap.myHand.first {
+            autoPlayStage = 2
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.playCard(first.id)
+            }
+        }
+    }
 }

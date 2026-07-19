@@ -4,7 +4,7 @@ import SwiftUI
 struct GameNightApp: App {
     var body: some Scene {
         WindowGroup {
-            RootView()
+            RoleRouter()
         }
     }
 }

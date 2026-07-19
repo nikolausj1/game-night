@@ -16,9 +16,15 @@ targets:
       - path: Sources
         excludes:
           - "App/Resources/Announcer/**"
+          - "App/Resources/SFX/**"
       # Folder reference (blue folder): announcer clips land in the bundle
       # without re-running `xcodegen generate` (same pattern as Wizard Keeper).
       - path: Sources/App/Resources/Announcer
+        type: folder
+        optional: true
+      # Same folder-reference pattern for the table SFX clips
+      # (tools/generate_sfx.py) — see TableSFX.swift.
+      - path: Sources/App/Resources/SFX
         type: folder
         optional: true
     settings:

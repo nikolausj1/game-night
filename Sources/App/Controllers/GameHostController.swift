@@ -25,6 +25,11 @@ final class GameHostController {
     /// landing from the right edge. Table-side memory only, never synced.
     private(set) var seatByPlayedCard: [String: Int] = [:]
 
+    /// Free play, table-local physics: where the humans have slid each
+    /// card (normalized coords) and which they've flipped face-down.
+    var freePlayLayout: [String: CGPoint] = [:]
+    var faceDownCards: Set<String> = []
+
     var state: GameState? { engine?.state }
 
     init(tableName: String = "Game Night Table") {
@@ -61,6 +66,24 @@ final class GameHostController {
     func drawCard(for seat: Int) {
         guard let engine else { return }
         emit(engine.apply(.drawCard, from: seat))
+    }
+
+    /// Free play: a table card dragged onto the deck (back to the pile) or
+    /// onto a nameplate (into that player's hand).
+    func moveTableCard(_ cardID: String, to zone: FreePlayZone, seat: Int) {
+        guard let engine else { return }
+        freePlayLayout.removeValue(forKey: cardID)
+        faceDownCards.remove(cardID)
+        emit(engine.apply(.freeMoveCard(cardID: cardID, to: zone, x: 0, y: 0, rotation: 0),
+                          from: seat))
+    }
+
+    /// Free play reset: everything back into one shuffled deck.
+    func gatherAndShuffle() {
+        freePlayLayout = [:]
+        faceDownCards = []
+        seatByPlayedCard = [:]
+        tableAction(.newDeal)
     }
 
     // MARK: inbound

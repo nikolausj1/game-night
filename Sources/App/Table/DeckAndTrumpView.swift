@@ -27,15 +27,33 @@ struct DeckAndTrumpView: View {
     private var deckStack: some View {
         let isFreePlay = state.gameKind == .freePlay
         let width: CGFloat = isFreePlay ? 116 : 96
+        let layers = min(isFreePlay ? 5 : 3, max(deckCount, 1))
         return ZStack {
-            // Offset backs suggest the pile's thickness; the count does the
-            // honest bookkeeping. Free play gets a fatter, grabbable stack.
-            ForEach(0..<min(isFreePlay ? 5 : 3, max(deckCount, 1)), id: \.self) { layer in
-                CardView(card: Card(id: "deck\(layer)", kind: .standard(suit: .spades, rank: 2)),
-                         faceUp: false)
-                    .frame(width: width)
-                    .offset(x: CGFloat(layer) * -2.5, y: CGFloat(layer) * -3)
-                    .rotationEffect(.degrees(Double(layer) * -1.2))
+            // Buried cards show only their paper EDGES — plain stock, no
+            // art — so the pile reads as one deck, not interleaved cards.
+            // Only the top card wears the printed back.
+            ForEach(0..<layers, id: \.self) { layer in
+                if layer == layers - 1 {
+                    CardView(card: Card(id: "deck\(layer)", kind: .standard(suit: .spades, rank: 2)),
+                             faceUp: false)
+                        .frame(width: width)
+                        .offset(x: CGFloat(layer) * -2.0, y: CGFloat(layer) * -2.5)
+                        .rotationEffect(.degrees(Double(layer) * -0.8))
+                } else {
+                    RoundedRectangle(cornerRadius: CardStyle.cornerRadius(width: width),
+                                     style: .continuous)
+                        .fill(CardStyle.stockBottom)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: CardStyle.cornerRadius(width: width),
+                                             style: .continuous)
+                                .strokeBorder(.black.opacity(0.10), lineWidth: 0.5)
+                        )
+                        .aspectRatio(CardStyle.aspectRatio, contentMode: .fit)
+                        .frame(width: width)
+                        .shadow(color: .black.opacity(0.18), radius: 1.5, y: 1)
+                        .offset(x: CGFloat(layer) * -2.0, y: CGFloat(layer) * -2.5)
+                        .rotationEffect(.degrees(Double(layer) * -0.8))
+                }
             }
             if deckCount > 0 {
                 VStack(spacing: 4) {

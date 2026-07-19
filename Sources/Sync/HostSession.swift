@@ -44,9 +44,22 @@ final class HostSession: NSObject {
         advertiser.delegate = self
     }
 
-    func start() { advertiser.startAdvertisingPeer() }
+    private var heartbeat: Timer?
+
+    func start() {
+        advertiser.startAdvertisingPeer()
+        // Steady pulse so clients can tell a live table from a wedged
+        // session (their watchdog refreshes after 12 silent seconds).
+        heartbeat?.invalidate()
+        let timer = Timer(timeInterval: 4, repeats: true) { [weak self] _ in
+            self?.broadcast(.heartbeat)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        heartbeat = timer
+    }
 
     func stop() {
+        heartbeat?.invalidate()
         advertiser.stopAdvertisingPeer()
         session.disconnect()
         connectedPeers = []

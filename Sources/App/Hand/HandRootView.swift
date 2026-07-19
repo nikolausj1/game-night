@@ -3,6 +3,7 @@ import SwiftUI
 /// Phase router for a phone: connect → wait in lobby → bid → play → recap.
 struct HandRootView: View {
     @State private var client: GameClientController
+    @Environment(\.scenePhase) private var scenePhase
 
     init(playerName: String) {
         _client = State(initialValue: GameClientController(playerName: playerName))
@@ -14,6 +15,12 @@ struct HandRootView: View {
             content
         }
         .statusBarHidden()
+        .onChange(of: scenePhase) { _, phase in
+            // Coming back from the lock screen: the Multipeer session is
+            // dead even when it claims otherwise. Rebuild and rejoin —
+            // the host reseats us by device ID with our exact hand.
+            if phase == .active { client.session.refresh() }
+        }
     }
 
     @ViewBuilder
@@ -26,6 +33,22 @@ struct HandRootView: View {
                     if client.snapshot == nil {
                         client.adoptDemoSnapshot(DemoData.makeHandSnapshot())
                     }
+                }
+        } else if client.snapshot != nil {
+            // Mid-game blip: keep the hand on screen while the session
+            // rebuilds — losing your cards to a spinner feels like a crash.
+            connectedContent
+                .overlay(alignment: .top) {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small).tint(CardStyle.gold)
+                        Text("Reconnecting to the table…")
+                            .font(.footnote.weight(.semibold))
+                    }
+                    .foregroundStyle(CardStyle.stockTop)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Capsule().fill(.black.opacity(0.55)))
+                    .padding(.top, 52)
                 }
         } else {
             SearchingView(state: client.connectionState)

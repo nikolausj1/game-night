@@ -1,0 +1,34 @@
+# Generated project — project.yml is the source of truth
+*.xcodeproj
+
+# Build artifacts
+build/
+DerivedData/
+*.ipa
+*.xcarchive
+*.xcuserdata
+xcuserdata/
+
+# Working folders (Dropbox channels, not code)
+_inbox/
+_review/
+
+# Local docs with household details — never public
+Project Build Guide.md
+PRD Template.md
+Decisions Log.md
+Game Night PRD.md
+ExportOptions.plist
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# OS noise
+.DS_Store
+
+# Python tooling
+__pycache__/
+*.pyc
+.venv/

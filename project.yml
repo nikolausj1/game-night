@@ -1,0 +1,47 @@
+name: GameNight
+options:
+  bundleIdPrefix: com.levelup
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    DEVELOPMENT_TEAM: 6A4J2GTB6F
+    SWIFT_VERSION: "5.9"
+targets:
+  GameNight:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+        excludes:
+          - "App/Resources/Announcer/**"
+      # Folder reference (blue folder): announcer clips land in the bundle
+      # without re-running `xcodegen generate` (same pattern as Wizard Keeper).
+      - path: Sources/App/Resources/Announcer
+        type: folder
+        optional: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.levelup.gamenight
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: "0.1.0"
+    info:
+      path: Sources/App/Info.plist
+      properties:
+        CFBundleDisplayName: Game Night
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen: {}
+        NSLocalNetworkUsageDescription: "Game Night connects the phones and tablet at your table so cards can be dealt, played, and scored together."
+        NSBonjourServices:
+          - _gamenight._tcp
+          - _gamenight._udp
+        NSCameraUsageDescription: "Point the camera at the table's QR code to join the game."
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight

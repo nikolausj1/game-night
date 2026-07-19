@@ -6,6 +6,23 @@ import Foundation
 enum DemoData {
     static var wantsTableDemo: Bool { CommandLine.arguments.contains("-demoTable") }
     static var wantsHandDemo: Bool { CommandLine.arguments.contains("-demoHand") }
+    static var wantsFreePlayDemo: Bool { CommandLine.arguments.contains("-demoFreePlay") }
+
+    /// Solo free-play: one seat, a few cards drawn, a few played to the felt.
+    static func makeFreePlayEngine() -> HostEngine {
+        let seat = Seat(id: 0, playerName: "Justin", colorIndex: 0,
+                        isConnected: true, isHost: false)
+        let engine = HostEngine(seats: [seat], gameKind: .freePlay,
+                                rules: RulesConfig(), seed: 42)
+        _ = engine.apply(.startGame(.freePlay, RulesConfig(), seed: 42))
+        for _ in 0..<7 { _ = engine.apply(.drawCard, from: 0) }
+        for _ in 0..<4 {
+            if let card = engine.state.hands[0]?.first {
+                _ = engine.apply(.playCard(cardID: card.id, force: false), from: 0)
+            }
+        }
+        return engine
+    }
 
     static let names = ["Justin", "Sarah", "Vinny", "Chase"]
 

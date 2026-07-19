@@ -22,6 +22,9 @@ struct TableRootView: View {
             if DemoData.wantsTableDemo, host.state == nil {
                 host.adoptDemoEngine(DemoData.makeTableEngine())
             }
+            if DemoData.wantsFreePlayDemo, host.state == nil {
+                host.adoptDemoEngine(DemoData.makeFreePlayEngine())
+            }
         }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
     }

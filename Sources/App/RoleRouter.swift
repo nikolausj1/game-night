@@ -7,7 +7,7 @@ struct RoleRouter: View {
     enum Role { case undecided, table, hand }
 
     @State private var role: Role = {
-        if DemoData.wantsTableDemo { return .table }
+        if DemoData.wantsTableDemo || DemoData.wantsFreePlayDemo { return .table }
         if DemoData.wantsHandDemo { return .hand }
         // Sim-verify hook: -autoRole table|hand skips the picker.
         if let index = CommandLine.arguments.firstIndex(of: "-autoRole"),

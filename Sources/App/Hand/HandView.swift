@@ -136,9 +136,10 @@ struct HandView: View {
         VStack(spacing: 10) {
             Image(systemName: "chevron.up")
                 .font(.title3.weight(.semibold))
-            Text(isMyTurn ? "Swipe a card up to play" : "Waiting for your turn…")
+            Text(hintText)
                 .font(.system(.subheadline, design: .serif))
-            if client.snapshot?.gameKind == .crazyEights && isMyTurn {
+            if (client.snapshot?.gameKind == .crazyEights && isMyTurn)
+                || client.snapshot?.gameKind == .freePlay {
                 Button {
                     Haptics.tick()
                     client.drawCard()
@@ -155,6 +156,13 @@ struct HandView: View {
         }
         .foregroundStyle(.white.opacity(dragState.isDragging ? 0.9 : 0.35))
         .animation(.easeInOut(duration: 0.2), value: dragState.isDragging)
+    }
+
+    private var hintText: String {
+        if client.snapshot?.gameKind == .freePlay {
+            return "Swipe up to play — house rules apply"
+        }
+        return isMyTurn ? "Swipe a card up to play" : "Waiting for your turn…"
     }
 }
 

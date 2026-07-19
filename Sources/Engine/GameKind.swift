@@ -19,7 +19,9 @@ public enum GameKind: String, Codable, CaseIterable, Sendable {
         case .wizard: return 3
         case .ohHell: return 3
         case .crazyEights: return 2
-        case .freePlay: return 2
+        // 1 on purpose: solo free play is the "deal myself a hand and
+        // fiddle" test mode (and solitaire night is legitimate).
+        case .freePlay: return 1
         }
     }
 

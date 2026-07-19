@@ -13,6 +13,13 @@ struct DeckAndTrumpView: View {
             deckStack
             if let trump = state.round?.trumpCard {
                 trumpCard(trump)
+            } else if state.round != nil, state.gameKind.isTrickTaking {
+                Text("No trump")
+                    .font(.system(.caption, design: .serif).weight(.semibold))
+                    .foregroundStyle(CardStyle.gold)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(.black.opacity(0.4)))
             }
         }
     }

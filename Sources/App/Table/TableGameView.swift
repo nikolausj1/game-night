@@ -12,7 +12,11 @@ struct TableGameView: View {
                     seatPlates(state: state, size: geo.size)
                     DeckAndTrumpView(state: state)
                         .position(x: geo.size.width * 0.20, y: geo.size.height * 0.47)
-                    trickCards(state: state, size: geo.size)
+                    if state.gameKind == .freePlay {
+                        freePlayCards(state: state, size: geo.size)
+                    } else {
+                        trickCards(state: state, size: geo.size)
+                    }
                     phaseOverlay(state: state)
                 }
                 .onChange(of: state.phase) { _, newPhase in
@@ -59,6 +63,25 @@ struct TableGameView: View {
                     removal: .identity))
                 .animation(.spring(response: 0.5, dampingFraction: 0.8), value: sweeping)
                 .animation(.spring(response: 0.38, dampingFraction: 0.75), value: trick.count)
+        }
+    }
+
+    /// Free play: played cards pile up loosely in the middle of the felt,
+    /// newest on top, each settling at its own stable angle.
+    private func freePlayCards(state: GameState, size: CGSize) -> some View {
+        let recent = state.discardPile.suffix(14)
+        let cardWidth = min(size.width * 0.105, 120)
+        return ForEach(Array(recent.enumerated()), id: \.element.id) { index, card in
+            let jitter = TableGeometry.jitterDegrees(cardID: card.id)
+            let dx = TableGeometry.jitterDegrees(cardID: String(card.id.reversed())) / 90.0
+            let dy = TableGeometry.jitterDegrees(cardID: card.id + "y") / 110.0
+            CardView(card: card, faceUp: true)
+                .frame(width: cardWidth)
+                .rotationEffect(.degrees(jitter * 2.2))
+                .position(x: (0.52 + dx) * size.width, y: (0.47 + dy) * size.height)
+                .zIndex(Double(index))
+                .transition(.offset(y: 60).combined(with: .scale(scale: 1.12)).combined(with: .opacity))
+                .animation(.spring(response: 0.38, dampingFraction: 0.75), value: state.discardPile.count)
         }
     }
 

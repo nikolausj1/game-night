@@ -25,24 +25,36 @@ struct DeckAndTrumpView: View {
     }
 
     private var deckStack: some View {
-        ZStack {
-            // Three offset backs suggest the pile's thickness; the count
-            // does the honest bookkeeping.
-            ForEach(0..<min(3, max(deckCount, 1)), id: \.self) { layer in
+        let isFreePlay = state.gameKind == .freePlay
+        let width: CGFloat = isFreePlay ? 116 : 96
+        return ZStack {
+            // Offset backs suggest the pile's thickness; the count does the
+            // honest bookkeeping. Free play gets a fatter, grabbable stack.
+            ForEach(0..<min(isFreePlay ? 5 : 3, max(deckCount, 1)), id: \.self) { layer in
                 CardView(card: Card(id: "deck\(layer)", kind: .standard(suit: .spades, rank: 2)),
                          faceUp: false)
-                    .frame(width: 96)
+                    .frame(width: width)
                     .offset(x: CGFloat(layer) * -2.5, y: CGFloat(layer) * -3)
                     .rotationEffect(.degrees(Double(layer) * -1.2))
             }
             if deckCount > 0 {
-                Text("\(deckCount)")
-                    .font(.caption.weight(.bold).monospacedDigit())
-                    .foregroundStyle(CardStyle.stockTop.opacity(0.85))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(.black.opacity(0.45)))
-                    .offset(y: 62)
+                VStack(spacing: 4) {
+                    Text("\(deckCount)")
+                        .font(.caption.weight(.bold).monospacedDigit())
+                        .foregroundStyle(CardStyle.stockTop.opacity(0.85))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(.black.opacity(0.45)))
+                    if isFreePlay {
+                        Text("Drag to a player to deal")
+                            .font(.system(.caption2, design: .serif).italic())
+                            .foregroundStyle(CardStyle.gold.opacity(0.9))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(.black.opacity(0.4)))
+                    }
+                }
+                .offset(y: isFreePlay ? 92 : 62)
             }
         }
         .opacity(deckCount == 0 ? 0.25 : 1)

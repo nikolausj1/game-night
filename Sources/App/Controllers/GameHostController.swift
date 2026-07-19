@@ -21,6 +21,10 @@ final class GameHostController {
     /// Table UI + announcer director subscribe here.
     var onEvents: (([GameEvent]) -> Void)?
 
+    /// Free play: which seat played each card, so the table can animate the
+    /// landing from the right edge. Table-side memory only, never synced.
+    private(set) var seatByPlayedCard: [String: Int] = [:]
+
     var state: GameState? { engine?.state }
 
     init(tableName: String = "Game Night Table") {
@@ -51,6 +55,12 @@ final class GameHostController {
     func tableAction(_ action: TableAction) {
         guard let engine else { return }
         emit(engine.apply(action))
+    }
+
+    /// The table itself deals: drag from the deck to a nameplate.
+    func drawCard(for seat: Int) {
+        guard let engine else { return }
+        emit(engine.apply(.drawCard, from: seat))
     }
 
     // MARK: inbound
@@ -104,6 +114,11 @@ final class GameHostController {
     /// After every mutation: events to everyone (and the table), then each
     /// seat its own private view of the world.
     private func emit(_ events: [GameEvent]) {
+        for event in events {
+            if case .cardPlayed(let seat, let card, _) = event {
+                seatByPlayedCard[card.id] = seat
+            }
+        }
         if !events.isEmpty {
             onEvents?(events)
             session.broadcast(.events(events))

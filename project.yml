@@ -46,8 +46,24 @@ targets:
         NSCameraUsageDescription: "Point the camera at the table's QR code to join the game."
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         UISupportedInterfaceOrientations~ipad:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        # External-display (AirPlay/HDMI) spectator scene. Deliberately
+        # omits a UIWindowSceneSessionRoleApplication entry: SwiftUI's App/
+        # WindowGroup supplies the default scene's own configuration when
+        # the manifest doesn't declare one for that role, so the main scene
+        # keeps launching exactly as before. Only ADD a role here if you
+        # also want to override the main scene — verified in the simulator
+        # (see Sources/App/External/ for the delegate).
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleExternalDisplayNonInteractive:
+              - UISceneConfigurationName: External Display
+                UISceneClassName: UIWindowScene
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).ExternalSceneDelegate

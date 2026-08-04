@@ -1,0 +1,337 @@
+import Foundation
+import Observation
+
+/// The one root-visible handle for dice mode. Dice games live entirely
+/// outside the card engine, so `host.state` stays nil while one runs —
+/// TableRootView switches on `DiceLauncher.shared.controller` instead:
+///
+///     if let dice = DiceLauncher.shared.controller {
+///         DiceTableView(controller: dice, onClose: { DiceLauncher.shared.end() })
+///     } else if host.state == nil { MenuView(host: host) } else { … }
+///
+/// MenuView calls `start(host:seats:)` from its deal button; `end()` sends
+/// every phone the "dice closed" sentinel and returns the table to the menu.
+@Observable
+final class DiceLauncher {
+    static let shared = DiceLauncher()
+    private(set) var controller: DiceGameController?
+
+    private init() {}
+
+    func start(host: GameHostController, seats: [SeatSpec]) {
+        guard controller == nil else { return }
+        controller = DiceGameController(host: host, seats: seats)
+    }
+
+    func end() {
+        controller?.end()
+        controller = nil
+    }
+}
+
+/// Left-Right-Center, table-side. Owns all rules state (chips, pot, turn),
+/// rolls the dice with a seeded RNG, drives bot turns, and pushes each
+/// phone its personalized `DiceClientState` after every mutation — the
+/// dice-world mirror of GameHostController's engine + emit loop.
+///
+/// LCR rules as implemented:
+/// - Everyone starts with 3 chips.
+/// - On your turn you roll `min(chips, 3)` dice. Faces per die: 3 sides
+///   dot, 1 left, 1 right, 1 center (p: dot 1/2, L 1/6, R 1/6, C 1/6).
+/// - L passes a chip to your left neighbor (next seat clockwise), R to
+///   your right neighbor, C into the center pot. Neighbors are immediate
+///   seats — a 0-chip neighbor can win chips back this way.
+/// - Players at 0 chips stay in the game but roll 0 dice: the turn skips
+///   them until a neighbor passes them something.
+/// - The game ends when exactly one player holds all the non-pot chips;
+///   the winner takes the pot.
+@Observable
+final class DiceGameController {
+    /// One chair in the dice game. Humans carry the deviceID of the phone
+    /// that holds the seat (mapped from the lobby, in lobby order, exactly
+    /// like `GameHostController.startGame(kind:rules:seats:)`).
+    struct DiceSeat: Identifiable {
+        let id: Int
+        let name: String
+        let isBot: Bool
+        let deviceID: String?
+        let colorIndex: Int
+    }
+
+    /// One roll in flight, for the table's physics layer. `faces` are the
+    /// authoritative results — the view tumbles the dice, then locks each
+    /// one to its face as it slows.
+    struct Roll: Equatable {
+        let id: Int
+        let seat: Int
+        let faces: [LcrFace]
+        let intensity: Double // 0.3…1.5
+    }
+
+    /// A chip movement resolved from the last roll. `to == nil` → the pot.
+    /// The table view animates these as chip flights.
+    struct ChipTransfer: Identifiable, Equatable {
+        let id: Int
+        let from: Int
+        let to: Int?
+    }
+
+    let kind: DiceGameKind = .leftRightCenter
+    private(set) var seats: [DiceSeat] = []
+    private(set) var chips: [Int] = []
+    private(set) var centerPot = 0
+    private(set) var turnSeat = 0
+    private(set) var gameOver = false
+    private(set) var winnerSeat: Int?
+    private(set) var currentRoll: Roll?
+    private(set) var lastTransfers: [ChipTransfer] = []
+    /// True from a roll until it resolves — the dice are still tumbling.
+    private(set) var rollInFlight = false
+    /// Monotonic bump on every mutation (same redraw-guarantee pattern as
+    /// GameHostController.stateVersion).
+    private(set) var stateVersion = 0
+
+    private let host: GameHostController
+    private var rng: SplitMix64
+    private var rollCounter = 0
+    private var transferCounter = 0
+
+    init(host: GameHostController, seats specs: [SeatSpec]) {
+        self.host = host
+        rng = SplitMix64(seed: UInt64.random(in: .min ... .max))
+
+        // Humans map onto connected lobby players in lobby order; bots get
+        // their roster color for life — both exactly as the card games do.
+        var built: [DiceSeat] = []
+        var deviceMap: [String: Int] = [:]
+        var humanIndex = 0
+        for (seatID, spec) in specs.enumerated() {
+            if spec.isBot {
+                let color = BotRoster.identity(named: spec.name)?.colorIndex ?? seatID
+                built.append(DiceSeat(id: seatID, name: spec.name, isBot: true,
+                                      deviceID: nil, colorIndex: color))
+            } else if humanIndex < host.lobbyPlayers.count {
+                let player = host.lobbyPlayers[humanIndex]
+                humanIndex += 1
+                let name = spec.name.isEmpty ? player.name : spec.name
+                deviceMap[player.deviceID] = seatID
+                built.append(DiceSeat(id: seatID, name: name, isBot: false,
+                                      deviceID: player.deviceID, colorIndex: seatID))
+            } else {
+                // Seat without a phone: playable from the table (tap the
+                // plate to roll), just never gets a cup.
+                built.append(DiceSeat(id: seatID, name: spec.name, isBot: false,
+                                      deviceID: nil, colorIndex: seatID))
+            }
+        }
+        seats = built
+        chips = Array(repeating: 3, count: built.count)
+
+        host.diceSeatByDevice = deviceMap
+        host.onDicePour = { [weak self] seat, intensity in
+            self?.roll(from: seat, intensity: intensity)
+        }
+
+        Announcer.shared.announceGameStart(playerNames: built.map(\.name))
+        broadcast()
+        scheduleBotIfNeeded()
+    }
+
+    /// Shared timing contract with DiceTableView's physics: how long the
+    /// dice tumble for a given pour intensity. The controller resolves the
+    /// roll (chips move, turn advances) just after this elapses.
+    static func settleDuration(intensity: Double) -> Double {
+        let norm = min(1, max(0, (intensity - 0.3) / 1.2))
+        return 1.2 + 1.0 * norm // 1.2…2.2s
+    }
+
+    // MARK: - Rolling
+
+    /// Single entry for every roll: phone pours, plate taps, and bots all
+    /// land here. Ignores anything that isn't the current turn.
+    func roll(from seat: Int, intensity rawIntensity: Double) {
+        guard !gameOver, !rollInFlight, seat == turnSeat,
+              seats.indices.contains(seat) else { return }
+        let count = min(chips[seat], 3)
+        guard count > 0 else { return } // turn skipping should prevent this
+
+        let intensity = min(1.5, max(0.3, rawIntensity))
+        var faces: [LcrFace] = []
+        for _ in 0..<count { faces.append(drawFace()) }
+
+        rollCounter += 1
+        let roll = Roll(id: rollCounter, seat: seat, faces: faces, intensity: intensity)
+        rollInFlight = true
+        currentRoll = roll
+        stateVersion += 1
+        TableSFX.shared.play(.dicePour)
+
+        // Resolve after the table's dice have settled (+ a beat to read them).
+        let delay = Self.settleDuration(intensity: intensity) + 0.35
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.resolve(rollID: roll.id)
+        }
+    }
+
+    /// One die: 3 dot sides, 1 left, 1 right, 1 center.
+    private func drawFace() -> LcrFace {
+        switch Int.random(in: 0..<6, using: &rng) {
+        case 0, 1, 2: return .dot
+        case 3: return .left
+        case 4: return .right
+        default: return .center
+        }
+    }
+
+    private func resolve(rollID: Int) {
+        guard let roll = currentRoll, roll.id == rollID, rollInFlight else { return }
+        rollInFlight = false
+
+        var transfers: [ChipTransfer] = []
+        let n = seats.count
+        for face in roll.faces {
+            guard chips[roll.seat] > 0 else { break } // defensive; can't overdraw
+            switch face {
+            case .dot:
+                continue
+            case .left:
+                chips[roll.seat] -= 1
+                let to = (roll.seat + 1) % n
+                chips[to] += 1
+                transferCounter += 1
+                transfers.append(ChipTransfer(id: transferCounter, from: roll.seat, to: to))
+            case .right:
+                chips[roll.seat] -= 1
+                let to = (roll.seat - 1 + n) % n
+                chips[to] += 1
+                transferCounter += 1
+                transfers.append(ChipTransfer(id: transferCounter, from: roll.seat, to: to))
+            case .center:
+                chips[roll.seat] -= 1
+                centerPot += 1
+                transferCounter += 1
+                transfers.append(ChipTransfer(id: transferCounter, from: roll.seat, to: nil))
+            }
+        }
+        lastTransfers = transfers
+        if !transfers.isEmpty {
+            TableSFX.shared.play(.chipPass)
+            if transfers.contains(where: { $0.to == nil }) {
+                TableSFX.shared.play(.chipPlace)
+            }
+        }
+
+        checkGameOver(roller: roll.seat)
+        if !gameOver { advanceTurn() }
+        stateVersion += 1
+        broadcast()
+        scheduleBotIfNeeded()
+    }
+
+    /// Exactly one player holding all the non-pot chips ends the game; the
+    /// winner takes the pot. (Zero holders is unreachable in normal play —
+    /// the game would have ended a roll earlier — but defensively the
+    /// roller takes the pot back.)
+    private func checkGameOver(roller: Int) {
+        let holders = chips.indices.filter { chips[$0] > 0 }
+        guard holders.count <= 1 else { return }
+        let winner = holders.first ?? roller
+        gameOver = true
+        winnerSeat = winner
+        chips[winner] += centerPot
+        centerPot = 0
+        TableSFX.shared.play(.fanfareWin)
+        Announcer.shared.announceGameWon(winnerName: seats[winner].name, margin: 0)
+    }
+
+    /// Next seat clockwise, skipping anyone at 0 chips (they stay in the
+    /// game but can't roll until a neighbor feeds them).
+    private func advanceTurn() {
+        let n = seats.count
+        var next = (turnSeat + 1) % n
+        var hops = 0
+        while chips[next] == 0 && hops < n {
+            next = (next + 1) % n
+            hops += 1
+        }
+        turnSeat = next
+    }
+
+    /// Bots shake an imaginary cup for a moment, then pour.
+    private func scheduleBotIfNeeded() {
+        guard !gameOver, !rollInFlight, seats[turnSeat].isBot else { return }
+        let expectedTurn = turnSeat
+        let expectedVersion = stateVersion
+        let delay = Double.random(in: 1.2...2.0)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, !self.gameOver, !self.rollInFlight,
+                  self.turnSeat == expectedTurn,
+                  self.stateVersion == expectedVersion else { return }
+            self.roll(from: expectedTurn, intensity: .random(in: 0.5...1.1))
+        }
+    }
+
+    /// Fresh game, same table: chips back to 3, pot cleared, loser of
+    /// nothing — the winner rolls first next game.
+    func restart() {
+        guard gameOver else { return }
+        chips = Array(repeating: 3, count: seats.count)
+        centerPot = 0
+        gameOver = false
+        turnSeat = winnerSeat ?? 0
+        winnerSeat = nil
+        currentRoll = nil
+        lastTransfers = []
+        stateVersion += 1
+        TableSFX.shared.play(.shuffle)
+        broadcast()
+        scheduleBotIfNeeded()
+    }
+
+    // MARK: - Outbound
+
+    /// Every phone gets its own personalized state after every mutation.
+    private func broadcast() {
+        let names = seats.map(\.name)
+        for seat in seats {
+            guard let deviceID = seat.deviceID else { continue }
+            let state = DiceClientState(
+                kind: kind, mySeat: seat.id, seatNames: names,
+                chips: chips, centerPot: centerPot, turnSeat: turnSeat,
+                isMyTurn: !gameOver && !rollInFlight && turnSeat == seat.id,
+                gameOver: gameOver, winnerSeat: winnerSeat)
+            host.sendDiceState(state, toDevice: deviceID)
+        }
+    }
+
+    /// Tear-down: every phone gets the "dice closed" sentinel (mySeat -1 →
+    /// GameClientController clears diceState, phone returns to the lobby),
+    /// and the host's dice routing is unhooked.
+    func end() {
+        let sentinel = DiceClientState(
+            kind: kind, mySeat: -1, seatNames: [], chips: [], centerPot: 0,
+            turnSeat: -1, isMyTurn: false, gameOver: true, winnerSeat: nil)
+        for seat in seats {
+            guard let deviceID = seat.deviceID else { continue }
+            host.sendDiceState(sentinel, toDevice: deviceID)
+        }
+        host.diceSeatByDevice = [:]
+        host.onDicePour = nil
+    }
+}
+
+/// Small seeded RNG (SplitMix64) so a dice game's rolls are reproducible
+/// from its seed — same philosophy as HostEngine's seeded deals.
+private struct SplitMix64: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) { state = seed }
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E3779B97F4A7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        return z ^ (z >> 31)
+    }
+}

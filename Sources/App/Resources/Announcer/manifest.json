@@ -316,6 +316,11 @@
   "trick_sweep",
   "chip_place",
   "table_knock",
-  "fanfare_win"
+  "fanfare_win",
+  "dice_rattle_1",
+  "dice_rattle_2",
+  "dice_rattle_3",
+  "dice_pour",
+  "chip_pass"
  ]
 }

@@ -57,6 +57,17 @@ struct HandRootView: View {
 
     @ViewBuilder
     private var connectedContent: some View {
+        if client.diceState != nil {
+            // Dice mode: the table is running a dice game — this phone is
+            // a dice cup, not a card hand.
+            DiceCupView(client: client)
+        } else {
+            cardContent
+        }
+    }
+
+    @ViewBuilder
+    private var cardContent: some View {
         switch client.snapshot?.phase {
         case nil, .lobby:
             LobbyWaitView(playerName: client.playerName)

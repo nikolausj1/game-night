@@ -7,6 +7,9 @@ struct MenuView: View {
     @Bindable var host: GameHostController
 
     @State private var selectedGame: GameKind = .wizard
+    /// Dice mode (L·R·C) selected in the picker. Dice games live outside
+    /// GameKind — this flag trumps `selectedGame` while set.
+    @State private var diceSelected = false
     @State private var rules = RulesConfig()
     @State private var botDrafts: [BotSeatDraft] = []
     @State private var savedGames: [SavedGame] = []
@@ -15,9 +18,14 @@ struct MenuView: View {
     /// Sim-verify hook: -autoStart deals free play as soon as anyone sits.
     private var autoStarts: Bool { CommandLine.arguments.contains("-autoStart") }
 
+    /// LCR seat window; also .wizard's, which is why the seats builder
+    /// gets .wizard for its limits while dice mode is selected.
+    private static let diceSeatRange = 3...6
+
     private var totalSeats: Int { host.lobbyPlayers.count + botDrafts.count }
     private var canStart: Bool {
-        totalSeats >= selectedGame.minPlayers && totalSeats <= selectedGame.maxPlayers
+        if diceSelected { return Self.diceSeatRange.contains(totalSeats) }
+        return totalSeats >= selectedGame.minPlayers && totalSeats <= selectedGame.maxPlayers
     }
 
     var body: some View {
@@ -33,9 +41,12 @@ struct MenuView: View {
 
                     gamePicker
 
-                    SeatsBuilderView(host: host, game: selectedGame, botDrafts: $botDrafts)
+                    // Dice games use the same seats builder; .wizard shares
+                    // LCR's 3–6 seat window, so its limits stand in.
+                    SeatsBuilderView(host: host, game: diceSelected ? .wizard : selectedGame,
+                                     botDrafts: $botDrafts)
 
-                    if selectedGame.hasHouseRules {
+                    if !diceSelected && selectedGame.hasHouseRules {
                         RulesPanelView(game: selectedGame, rules: $rules)
                             .frame(maxWidth: 480)
                             .padding(.horizontal, 40)
@@ -56,6 +67,13 @@ struct MenuView: View {
                 botDrafts.removeLast(botDrafts.count - allowed)
             }
         }
+        .onChange(of: diceSelected) { _, isDice in
+            guard isDice else { return }
+            let allowed = max(0, Self.diceSeatRange.upperBound - host.lobbyPlayers.count)
+            if botDrafts.count > allowed {
+                botDrafts.removeLast(botDrafts.count - allowed)
+            }
+        }
         .onChange(of: host.lobbyPlayers.count) { _, count in
             guard autoStarts, count >= 1 else { return }
             let seats = host.lobbyPlayers.enumerated().map {
@@ -70,6 +88,14 @@ struct MenuView: View {
                     SeatSpec(id: $0.offset, name: $0.element.name, isBot: true)
                 }
                 host.startGame(kind: .uno, rules: RulesConfig(), seats: bots)
+            }
+            // Sim-verify hook: an all-bot L·R·C game — dice physics on film.
+            if CommandLine.arguments.contains("-autoStartLcr"),
+               DiceLauncher.shared.controller == nil {
+                let bots = BotRoster.random(count: 3).enumerated().map {
+                    SeatSpec(id: $0.offset, name: $0.element.name, isBot: true)
+                }
+                DiceLauncher.shared.start(host: host, seats: bots)
             }
         }
         .sheet(isPresented: $showSettings) { SettingsView() }
@@ -107,12 +133,20 @@ struct MenuView: View {
     private var gamePicker: some View {
         HStack(spacing: 14) {
             ForEach(GameKind.allCases, id: \.self) { kind in
-                GameChip(kind: kind, isSelected: selectedGame == kind) {
+                GameChip(kind: kind, isSelected: !diceSelected && selectedGame == kind) {
                     Haptics.tick()
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { selectedGame = kind }
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        diceSelected = false
+                        selectedGame = kind
+                    }
                 }
             }
-            DiceComingSoonChip()
+            DiceGameChip(isSelected: diceSelected) {
+                Haptics.tick()
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    diceSelected = true
+                }
+            }
         }
     }
 
@@ -120,9 +154,9 @@ struct MenuView: View {
 
     private var dealButton: some View {
         Button {
-            dealTheCards()
+            if diceSelected { rollTheDice() } else { dealTheCards() }
         } label: {
-            Text(canStart ? "Deal the cards" : neededLabel)
+            Text(canStart ? (diceSelected ? "Roll the dice" : "Deal the cards") : neededLabel)
                 .font(.title2.weight(.bold))
                 .padding(.horizontal, 44)
                 .padding(.vertical, 16)
@@ -135,19 +169,36 @@ struct MenuView: View {
     }
 
     private var neededLabel: String {
-        let need = selectedGame.minPlayers - totalSeats
-        return need > 0 ? "Waiting for \(need) more…" : "Too many for \(selectedGame.displayName)"
+        let minSeats = diceSelected ? Self.diceSeatRange.lowerBound : selectedGame.minPlayers
+        let need = minSeats - totalSeats
+        let gameName = diceSelected ? "L·R·C" : selectedGame.displayName
+        return need > 0 ? "Waiting for \(need) more…" : "Too many for \(gameName)"
     }
 
-    private func dealTheCards() {
+    /// One shared seat list for cards and dice: humans in lobby order,
+    /// then the drafted bots.
+    private var seatSpecs: [SeatSpec] {
         let humans = host.lobbyPlayers.enumerated().map {
             SeatSpec(id: $0.offset, name: $0.element.name, isBot: false)
         }
         let bots = botDrafts.enumerated().map {
             SeatSpec(id: humans.count + $0.offset, name: $0.element.name, isBot: true)
         }
+        return humans + bots
+    }
+
+    private func dealTheCards() {
         Haptics.arm()
-        host.startGame(kind: selectedGame, rules: rules, seats: humans + bots)
+        host.startGame(kind: selectedGame, rules: rules, seats: seatSpecs)
+        botDrafts = []
+    }
+
+    /// Dice mode never touches the card engine: DiceLauncher spins up a
+    /// DiceGameController and TableRootView switches to DiceTableView on
+    /// `DiceLauncher.shared.controller != nil` (host.state stays nil).
+    private func rollTheDice() {
+        Haptics.arm()
+        DiceLauncher.shared.start(host: host, seats: seatSpecs)
         botDrafts = []
     }
 
@@ -194,30 +245,28 @@ private struct GameChip: View {
     }
 }
 
-/// The Dice game doesn't exist yet — the card is here so the picker reads
-/// as a roster with more coming, not a finished set.
-private struct DiceComingSoonChip: View {
+/// The first dice game: Left-Right-Center. Same silhouette as GameChip,
+/// but dice games live outside GameKind so it carries its own selection.
+private struct DiceGameChip: View {
+    let isSelected: Bool
+    let onTap: () -> Void
+
     var body: some View {
-        VStack(spacing: 6) {
-            Text("🎲")
-                .font(.system(size: 30))
-            Text("Dice")
-                .font(.system(.headline, design: .serif))
-            Text("coming soon")
-                .font(.system(size: 10, design: .serif))
-                .foregroundStyle(CardStyle.stockTop.opacity(0.55))
+        Button(action: onTap) {
+            VStack(spacing: 6) {
+                Text("🎲")
+                    .font(.system(size: 30))
+                Text("L·R·C")
+                    .font(.system(.headline, design: .serif))
+            }
+            .foregroundStyle(isSelected ? CardStyle.ink : CardStyle.stockTop)
+            .frame(width: 130, height: 88)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(isSelected ? CardStyle.gold : .white.opacity(0.10))
+            )
         }
-        .foregroundStyle(CardStyle.stockTop.opacity(0.35))
-        .frame(width: 130, height: 88)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.white.opacity(0.04))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(CardStyle.stockTop.opacity(0.18),
-                                      style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
-                )
-        )
+        .buttonStyle(.plain)
     }
 }
 

@@ -32,6 +32,11 @@ final class TableSFX {
         case chipPlace = "chip_place"
         case tableKnock = "table_knock"
         case fanfareWin = "fanfare_win"
+        /// Dice spilling out of the cup onto the felt (dice mode;
+        /// `tools/generate_dice_sfx.py`).
+        case dicePour = "dice_pour"
+        /// A chip sliding/passing between players (LCR transfers).
+        case chipPass = "chip_pass"
     }
 
     /// Polite default playback volumes per effect (0...1) — the
@@ -47,6 +52,8 @@ final class TableSFX {
         .chipPlace: 0.45,
         .tableKnock: 0.5,
         .fanfareWin: 0.7,
+        .dicePour: 0.65,
+        .chipPass: 0.45,
     ]
 
     /// One preloaded, prepared player per effect that resolved at init.

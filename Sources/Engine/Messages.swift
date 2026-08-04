@@ -29,6 +29,13 @@ public enum NetMessage: Codable, Sendable, Equatable {
     /// the flick velocity in points/sec on the thrower's screen. The table
     /// uses it to give the card a matching slide; the engine never sees it.
     case throwInfo(cardID: String, vx: Double, vy: Double)
+    /// Dice mode, phone → table: the pour. `intensity` (0.3…1.5) scales the
+    /// table-side launch velocity and tumble time. The dice results are
+    /// rolled on the table (seeded RNG), never on the phone.
+    case dicePour(intensity: Double)
+    /// Dice mode, table → each phone: that seat's personalized view of the
+    /// dice game (see DiceClientState).
+    case diceState(DiceClientState)
 }
 
 public enum NetCodec {

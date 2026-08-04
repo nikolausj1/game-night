@@ -89,16 +89,51 @@ struct CardFaceView: View {
         }
     }
 
+    /// Ornate scanned-art center for the ace of spades when the asset is
+    /// bundled; otherwise the plain typographic pip.
     private func aceCenter(suit: Suit, width w: CGFloat) -> some View {
-        Text(suit.symbol)
-            .font(.system(size: w * 0.52))
-            .shadow(color: .black.opacity(0.12), radius: w * 0.008, y: w * 0.006)
+        Group {
+            if suit == .spades, UIImage(named: "AceOfSpadesArt") != nil {
+                Image("AceOfSpadesArt")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: w * 0.6)
+            } else {
+                Text(suit.symbol)
+                    .font(.system(size: w * 0.52))
+            }
+        }
+        .shadow(color: .black.opacity(0.12), radius: w * 0.008, y: w * 0.006)
     }
 
-    /// Typographic court cards: ornate frame, large serif letter, mirrored
-    /// pips. Deliberate art direction — richer than clip-art royals.
+    /// Maps a court rank/suit to its bundled art asset name, e.g. "Court_KS"
+    /// for the king of spades. Returns nil for non-court ranks.
+    private func courtAssetName(suit: Suit, rank: Int) -> String? {
+        let rankLetter: String
+        switch rank {
+        case 11: rankLetter = "J"
+        case 12: rankLetter = "Q"
+        case 13: rankLetter = "K"
+        default: return nil
+        }
+        let suitLetter: String
+        switch suit {
+        case .spades: suitLetter = "S"
+        case .hearts: suitLetter = "H"
+        case .diamonds: suitLetter = "D"
+        case .clubs: suitLetter = "C"
+        }
+        return "Court_\(rankLetter)\(suitLetter)"
+    }
+
+    /// Court cards: ornate gold frame stays constant; inside it renders the
+    /// bundled traditional court-figure art when available, falling back to
+    /// the typographic letter/pips design when the asset is missing.
     private func courtCenter(suit: Suit, rank: Int, width w: CGFloat) -> some View {
         let color = CardStyle.inkColor(for: suit)
+        let frameW = w * 0.52
+        let frameH = w * 0.78
+        let assetName = courtAssetName(suit: suit, rank: rank)
         return ZStack {
             RoundedRectangle(cornerRadius: w * 0.04, style: .continuous)
                 .strokeBorder(CardStyle.gold.opacity(0.85), lineWidth: max(1, w * 0.010))
@@ -106,15 +141,23 @@ struct CardFaceView: View {
                     RoundedRectangle(cornerRadius: w * 0.04, style: .continuous)
                         .fill(color.opacity(0.055))
                 )
-                .frame(width: w * 0.52, height: w * 0.78)
-            VStack(spacing: w * 0.015) {
-                Text(suit.symbol).font(.system(size: w * 0.11))
-                Text(indexLabel(rank))
-                    .font(.system(size: w * 0.34, weight: .bold, design: .serif))
-                Text(suit.symbol).font(.system(size: w * 0.11))
-                    .rotationEffect(.degrees(180))
+                .frame(width: frameW, height: frameH)
+            if let assetName, UIImage(named: assetName) != nil {
+                Image(assetName)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: frameW * 0.92, height: frameH * 0.92)
+                    .clipShape(RoundedRectangle(cornerRadius: w * 0.03, style: .continuous))
+            } else {
+                VStack(spacing: w * 0.015) {
+                    Text(suit.symbol).font(.system(size: w * 0.11))
+                    Text(indexLabel(rank))
+                        .font(.system(size: w * 0.34, weight: .bold, design: .serif))
+                    Text(suit.symbol).font(.system(size: w * 0.11))
+                        .rotationEffect(.degrees(180))
+                }
+                .foregroundStyle(color)
             }
-            .foregroundStyle(color)
         }
     }
 

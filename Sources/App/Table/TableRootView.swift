@@ -7,10 +7,15 @@ struct TableRootView: View {
     @State private var autoSave = GameStateAutoSaveHolder()
     @State private var bots = BotDirector()
 
+    /// Dice games live outside the card engine; the launcher is the switch.
+    @State private var diceLauncher = DiceLauncher.shared
+
     var body: some View {
         ZStack {
             TableSurface()
-            if host.state == nil {
+            if let dice = diceLauncher.controller {
+                DiceTableView(controller: dice, onClose: { diceLauncher.end() })
+            } else if host.state == nil {
                 MenuView(host: host)
             } else {
                 TableGameView(host: host, onClose: {
@@ -31,6 +36,7 @@ struct TableRootView: View {
             announcer.wire(to: host)
             autoSave.wire(to: host)
             bots.wire(to: host)
+            SharedHost.controller = host // TV spectator reads through this
             if DemoData.wantsTableDemo, host.state == nil {
                 host.adoptDemoEngine(DemoData.makeTableEngine())
             }

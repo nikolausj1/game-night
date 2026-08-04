@@ -16,6 +16,10 @@ final class GameClientController {
     private(set) var pendingIllegal: (cardID: String, reason: String)?
     /// Recent events, for hand-side animation triggers.
     private(set) var recentEvents: [GameEvent] = []
+    /// Dice mode: set while the table runs a dice game, nil otherwise —
+    /// snapshot-driven card UI takes priority when this is nil.
+    /// HandRootView routes to DiceCupView whenever it's non-nil.
+    private(set) var diceState: DiceClientState?
 
     var connectionState: ClientSession.ConnectionState { session.connectionState }
 
@@ -84,7 +88,12 @@ final class GameClientController {
             mySeat = seat
         case .snapshot(let snap):
             snapshot = snap
+            diceState = nil // a card game superseded dice mode
             runAutoPlayIfAsked(snap)
+        case .diceState(let state):
+            // mySeat < 0 is the "dice game closed" sentinel from the table
+            // — clears dice mode and drops the phone back to the lobby.
+            diceState = state.mySeat >= 0 ? state : nil
         case .events(let events):
             recentEvents = events
             for event in events {
@@ -97,7 +106,7 @@ final class GameClientController {
             }
         case .rejected(let reason):
             lastRejection = reason
-        case .hello, .seatClaim, .action, .heartbeat, .throwInfo:
+        case .hello, .seatClaim, .action, .heartbeat, .throwInfo, .dicePour:
             break // client-outbound only
         }
     }

@@ -5,6 +5,10 @@ import SwiftUI
 struct TableGameView: View {
     @Bindable var host: GameHostController
 
+    /// TV/external-display mode: pure rendering — no gestures, no buttons,
+    /// and crucially no auto-advance (the real table owns the game clock).
+    var isSpectator: Bool = false
+
     /// Free play: a card back being dragged off the deck toward a plate.
     @State private var dealDragLocation: CGPoint?
     /// The deal confirmation: one motion from the RELEASE POINT to the
@@ -71,7 +75,7 @@ struct TableGameView: View {
                         dealVisuals(state: state, size: geo.size)
                     }
                     phaseOverlay(state: state)
-                    if showCloseButton {
+                    if showCloseButton, !isSpectator {
                         HoldToCloseButton(progress: $closeRingProgress) {
                             onClose?()
                         }
@@ -79,7 +83,9 @@ struct TableGameView: View {
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                     }
                 }
+                .allowsHitTesting(!isSpectator)
                 .onChange(of: state.phase) { _, newPhase in
+                    guard !isSpectator else { return }
                     autoAdvance(from: newPhase)
                 }
                 .onChange(of: state.discardPile.count) { _, _ in
@@ -359,34 +365,97 @@ struct TableGameView: View {
         }
     }
 
-    /// UNO / Crazy Eights: the discard is the heart of the table. Top few
-    /// cards stacked with settle jitter; each new play slides in from its
-    /// player's edge on the felt-friction curve.
+    /// UNO / Crazy Eights: the discard is the heart of the table. Every
+    /// play travels the whole way — off the thrower's edge, across the
+    /// felt, then PLACED on top of the pile: it overshoots a touch high
+    /// and drops flat like a hand letting go of a card.
+    /// Explicit two-phase animation (never a SwiftUI transition — those
+    /// proved unreliable for network-driven insertions).
+    @State private var shedPoses: [String: CGPoint] = [:]      // current render pos
+    @State private var shedRotations: [String: Double] = [:]
+    @State private var shedElevations: [String: CGFloat] = [:] // >0 while airborne
+    @State private var shedSeen: Set<String> = []
+
     private func shedPile(state: GameState, size: CGSize) -> some View {
-        let anchors = effectiveAnchors(state)
         let recent = state.discardPile.suffix(4)
         let cardWidth = min(size.width * 0.125, 140)
-        let pileCenter = CGPoint(x: 0.52 * size.width, y: 0.47 * size.height)
         return ForEach(Array(recent.enumerated()), id: \.element.id) { index, card in
             let jitter = TableGeometry.jitterDegrees(cardID: card.id)
-            let entryOffset: CGSize = {
-                guard let seat = host.seatByPlayedCard[card.id],
-                      anchors.indices.contains(seat) else { return CGSize(width: 0, height: 90) }
-                let anchor = anchors[seat]
-                return CGSize(width: ((anchor.x - 0.5) * 1.22 + 0.5) * size.width - pileCenter.x,
-                              height: ((anchor.y - 0.47) * 1.22 + 0.47) * size.height - pileCenter.y)
-            }()
-            CardView(card: card, faceUp: true)
+            let restPos = CGPoint(
+                x: 0.52 * size.width + CGFloat(jitter) * 0.35,
+                y: 0.47 * size.height + CGFloat(TableGeometry.jitterDegrees(cardID: card.id + "y")) * 0.3)
+            CardView(card: card, faceUp: true,
+                     elevation: shedElevations[card.id] ?? 0)
                 .frame(width: cardWidth)
-                .rotationEffect(.degrees(jitter * 1.8))
-                .position(x: pileCenter.x + CGFloat(jitter) * 0.35,
-                          y: pileCenter.y + CGFloat(TableGeometry.jitterDegrees(cardID: card.id + "y")) * 0.3)
-                .zIndex(Double(index))
-                .transition(.asymmetric(
-                    insertion: .offset(entryOffset).combined(with: .scale(scale: 1.12))
-                        .animation(FeltPhysics.slide(duration: 0.45)),
-                    removal: .opacity))
-                .animation(FeltPhysics.slide(duration: 0.45), value: state.discardPile.count)
+                .rotationEffect(.degrees(shedRotations[card.id] ?? jitter * 1.8))
+                .position(shedPoses[card.id] ?? restPos)
+                .zIndex((shedElevations[card.id] ?? 0) > 0 ? 400 : Double(index))
+                .onAppear { animateShedArrival(card: card, restPos: restPos,
+                                               restRotation: jitter * 1.8,
+                                               state: state, size: size) }
+        }
+        .onChange(of: state.discardPile.count) { _, _ in
+            let current = Set(state.discardPile.map(\.id))
+            shedSeen.formIntersection(current)
+            shedPoses = shedPoses.filter { current.contains($0.key) }
+            shedRotations = shedRotations.filter { current.contains($0.key) }
+        }
+    }
+
+    /// Edge → glide across the felt → hang a beat above the pile → drop
+    /// flat. The drop is the "someone set it down" moment: elevation and
+    /// the last few points of travel land together with a crisp spring.
+    private func animateShedArrival(card: Card, restPos: CGPoint,
+                                    restRotation: Double,
+                                    state: GameState, size: CGSize) {
+        guard !shedSeen.contains(card.id) else { return }
+        shedSeen.insert(card.id)
+        // Cards already down when this view appeared (resume, rejoin)
+        // don't replay their landing.
+        guard card.id == state.discardPile.last?.id else {
+            shedPoses[card.id] = restPos
+            shedRotations[card.id] = restRotation
+            return
+        }
+
+        let anchors = effectiveAnchors(state)
+        let seat = host.seatByPlayedCard[card.id]
+        let entry: CGPoint = {
+            guard let seat, anchors.indices.contains(seat) else {
+                return CGPoint(x: restPos.x, y: size.height * 1.08)
+            }
+            let anchor = anchors[seat]
+            return CGPoint(x: ((anchor.x - 0.5) * 1.22 + 0.5) * size.width,
+                           y: ((anchor.y - 0.47) * 1.22 + 0.47) * size.height)
+        }()
+        // Approach point: just short of the pile, still airborne.
+        let approach = CGPoint(x: restPos.x + (entry.x - restPos.x) * 0.12,
+                               y: restPos.y + (entry.y - restPos.y) * 0.12)
+
+        // Phase 0: materialize at the thrower's edge, high and spinning.
+        shedPoses[card.id] = entry
+        shedRotations[card.id] = restRotation - TableGeometry.jitterDegrees(cardID: card.id) * 3.5
+        shedElevations[card.id] = 0.9
+
+        let travel = hypot(restPos.x - entry.x, restPos.y - entry.y)
+        let glide = 0.30 + Double(travel / size.width) * 0.28
+
+        DispatchQueue.main.async {
+            // Phase 1: the flight — friction curve across the felt, card
+            // stays lifted, spin unwinding.
+            withAnimation(FeltPhysics.slide(duration: glide)) {
+                shedPoses[card.id] = approach
+                shedRotations[card.id] = restRotation
+                shedElevations[card.id] = 0.35
+            }
+            // Phase 2: the placement — last inch + drop, crisp and springy,
+            // shadows snapping to contact.
+            DispatchQueue.main.asyncAfter(deadline: .now() + glide * 0.92) {
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.68)) {
+                    shedPoses[card.id] = restPos
+                    shedElevations[card.id] = 0
+                }
+            }
         }
     }
 

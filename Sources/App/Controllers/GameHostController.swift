@@ -43,6 +43,24 @@ final class GameHostController {
     /// card. Consumed once by the physics when the card lands.
     var throwVelocityByCard: [String: CGSize] = [:]
 
+    /// Dice mode (dice games live OUTSIDE the card engine — see
+    /// App/Dice/DiceGameController): deviceID → dice seat, set by the dice
+    /// controller when a dice game starts and cleared when it ends. Plays
+    /// `seatByDevice`'s role for routing `.dicePour`, kept separate so dice
+    /// never disturb the card-game reclaim table.
+    var diceSeatByDevice: [String: Int] = [:]
+    /// A phone poured its dice cup: (dice seat, intensity 0.3…1.5).
+    var onDicePour: ((Int, Double) -> Void)?
+
+    /// Dice mode outbound: the per-seat dice state to whichever peer
+    /// currently holds `deviceID` (same deviceID-keyed routing as
+    /// snapshots — survives reconnects with fresh peer identities).
+    func sendDiceState(_ state: DiceClientState, toDevice deviceID: String) {
+        for (peer, device) in deviceByPeer where device == deviceID {
+            session.send(.diceState(state), to: [peer])
+        }
+    }
+
     /// Free play, table-local physics: where the humans have slid each
     /// card (normalized coords) and which they've flipped face-down.
     var freePlayLayout: [String: CGPoint] = [:]
@@ -224,10 +242,17 @@ final class GameHostController {
             throwVelocityByCard[cardID] = CGSize(width: vx, height: vy)
             if throwVelocityByCard.count > 64 { throwVelocityByCard.removeAll() } // stale-flick hygiene
 
+        case .dicePour(let intensity):
+            // Same deviceID-keyed routing as .action, against the dice
+            // seat table (the card-game seatByDevice is empty in dice mode).
+            guard let deviceID = deviceByPeer[peer],
+                  let seat = diceSeatByDevice[deviceID] else { return }
+            onDicePour?(seat, intensity)
+
         case .seatClaim, .heartbeat:
             break // lobby order is claim order in v1; heartbeats unused (MCSession states suffice)
 
-        case .welcome, .snapshot, .events, .rejected:
+        case .welcome, .snapshot, .events, .rejected, .diceState:
             break // host-outbound only
         }
     }

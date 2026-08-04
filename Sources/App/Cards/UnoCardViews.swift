@@ -1,10 +1,12 @@
 import SwiftUI
 
-/// Programmatic UNO cards — no image assets, drawn to read as the real thing
-/// at a glance: saturated color field, white card-stock border, the
-/// signature tilted white ellipse, a bold central glyph with an offset
-/// drop-shadow, and small rotated corner indices. Personal-use app, never
-/// App Store, so this leans hard into faithful recreation over abstraction.
+/// Programmatic UNO cards — no image assets, drawn to read as the modern
+/// printed deck at a glance: saturated color field to a thin white
+/// card-stock border, a tilted white OUTLINE ring (not a filled ellipse),
+/// and a bold white glyph with a heavy black outline plus a solid black
+/// "3D base" shadow offset down-left, like ink printed slightly off-register.
+/// Personal-use app, never App Store, so this leans hard into faithful
+/// recreation over abstraction.
 
 // MARK: - Palette
 
@@ -67,98 +69,62 @@ struct UnoCardFaceView: View {
     private func centerArt(width w: CGFloat) -> some View {
         ZStack {
             ellipseOrWheel(width: w)
-            glyph(width: w, big: true)
+            glyph(width: w)
         }
     }
 
+    /// The signature tilted ellipse. On colored number/action cards it's a
+    /// thick WHITE OUTLINE RING (stroke, not fill) so the field color shows
+    /// through the middle. On wilds the ellipse itself becomes the glyph —
+    /// four color quadrants inside that same white ring.
     @ViewBuilder
     private func ellipseOrWheel(width w: CGFloat) -> some View {
         let ellipseW = w * 0.98
         let ellipseH = w * 0.62
         if case .wild = symbol {
-            // "wild = ellipse split into 4 color quadrants" — the ellipse
-            // itself becomes the glyph.
             WildWheel()
                 .frame(width: ellipseW, height: ellipseH)
-                .rotationEffect(.degrees(-28))
                 .overlay(
                     Ellipse()
-                        .stroke(.white, lineWidth: max(1, w * 0.012))
+                        .stroke(.white, lineWidth: max(1.5, w * 0.028))
                         .frame(width: ellipseW, height: ellipseH)
-                        .rotationEffect(.degrees(-28))
                 )
+                .rotationEffect(.degrees(-28))
         } else {
             Ellipse()
-                .fill(.white)
+                .stroke(.white, style: StrokeStyle(lineWidth: max(2, w * 0.045)))
                 .frame(width: ellipseW, height: ellipseH)
                 .rotationEffect(.degrees(-28))
-                .shadow(color: .black.opacity(0.20), radius: w * 0.012, y: w * 0.007)
         }
     }
 
     // MARK: central glyph
 
     @ViewBuilder
-    private func glyph(width w: CGFloat, big: Bool) -> some View {
+    private func glyph(width w: CGFloat) -> some View {
         switch symbol {
         case .number(let n):
-            numberGlyph(n, width: w, big: big)
+            BasedOutlinedText(text: "\(n)",
+                               font: .system(size: w * 0.46, weight: .heavy, design: .rounded),
+                               outlineWidth: max(1.5, w * 0.022),
+                               baseOffset: w * 0.035)
         case .skip:
-            SkipGlyph()
-                .frame(width: w * (big ? 0.40 : 0.15), height: w * (big ? 0.40 : 0.15))
-                .foregroundStyle(fieldColor)
+            SkipGlyph(outlineWidth: w * 0.022, baseOffset: w * 0.03)
+                .frame(width: w * 0.40, height: w * 0.40)
         case .reverse:
-            ReverseGlyph()
-                .frame(width: w * (big ? 0.52 : 0.20), height: w * (big ? 0.40 : 0.15))
-                .foregroundStyle(fieldColor)
+            ReverseGlyph(outlineWidth: w * 0.018, baseOffset: w * 0.03)
+                .frame(width: w * 0.56, height: w * 0.42)
         case .drawTwo:
-            drawTwoGlyph(width: w, big: big)
+            drawTwoGlyph(width: w)
         case .wild:
             EmptyView() // the wheel above IS the glyph
         case .wildDrawFour:
-            wildDrawFourGlyph(width: w, big: big)
+            wildDrawFourGlyph(width: w)
         }
     }
 
-    private func numberGlyph(_ n: Int, width w: CGFloat, big: Bool) -> some View {
-        Group {
-            if big {
-                ZStack {
-                    // Small color-matched oval so the number reads inside
-                    // the white ellipse rather than floating on it.
-                    Ellipse()
-                        .fill(fieldColor)
-                        .frame(width: w * 0.60, height: w * 0.38)
-                    dropShadowNumber(n, size: w * 0.46)
-                }
-            } else {
-                dropShadowNumber(n, size: w * 0.16, outlineOnly: true)
-            }
-        }
-    }
-
-    private func dropShadowNumber(_ n: Int, size: CGFloat, outlineOnly: Bool = false) -> some View {
-        VStack(spacing: 0) {
-            ZStack {
-                Text("\(n)")
-                    .font(.system(size: size, weight: .heavy, design: .rounded))
-                    .foregroundStyle(.black.opacity(0.32))
-                    .offset(x: size * 0.05, y: size * 0.06)
-                Text("\(n)")
-                    .font(.system(size: size, weight: .heavy, design: .rounded))
-                    .foregroundStyle(.white)
-            }
-            if n == 6 || n == 9 {
-                Rectangle()
-                    .fill(.white)
-                    .frame(width: size * 0.44, height: max(1, size * 0.05))
-                    .padding(.top, size * 0.02)
-            }
-        }
-    }
-
-    private func drawTwoGlyph(width w: CGFloat, big: Bool) -> some View {
-        let cardW = w * (big ? 0.30 : 0.12)
+    private func drawTwoGlyph(width w: CGFloat) -> some View {
+        let cardW = w * 0.30
         let cardH = cardW / CardStyle.aspectRatio
         return ZStack {
             miniCardOutline(width: cardW, height: cardH)
@@ -167,41 +133,37 @@ struct UnoCardFaceView: View {
             miniCardOutline(width: cardW, height: cardH)
                 .rotationEffect(.degrees(10))
                 .offset(x: cardW * 0.30, y: -cardH * 0.14)
-            plusText("+2", size: w * (big ? 0.26 : 0.11))
+            BasedOutlinedText(text: "+2",
+                               font: .system(size: w * 0.24, weight: .heavy, design: .rounded),
+                               outlineWidth: max(1.2, w * 0.016),
+                               baseOffset: w * 0.02)
         }
-        .foregroundStyle(fieldColor)
     }
 
-    private func wildDrawFourGlyph(width w: CGFloat, big: Bool) -> some View {
-        let cardW = w * (big ? 0.22 : 0.10)
+    private func wildDrawFourGlyph(width w: CGFloat) -> some View {
+        let cardW = w * 0.24
         let cardH = cardW / CardStyle.aspectRatio
-        let spread = w * (big ? 0.30 : 0.14)
-        let layout: [(dx: CGFloat, dy: CGFloat, angle: Double)] = [
-            (-1.5, 0.10, -14), (-0.5, -0.06, -5), (0.5, 0.06, 5), (1.5, -0.10, 14)
+        let outline = max(1, cardW * 0.09)
+        // Back-to-front z-order matches the reference: green sits furthest
+        // back, yellow tumbles out in front, bottom-left.
+        let layout: [(color: Color, dx: CGFloat, dy: CGFloat, angle: Double)] = [
+            (UnoStyle.green, 0.85, -0.85, 12),
+            (UnoStyle.blue, 0.30, -0.05, 6),
+            (UnoStyle.red, -0.30, 0.10, -6),
+            (UnoStyle.yellow, -0.85, 0.55, -10)
         ]
         return ZStack {
-            ForEach(Array(layout.enumerated()), id: \.offset) { i, spec in
+            ForEach(Array(layout.enumerated()), id: \.offset) { _, spec in
                 RoundedRectangle(cornerRadius: cardW * 0.16, style: .continuous)
-                    .fill(UnoStyle.allFour[i])
-                    .overlay(RoundedRectangle(cornerRadius: cardW * 0.16, style: .continuous)
-                        .strokeBorder(.white, lineWidth: max(0.5, cardW * 0.05)))
+                    .fill(spec.color)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: cardW * 0.16, style: .continuous)
+                            .strokeBorder(.black, lineWidth: outline)
+                    )
                     .frame(width: cardW, height: cardH)
                     .rotationEffect(.degrees(spec.angle))
-                    .offset(x: spec.dx * spread / 3, y: spec.dy * spread)
+                    .offset(x: spec.dx * w * 0.16, y: spec.dy * w * 0.16)
             }
-            plusText("+4", size: w * (big ? 0.22 : 0.095))
-                .foregroundStyle(.white)
-        }
-    }
-
-    private func plusText(_ s: String, size: CGFloat) -> some View {
-        ZStack {
-            Text(s)
-                .font(.system(size: size, weight: .heavy, design: .rounded))
-                .foregroundStyle(.black.opacity(0.30))
-                .offset(x: size * 0.05, y: size * 0.06)
-            Text(s)
-                .font(.system(size: size, weight: .heavy, design: .rounded))
         }
     }
 
@@ -210,7 +172,7 @@ struct UnoCardFaceView: View {
             .fill(.white)
             .overlay(
                 RoundedRectangle(cornerRadius: width * 0.18, style: .continuous)
-                    .strokeBorder(lineWidth: max(1, width * 0.10))
+                    .strokeBorder(.black, lineWidth: max(1, width * 0.10))
             )
             .frame(width: width, height: height)
     }
@@ -219,7 +181,6 @@ struct UnoCardFaceView: View {
 
     private func cornerIndex(width w: CGFloat) -> some View {
         cornerContent(width: w)
-            .foregroundStyle(.white)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(.leading, w * 0.075)
             .padding(.top, w * 0.05)
@@ -229,25 +190,49 @@ struct UnoCardFaceView: View {
     private func cornerContent(width w: CGFloat) -> some View {
         switch symbol {
         case .number(let n):
-            VStack(spacing: 0) {
-                Text("\(n)")
-                    .font(.system(size: w * 0.16, weight: .heavy, design: .rounded))
-                if n == 6 || n == 9 {
-                    Rectangle().frame(width: w * 0.07, height: max(1, w * 0.012))
-                }
+            VStack(spacing: w * 0.012) {
+                OutlinedText(text: "\(n)",
+                             font: .system(size: w * 0.16, weight: .heavy, design: .rounded),
+                             fillColor: .white,
+                             outlineColor: .black,
+                             outlineWidth: max(0.8, w * 0.013))
+                // Every corner index gets a printed "base bar" underline —
+                // on 6/9 it also disambiguates the 180°-rotated twin.
+                RoundedRectangle(cornerRadius: w * 0.008, style: .continuous)
+                    .fill(.white)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: w * 0.008, style: .continuous)
+                            .strokeBorder(.black, lineWidth: max(0.8, w * 0.011))
+                    )
+                    .frame(width: w * 0.10, height: max(2, w * 0.03))
             }
         case .skip:
-            SkipGlyph().frame(width: w * 0.13, height: w * 0.13)
+            SkipGlyph(outlineWidth: w * 0.01, baseOffset: 0)
+                .frame(width: w * 0.13, height: w * 0.13)
         case .reverse:
-            ReverseGlyph().frame(width: w * 0.17, height: w * 0.13)
+            ReverseGlyph(outlineWidth: w * 0.008, baseOffset: 0)
+                .frame(width: w * 0.19, height: w * 0.14)
         case .drawTwo:
-            Text("+2").font(.system(size: w * 0.135, weight: .heavy, design: .rounded))
+            OutlinedText(text: "+2",
+                         font: .system(size: w * 0.135, weight: .heavy, design: .rounded),
+                         fillColor: .white,
+                         outlineColor: .black,
+                         outlineWidth: max(0.8, w * 0.011))
         case .wild:
-            Circle()
-                .strokeBorder(lineWidth: max(1, w * 0.012))
-                .frame(width: w * 0.12, height: w * 0.12)
+            WildWheel()
+                .frame(width: w * 0.17, height: w * 0.11)
+                .overlay(
+                    Ellipse()
+                        .stroke(.white, lineWidth: max(0.8, w * 0.012))
+                        .frame(width: w * 0.17, height: w * 0.11)
+                )
+                .rotationEffect(.degrees(-28))
         case .wildDrawFour:
-            Text("+4").font(.system(size: w * 0.135, weight: .heavy, design: .rounded))
+            OutlinedText(text: "+4",
+                         font: .system(size: w * 0.135, weight: .heavy, design: .rounded),
+                         fillColor: .white,
+                         outlineColor: .black,
+                         outlineWidth: max(0.8, w * 0.011))
         }
     }
 }
@@ -256,6 +241,8 @@ struct UnoCardFaceView: View {
 
 /// A pie wedge of an ellipse's bounding rect — four of these, filled in the
 /// four UNO colors and clipped to an ellipse, form the wild-card wheel.
+/// Quadrant colors match the real card: red top-left, blue top-right,
+/// yellow bottom-left, green bottom-right (before the -28° card tilt).
 private struct PieSlice: Shape {
     let startAngle: Angle
     let endAngle: Angle
@@ -274,29 +261,52 @@ private struct PieSlice: Shape {
 private struct WildWheel: View {
     var body: some View {
         ZStack {
-            PieSlice(startAngle: .degrees(0), endAngle: .degrees(90)).fill(UnoStyle.allFour[0])
-            PieSlice(startAngle: .degrees(90), endAngle: .degrees(180)).fill(UnoStyle.allFour[1])
-            PieSlice(startAngle: .degrees(180), endAngle: .degrees(270)).fill(UnoStyle.allFour[2])
-            PieSlice(startAngle: .degrees(270), endAngle: .degrees(360)).fill(UnoStyle.allFour[3])
+            PieSlice(startAngle: .degrees(180), endAngle: .degrees(270)).fill(UnoStyle.red)     // top-left
+            PieSlice(startAngle: .degrees(270), endAngle: .degrees(360)).fill(UnoStyle.blue)     // top-right
+            PieSlice(startAngle: .degrees(90), endAngle: .degrees(180)).fill(UnoStyle.yellow)    // bottom-left
+            PieSlice(startAngle: .degrees(0), endAngle: .degrees(90)).fill(UnoStyle.green)       // bottom-right
         }
         .clipShape(Ellipse())
     }
 }
 
-/// Universal "no" glyph — circle with a diagonal slash.
+/// Universal "no" glyph — an annulus (ring) crossed by a diagonal bar.
+/// Renders in three passes so it reads exactly like the rest of the deck:
+/// a solid black base shadow offset down-left, a heavier black silhouette
+/// that becomes the outline once the white sits on top, then the white
+/// ring + bar itself.
 struct SkipGlyph: View {
+    var outlineWidth: CGFloat
+    var baseOffset: CGFloat
+
     var body: some View {
         GeometryReader { g in
             let s = min(g.size.width, g.size.height)
+            let ringW = s * 0.16
+            let barW = s * 0.15
+            let barH = s * 0.96
+
             ZStack {
-                Circle()
-                    .stroke(style: StrokeStyle(lineWidth: s * 0.16))
-                // Length s places both endpoints exactly on the circle's
-                // rim, however the bar is rotated — rotation preserves each
-                // point's distance from center.
-                Rectangle()
-                    .frame(width: s * 0.15, height: s * 0.96)
-                    .rotationEffect(.degrees(45))
+                // Base shadow — solid black silhouette, offset down-left.
+                Group {
+                    Circle().stroke(.black, style: StrokeStyle(lineWidth: ringW))
+                    Rectangle().fill(.black).frame(width: barW, height: barH).rotationEffect(.degrees(45))
+                }
+                .offset(x: -baseOffset, y: baseOffset)
+
+                // Heavy outline — wider black shapes at the true position,
+                // peeking out from behind the white on top.
+                Group {
+                    Circle().stroke(.black, style: StrokeStyle(lineWidth: ringW + outlineWidth * 2))
+                    Rectangle().fill(.black).frame(width: barW + outlineWidth * 2, height: barH + outlineWidth * 2)
+                        .rotationEffect(.degrees(45))
+                }
+
+                // White face on top.
+                Group {
+                    Circle().stroke(.white, style: StrokeStyle(lineWidth: ringW))
+                    Rectangle().fill(.white).frame(width: barW, height: barH).rotationEffect(.degrees(45))
+                }
             }
             .frame(width: s, height: s)
         }
@@ -326,20 +336,50 @@ private struct BentArrow: Shape {
     }
 }
 
+/// Same three-pass treatment as `SkipGlyph`: black base shadow, black
+/// outline, white face — built from `BentArrow`'s solid silhouette so the
+/// outline is a true traced stroke rather than an oversized duplicate.
 struct ReverseGlyph: View {
+    var outlineWidth: CGFloat
+    var baseOffset: CGFloat
+
     var body: some View {
-        GeometryReader { g in
-            let w = g.size.width, h = g.size.height
-            ZStack {
-                BentArrow()
-                    .frame(width: w * 0.58, height: h * 0.9)
-                    .position(x: w * 0.33, y: h * 0.5)
-                BentArrow()
-                    .rotationEffect(.degrees(180))
-                    .frame(width: w * 0.58, height: h * 0.9)
-                    .position(x: w * 0.67, y: h * 0.5)
-            }
+        ZStack {
+            ReverseArrowPair()
+                .foregroundStyle(.black)
+                .offset(x: -baseOffset, y: baseOffset)
+            ReverseArrowPair()
+                .stroke(.black, lineWidth: outlineWidth * 2)
+            ReverseArrowPair()
+                .fill(.white)
         }
+    }
+}
+
+/// Both arrows as a single Shape so `.stroke`/`.fill` apply uniformly to
+/// the whole glyph, matching whatever frame the caller assigns.
+private struct ReverseArrowPair: Shape {
+    func path(in rect: CGRect) -> Path {
+        let w = rect.width, h = rect.height
+        let arrowW = w * 0.58, arrowH = h * 0.9
+        var path = Path()
+
+        var left = BentArrow().path(in: CGRect(x: 0, y: 0, width: arrowW, height: arrowH))
+        let leftOrigin = CGPoint(x: w * 0.33 - arrowW / 2, y: h * 0.5 - arrowH / 2)
+        left = left.applying(CGAffineTransform(translationX: leftOrigin.x, y: leftOrigin.y))
+        path.addPath(left)
+
+        var right = BentArrow().path(in: CGRect(x: 0, y: 0, width: arrowW, height: arrowH))
+        // Rotate 180° about the arrow's own center, then translate into place.
+        let rotate180 = CGAffineTransform(translationX: arrowW / 2, y: arrowH / 2)
+            .rotated(by: .pi)
+            .translatedBy(x: -arrowW / 2, y: -arrowH / 2)
+        right = right.applying(rotate180)
+        let rightOrigin = CGPoint(x: w * 0.67 - arrowW / 2, y: h * 0.5 - arrowH / 2)
+        right = right.applying(CGAffineTransform(translationX: rightOrigin.x, y: rightOrigin.y))
+        path.addPath(right)
+
+        return path
     }
 }
 
@@ -352,17 +392,19 @@ struct UnoCardBackView: View {
             let radius = CardStyle.cornerRadius(width: w)
             ZStack {
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(UnoStyle.red)
+                    .fill(UnoStyle.wildBlack)
                 Ellipse()
-                    .fill(.black)
+                    .fill(UnoStyle.red)
                     .frame(width: w * 0.98, height: w * 0.64)
                     .rotationEffect(.degrees(-28))
-                OutlinedText(text: "UNO",
-                             font: .system(size: w * 0.30, weight: .heavy, design: .rounded),
-                             fillColor: UnoStyle.yellow,
-                             outlineColor: .white,
-                             outlineWidth: w * 0.012,
-                             kerning: w * 0.008)
+                DoubleOutlinedText(text: "UNO",
+                                    font: .system(size: w * 0.30, weight: .heavy, design: .rounded),
+                                    fillColor: UnoStyle.yellow,
+                                    innerOutlineColor: .black,
+                                    outerOutlineColor: .white,
+                                    innerWidth: w * 0.012,
+                                    outerWidth: w * 0.028,
+                                    kerning: w * 0.008)
                     .rotationEffect(.degrees(-9))
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .strokeBorder(.white, lineWidth: max(1.5, w * 0.035))
@@ -374,7 +416,9 @@ struct UnoCardBackView: View {
     }
 }
 
-/// Text with a simulated stroke: eight offset copies in the outline color
+// MARK: - Outlined text helpers
+
+/// Text with a simulated stroke: several offset copies in the outline color
 /// behind a top copy in the fill color. SwiftUI's Text has no native
 /// stroke, so this is the standard trick for a bold outlined logotype.
 private struct OutlinedText: View {
@@ -384,11 +428,12 @@ private struct OutlinedText: View {
     let outlineColor: Color
     let outlineWidth: CGFloat
     var kerning: CGFloat = 0
+    var copies: Int = 12
 
     var body: some View {
         ZStack {
-            ForEach(0..<8, id: \.self) { i in
-                let rad = Double(i) * .pi / 4
+            ForEach(0..<copies, id: \.self) { i in
+                let rad = Double(i) / Double(copies) * 2 * .pi
                 Text(text)
                     .font(font)
                     .kerning(kerning)
@@ -403,9 +448,70 @@ private struct OutlinedText: View {
     }
 }
 
+/// `OutlinedText` plus a solid-black copy offset down-left underneath — the
+/// deck's signature "3D base" shadow, as seen on every big center numeral.
+private struct BasedOutlinedText: View {
+    let text: String
+    let font: Font
+    var fillColor: Color = .white
+    let outlineWidth: CGFloat
+    let baseOffset: CGFloat
+
+    var body: some View {
+        ZStack {
+            Text(text)
+                .font(font)
+                .foregroundStyle(.black)
+                .offset(x: -baseOffset, y: baseOffset)
+            OutlinedText(text: text, font: font, fillColor: fillColor, outlineColor: .black, outlineWidth: outlineWidth)
+        }
+    }
+}
+
+/// Two nested outline passes around a filled copy — used for the "UNO"
+/// logotype, which prints with a thin black inner outline and a thicker
+/// white outer stroke beyond that.
+private struct DoubleOutlinedText: View {
+    let text: String
+    let font: Font
+    let fillColor: Color
+    let innerOutlineColor: Color
+    let outerOutlineColor: Color
+    let innerWidth: CGFloat
+    let outerWidth: CGFloat
+    var kerning: CGFloat = 0
+    var copies: Int = 16
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<copies, id: \.self) { i in
+                let rad = Double(i) / Double(copies) * 2 * .pi
+                Text(text)
+                    .font(font)
+                    .kerning(kerning)
+                    .foregroundStyle(outerOutlineColor)
+                    .offset(x: cos(rad) * outerWidth, y: sin(rad) * outerWidth)
+            }
+            ForEach(0..<copies, id: \.self) { i in
+                let rad = Double(i) / Double(copies) * 2 * .pi
+                Text(text)
+                    .font(font)
+                    .kerning(kerning)
+                    .foregroundStyle(innerOutlineColor)
+                    .offset(x: cos(rad) * innerWidth, y: sin(rad) * innerWidth)
+            }
+            Text(text)
+                .font(font)
+                .kerning(kerning)
+                .foregroundStyle(fillColor)
+        }
+    }
+}
+
 #Preview("UNO faces") {
     HStack(spacing: 12) {
         UnoCardFaceView(color: .red, symbol: .number(7))
+        UnoCardFaceView(color: .green, symbol: .number(6))
         UnoCardFaceView(color: .blue, symbol: .skip)
         UnoCardFaceView(color: .green, symbol: .reverse)
         UnoCardFaceView(color: .yellow, symbol: .drawTwo)

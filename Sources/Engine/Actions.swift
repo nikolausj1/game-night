@@ -40,4 +40,6 @@ public enum GameEvent: Codable, Sendable, Equatable {
     case illegalAttempt(seat: Int, reason: String)
     case undone
     case suitDeclared(Suit)
+    /// UNO: a play just left this seat holding exactly one card.
+    case unoCalled(seat: Int)
 }

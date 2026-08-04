@@ -16,7 +16,9 @@ final class ClientSession: NSObject {
     }
 
     private let log = Logger(subsystem: "com.levelup.gamenight", category: "ClientSession")
-    private let peerID: MCPeerID
+    private let playerName: String
+    /// DISPOSABLE: regenerated on every rebuild — see PeerIdentity.
+    private var peerID: MCPeerID
     private var session: MCSession!
     private var browser: MCNearbyServiceBrowser!
     private var outSeq: UInt64 = 0
@@ -25,6 +27,7 @@ final class ClientSession: NSObject {
     /// Watchdog: the host broadcasts a heartbeat every few seconds; if the
     /// session claims "connected" but nothing arrives, it's wedged.
     private var lastReceiveAt = Date.distantPast
+    private var lastStateChangeAt = Date()
     private var watchdog: Timer?
 
     private(set) var connectionState: ConnectionState = .disconnected
@@ -35,14 +38,18 @@ final class ClientSession: NSObject {
     var onStateChange: ((ConnectionState) -> Void)?
 
     init(playerName: String) {
-        self.peerID = PeerIdentity.peerID(displayName: playerName)
+        self.playerName = playerName
+        self.peerID = PeerIdentity.freshPeerID(displayName: playerName)
         super.init()
-        rebuildSession()
-        rebuildBrowser()
+        rebuildTransport()
     }
 
-    private func rebuildSession() {
+    /// Fresh identity, fresh session, fresh browser — the host sees a
+    /// brand-new peer every time, so no ghost can block us.
+    private func rebuildTransport() {
         session?.disconnect()
+        browser?.stopBrowsingForPeers()
+        peerID = PeerIdentity.freshPeerID(displayName: playerName)
         // Mirrors HostSession: simulator-to-simulator DTLS never completes.
         #if targetEnvironment(simulator)
         let encryption: MCEncryptionPreference = .none
@@ -51,10 +58,6 @@ final class ClientSession: NSObject {
         #endif
         session = MCSession(peer: peerID, securityIdentity: nil, encryptionPreference: encryption)
         session.delegate = self
-    }
-
-    private func rebuildBrowser() {
-        browser?.stopBrowsingForPeers()
         browser = MCNearbyServiceBrowser(peer: peerID, serviceType: HostSession.serviceType)
         browser.delegate = self
     }
@@ -73,18 +76,16 @@ final class ClientSession: NSObject {
         setState(.disconnected)
     }
 
-    /// Tear down and rediscover. Called after drops, on foregrounding, and
-    /// by the watchdog. A fresh browser re-fires foundPeer for tables the
-    /// old one had already seen — without this, a re-found table is
-    /// invisible and the phone hangs in "searching" forever.
+    /// Tear down and rediscover with a completely fresh identity. Called
+    /// after drops, on foregrounding, and by the watchdog. A fresh browser
+    /// re-fires foundPeer for tables the old one had already seen.
     func refresh() {
         if case .connected = connectionState, Date().timeIntervalSince(lastReceiveAt) < 6 {
             return // genuinely healthy; leave it alone
         }
-        log.info("refresh: rebuilding session + browser")
+        log.info("refresh: rebuilding transport with fresh peer identity")
         tablePeer = nil
-        rebuildSession()
-        rebuildBrowser()
+        rebuildTransport()
         setState(.searching)
         browser.startBrowsingForPeers()
     }
@@ -94,14 +95,27 @@ final class ClientSession: NSObject {
         lastReceiveAt = Date()
         let timer = Timer(timeInterval: 4, repeats: true) { [weak self] _ in
             guard let self else { return }
-            // Keep a trickle of outbound traffic so the host's watchdog
-            // (and ours) has something to miss.
-            if case .connected = self.connectionState {
+            let stateAge = Date().timeIntervalSince(self.lastStateChangeAt)
+            switch self.connectionState {
+            case .connected:
+                // Keep a trickle of outbound traffic so both watchdogs
+                // have something to miss.
                 self.send(.heartbeat)
                 if Date().timeIntervalSince(self.lastReceiveAt) > 12 {
                     self.log.info("watchdog: connected but silent >12s — wedged, refreshing")
                     self.refresh()
                 }
+            case .connecting where stateAge > 10:
+                // Invitation black hole (host had a ghost, or DTLS died
+                // mid-handshake): start over with a new identity.
+                self.log.info("watchdog: connecting >10s — restarting with fresh identity")
+                self.refresh()
+            case .searching where stateAge > 20:
+                // Browsing can silently rot after backgrounding.
+                self.log.info("watchdog: searching >20s — rebuilding browser")
+                self.refresh()
+            default:
+                break
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -131,6 +145,7 @@ final class ClientSession: NSObject {
         DispatchQueue.main.async {
             guard self.connectionState != new else { return }
             self.connectionState = new
+            self.lastStateChangeAt = Date()
             self.onStateChange?(new)
         }
     }
@@ -167,8 +182,9 @@ extension ClientSession: MCSessionDelegate {
             lastReceiveAt = Date()
             setState(.connected(tableName: peerID.displayName))
             // Introduce ourselves immediately; the host replies with a
-            // snapshot (and our old seat, if we had one).
-            send(.hello(name: self.peerID.displayName, deviceID: PeerIdentity.deviceID))
+            // snapshot (and our old seat, if we had one). Send the CLEAN
+            // player name — the peer displayName carries a uniquing suffix.
+            send(.hello(name: playerName, deviceID: PeerIdentity.deviceID))
         case .notConnected:
             // The old session object is dead — rebuild everything so the
             // next discovery starts clean. (Sessions do not survive locks.)

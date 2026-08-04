@@ -31,6 +31,16 @@ public final class HostEngine {
         )
     }
 
+    /// Resume from a saved `GameState` (save/resume flow). Undo history is
+    /// not persisted, so the restored engine starts with nothing to undo.
+    /// `dealSerial` isn't part of `GameState` either; it's re-derived from
+    /// visible state so post-restore reshuffles stay deterministic without
+    /// having to replay the exact pre-save shuffle stream.
+    public init(restoring state: GameState) {
+        self.state = state
+        dealSerial = UInt64(truncatingIfNeeded: state.roundHistory.count * 97 + state.discardPile.count + 1)
+    }
+
     // MARK: - Connection bookkeeping
 
     /// Presence is transport truth, not game truth — it bypasses the
@@ -61,6 +71,8 @@ public final class HostEngine {
                 return dealTrickRound(roundNumber: 1, dealerSeat: 0)
             case .crazyEights:
                 return dealCrazyEights(dealerSeat: 0)
+            case .uno:
+                return dealUno(dealerSeat: 0)
             case .freePlay:
                 return setUpFreePlay()
             }
@@ -98,6 +110,8 @@ public final class HostEngine {
                 return dealTrickRound(roundNumber: round.roundNumber, dealerSeat: round.dealerSeat)
             case .crazyEights:
                 return dealCrazyEights(dealerSeat: round.dealerSeat)
+            case .uno:
+                return dealUno(dealerSeat: round.dealerSeat)
             case .freePlay:
                 return setUpFreePlay()
             }
@@ -256,6 +270,76 @@ public final class HostEngine {
             }
             return events
 
+        case .uno:
+            guard var round = state.round else { return reject(seat, "No round in progress") }
+            guard seat == round.turnSeat else { return reject(seat, "It's not your turn") }
+            guard case .uno(_, let symbol) = card.kind else {
+                return reject(seat, "That card doesn't belong to an UNO deck")
+            }
+            var forced = false
+            if case .illegal(let reason) = ruleset.legality(
+                of: card, hand: hand, trick: [], trump: round.trumpSuit, state: state
+            ) {
+                guard force, state.rules.softEnforcement else {
+                    return [.illegalAttempt(seat: seat, reason: reason)]
+                }
+                forced = true
+            }
+            pushUndo()
+            hand.remove(at: index)
+            state.hands[seat] = hand
+            state.discardPile.append(card)
+            round.trumpSuit = nil // a fresh play always clears any declared color
+            var events: [GameEvent] = [.cardPlayed(seat: seat, card: card, forced: forced)]
+            if hand.count == 1 {
+                events.append(.unoCalled(seat: seat))
+            }
+            if hand.isEmpty {
+                // Going out ends the game immediately — any effect on the
+                // last card (draw penalty, wild color) never resolves.
+                state.round = round
+                state.phase = .gameOver
+                events.append(.gameWon(seat: seat))
+                return events
+            }
+            switch symbol {
+            case .number:
+                round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 1)
+            case .skip:
+                round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 2)
+            case .reverse:
+                if state.seats.count == 2 {
+                    // Two players: reverse acts as a skip — same player again.
+                    round.turnSeat = seat
+                } else {
+                    round.direction = -round.direction
+                    round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 1)
+                }
+            case .drawTwo:
+                round.pendingDraw += 2
+                if state.rules.stackDrawCards {
+                    round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 1)
+                } else {
+                    // No stacking: the penalty lands immediately and the
+                    // victim is skipped.
+                    let victim = advanceSeat(from: seat, direction: round.direction, steps: 1)
+                    drawCards(round.pendingDraw, to: victim)
+                    round.pendingDraw = 0
+                    round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 2)
+                }
+            case .wild:
+                state.round = round
+                state.phase = .choosingTrump(seat: seat) // waiting on declareSuit
+                return events
+            case .wildDrawFour:
+                round.pendingDraw += 4
+                state.round = round
+                state.phase = .choosingTrump(seat: seat) // color first, then penalty resolves
+                return events
+            }
+            state.round = round
+            return events
+
         case .freePlay:
             pushUndo()
             hand.remove(at: index)
@@ -265,29 +349,73 @@ public final class HostEngine {
         }
     }
 
+    /// Crazy Eights: pick the suit after an eight. UNO: pick the active color
+    /// after a wild — the chosen color rides in `trumpSuit` via the fixed
+    /// Suit↔UnoColor mapping (red↔hearts, yellow↔diamonds, green↔clubs,
+    /// blue↔spades).
     private func handleDeclareSuit(_ suit: Suit, from seat: Int) -> [GameEvent] {
-        guard state.gameKind == .crazyEights,
+        guard state.gameKind == .crazyEights || state.gameKind == .uno,
               case .choosingTrump(let declarer) = state.phase,
               var round = state.round else {
             return reject(seat, "There's no suit to declare right now")
         }
         guard seat == declarer else {
-            return reject(seat, "Only the player of the eight declares the suit")
+            let reason = state.gameKind == .uno
+                ? "Only the player of the wild declares the color"
+                : "Only the player of the eight declares the suit"
+            return reject(seat, reason)
         }
         pushUndo()
         round.trumpSuit = suit
-        round.turnSeat = nextSeat(after: seat)
+        if state.gameKind == .uno {
+            if round.pendingDraw > 0, !state.rules.stackDrawCards {
+                // Wild draw four without stacking: penalty lands now and the
+                // victim is skipped.
+                let victim = advanceSeat(from: seat, direction: round.direction, steps: 1)
+                drawCards(round.pendingDraw, to: victim)
+                round.pendingDraw = 0
+                round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 2)
+            } else {
+                round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 1)
+            }
+        } else {
+            round.turnSeat = nextSeat(after: seat)
+        }
         state.round = round
         state.phase = .playing
         return [.suitDeclared(suit)]
     }
 
     private func handleDrawCard(from seat: Int) -> [GameEvent] {
-        guard state.gameKind == .crazyEights || state.gameKind == .freePlay else {
+        guard state.gameKind == .crazyEights || state.gameKind == .uno || state.gameKind == .freePlay else {
             return reject(seat, "You can't draw in this game")
         }
         guard state.phase == .playing else {
             return reject(seat, "You can't draw right now")
+        }
+        if state.gameKind == .uno {
+            guard var round = state.round, seat == round.turnSeat else {
+                return reject(seat, "It's not your turn")
+            }
+            if round.pendingDraw > 0 {
+                // Absorb the whole stacked penalty; the turn is skipped.
+                pushUndo()
+                drawCards(round.pendingDraw, to: seat)
+                round.pendingDraw = 0
+                round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 1)
+                state.round = round
+                return []
+            }
+            // Voluntary draw: strict draw-once-then-pass (v1 ignores
+            // rules.drawUntilPlayable).
+            guard !state.drawPile.isEmpty || state.discardPile.count > 1 else {
+                return reject(seat, "The draw pile is empty")
+            }
+            pushUndo()
+            drawCards(1, to: seat)
+            round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 1)
+            state.round = round
+            return []
         }
         if state.gameKind == .crazyEights {
             guard let round = state.round, seat == round.turnSeat else {
@@ -364,6 +492,8 @@ public final class HostEngine {
                 phase = .choosingTrump(seat: dealerSeat) // dealer picks trump
             case .jester:
                 trumpSuit = nil // no trump this round
+            case .uno:
+                trumpSuit = nil // unreachable: trick decks contain no UNO cards
             }
             events.append(.trumpRevealed(flipped, trumpSuit))
         }
@@ -423,6 +553,55 @@ public final class HostEngine {
         return [.dealt]
     }
 
+    private func dealUno(dealerSeat: Int) -> [GameEvent] {
+        let playerCount = state.seats.count
+        let cardsEach = 7
+
+        state.phase = .dealing
+        var deck = DeckBuilder.shuffled(DeckBuilder.uno108(), seed: state.seed &+ dealSerial)
+        dealSerial &+= 1
+
+        state.hands = [:]
+        for offset in 0..<playerCount {
+            let seat = (dealerSeat + 1 + offset) % playerCount
+            state.hands[seat] = Array(deck.prefix(cardsEach))
+            deck.removeFirst(cardsEach)
+        }
+
+        // Flip the starter. A wild can't start the discard pile: put it back
+        // and reshuffle the remaining deck until a colored card comes up.
+        // Starter action cards (skip/reverse/draw-two) set the color and
+        // symbol to match but apply no effect in v1.
+        var starter = deck.removeFirst()
+        while isWildKind(starter) {
+            deck.append(starter)
+            deck = DeckBuilder.shuffled(deck, seed: state.seed &+ dealSerial)
+            dealSerial &+= 1
+            starter = deck.removeFirst()
+        }
+        state.discardPile = [starter]
+        state.drawPile = deck
+
+        let firstPlayer = (dealerSeat + 1) % playerCount
+        state.round = RoundState(
+            roundNumber: 1,
+            cardsPerPlayer: cardsEach,
+            dealerSeat: dealerSeat,
+            trumpCard: nil,
+            trumpSuit: nil,
+            bids: [:],
+            tricksWon: [:],
+            currentTrick: [],
+            completedTricks: [],
+            leadSeat: firstPlayer,
+            turnSeat: firstPlayer,
+            direction: 1,
+            pendingDraw: 0
+        )
+        state.phase = .playing
+        return [.dealt]
+    }
+
     private func setUpFreePlay() -> [GameEvent] {
         state.phase = .dealing
         state.drawPile = DeckBuilder.shuffled(DeckBuilder.standard52(), seed: state.seed &+ dealSerial)
@@ -471,6 +650,36 @@ public final class HostEngine {
 
     private func nextSeat(after seat: Int) -> Int {
         (seat + 1) % state.seats.count
+    }
+
+    /// Direction-aware seat stepping for UNO (direction is +1 or -1).
+    private func advanceSeat(from seat: Int, direction: Int, steps: Int) -> Int {
+        let count = state.seats.count
+        let raw = (seat + direction * steps) % count
+        return (raw + count) % count
+    }
+
+    private func isWildKind(_ card: Card) -> Bool {
+        guard case .uno(_, let symbol) = card.kind else { return false }
+        return symbol == .wild || symbol == .wildDrawFour
+    }
+
+    /// Deal `count` cards from the draw pile into a hand, recycling the
+    /// discard pile (minus its top card) whenever the pile runs dry. Stops
+    /// early only if both piles are exhausted.
+    private func drawCards(_ count: Int, to seat: Int) {
+        for _ in 0..<count {
+            if state.drawPile.isEmpty {
+                guard state.discardPile.count > 1 else { break }
+                let top = state.discardPile.removeLast()
+                let recycled = state.discardPile
+                state.discardPile = [top]
+                state.drawPile = DeckBuilder.shuffled(recycled, seed: state.seed &+ dealSerial)
+                dealSerial &+= 1
+            }
+            guard !state.drawPile.isEmpty else { break }
+            state.hands[seat, default: []].append(state.drawPile.removeFirst())
+        }
     }
 
     private func reject(_ seat: Int, _ reason: String) -> [GameEvent] {

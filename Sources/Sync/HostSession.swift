@@ -25,7 +25,9 @@ final class HostSession: NSObject {
     var onPeerChange: ((MCPeerID, Bool) -> Void)?
 
     init(tableName: String) {
-        self.peerID = PeerIdentity.peerID(displayName: tableName)
+        // Fresh per launch — an archived host identity leaves ghost
+        // advertisements that stale clients keep trying to join.
+        self.peerID = PeerIdentity.freshPeerID(displayName: tableName)
         // DTLS between two simulators is broken (endless -9803 handshakes);
         // devices keep encryption on.
         #if targetEnvironment(simulator)

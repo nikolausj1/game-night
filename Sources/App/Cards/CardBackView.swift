@@ -3,7 +3,20 @@ import SwiftUI
 /// Programmatic card back: felt-green field, parchment margin, gold lattice.
 /// May later be swapped for a generated raster back; this must stand on its
 /// own regardless (placeholder-first rule).
+///
+/// Renders whichever back is selected in `ThemeStore`, full-bleed inside the
+/// thin ivory printed border. Games that own their own back (UNO's box art,
+/// say) can force a specific image regardless of the player's theme choice.
 struct CardBackView: View {
+    /// When set, always renders this imageset instead of the themed
+    /// selection — for games whose back is part of their identity.
+    var forcedBackImage: String? = nil
+
+    /// The imageset to render, or nil for the programmatic lattice fallback.
+    private var resolvedImageName: String? {
+        forcedBackImage ?? CardBackCatalog.option(for: ThemeStore.shared.selectedBack).imageName
+    }
+
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
@@ -16,8 +29,8 @@ struct CardBackView: View {
                     .fill(LinearGradient(colors: [CardStyle.feltGreen,
                                                   CardStyle.feltGreen.opacity(0.85)],
                                          startPoint: .topLeading, endPoint: .bottomTrailing))
-                if UIImage(named: "CardBackArt") != nil {
-                    Image("CardBackArt")
+                if let imageName = resolvedImageName, UIImage(named: imageName) != nil {
+                    Image(imageName)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
                         .frame(width: geo.size.width, height: geo.size.height)
@@ -68,6 +81,19 @@ struct LatticePattern: Shape {
     }
 }
 
+/// UNO games force their iconic back regardless of the player's theme —
+/// the back is part of the game's identity. Set once at the table root.
+private struct UnoDeckStyleKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var unoDeckStyle: Bool {
+        get { self[UnoDeckStyleKey.self] }
+        set { self[UnoDeckStyleKey.self] = newValue }
+    }
+}
+
 /// One card, either side up, with a physical elevation model: shadow grows
 /// and softens as the card lifts off the felt. Every card on every screen
 /// goes through this view so depth reads consistently.
@@ -76,11 +102,14 @@ struct CardView: View {
     var faceUp: Bool = true
     /// 0 = resting on felt, 1 = held aloft mid-drag.
     var elevation: CGFloat = 0
+    @Environment(\.unoDeckStyle) private var unoDeckStyle
 
     var body: some View {
         ZStack {
             if faceUp {
                 CardFaceView(card: card)
+            } else if unoDeckStyle {
+                UnoCardBackView()
             } else {
                 CardBackView()
             }

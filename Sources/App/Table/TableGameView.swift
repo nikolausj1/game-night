@@ -7,10 +7,31 @@ struct TableGameView: View {
 
     /// Free play: a card back being dragged off the deck toward a plate.
     @State private var dealDragLocation: CGPoint?
-    /// Free play: a just-dealt card flying deck → plate.
-    @State private var dealFlight: (id: UUID, to: CGPoint)?
+    /// The deal confirmation: one motion from the RELEASE POINT to the
+    /// plate, then gone — no ghost replay from the deck.
+    @State private var dealFlight: (id: UUID, from: CGPoint, to: CGPoint)?
+
+    /// Seat plates dragged to match where people actually sit
+    /// (normalized). Session-scoped; every layer reads through this.
+    @State private var plateOverrides: [Int: CGPoint] = [:]
+    @State private var draggingPlateSeat: Int?
+
+    /// Exit affordance: tap dead felt → a hold-to-close dial appears.
+    @State private var showCloseButton = false
+    @State private var closeRingProgress: CGFloat = 0
+    /// Wired by TableRootView at integration; closes back to the menu.
+    var onClose: (() -> Void)? = nil
 
     private let deckAnchor = CGPoint(x: 0.20, y: 0.47)
+
+    /// Default geometry bent by wherever the humans dragged their plates.
+    private func effectiveAnchors(_ state: GameState) -> [CGPoint] {
+        var anchors = TableGeometry.seatAnchors(count: state.seats.count)
+        for (seat, point) in plateOverrides where anchors.indices.contains(seat) {
+            anchors[seat] = point
+        }
+        return anchors
+    }
 
     var body: some View {
         // Tracked read: every engine mutation bumps this, every bump
@@ -19,6 +40,19 @@ struct TableGameView: View {
         return GeometryReader { geo in
             if let state = host.state {
                 ZStack {
+                    // Dead-felt tap: summon the exit dial (auto-hides).
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                showCloseButton.toggle()
+                            }
+                            if showCloseButton {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                                    withAnimation { showCloseButton = false }
+                                }
+                            }
+                        }
                     seatPlates(state: state, size: geo.size)
                     DeckAndTrumpView(state: state)
                         .position(x: deckAnchor.x * geo.size.width,
@@ -28,10 +62,22 @@ struct TableGameView: View {
                         freePlayCards(state: state, size: geo.size)
                         dealVisuals(state: state, size: geo.size)
                         gatherButton(size: geo.size)
-                    } else {
+                    } else if state.gameKind.isTrickTaking {
                         trickCards(state: state, size: geo.size)
+                    } else {
+                        // Shedding games (UNO, Crazy Eights): the play pile.
+                        dealHotspot(state: state, size: geo.size)
+                        shedPile(state: state, size: geo.size)
+                        dealVisuals(state: state, size: geo.size)
                     }
                     phaseOverlay(state: state)
+                    if showCloseButton {
+                        HoldToCloseButton(progress: $closeRingProgress) {
+                            onClose?()
+                        }
+                        .position(x: 64, y: 56)
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                    }
                 }
                 .onChange(of: state.phase) { _, newPhase in
                     autoAdvance(from: newPhase)
@@ -52,7 +98,7 @@ struct TableGameView: View {
     /// Gesture-only layer UNDER the cards: grab the deck to deal. Cards
     /// resting nearby keep their own drag priority because they're above.
     private func dealHotspot(state: GameState, size: CGSize) -> some View {
-        let anchors = TableGeometry.seatAnchors(count: state.seats.count)
+        let anchors = effectiveAnchors(state)
         return Color.clear
             .frame(width: 150, height: 190)
             .contentShape(Rectangle())
@@ -62,17 +108,35 @@ struct TableGameView: View {
                     .onChanged { value in dealDragLocation = value.location }
                     .onEnded { value in
                         defer { dealDragLocation = nil }
-                        guard let target = seatHit(at: value.location,
-                                                   anchors: anchors, size: size,
-                                                   seats: state.seats) else { return }
-                        Haptics.play()
-                        let plate = CGPoint(x: anchors[target].x * size.width,
-                                            y: anchors[target].y * size.height)
-                        let flight = (id: UUID(), to: plate)
-                        dealFlight = flight
-                        host.drawCard(for: target)
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-                            if dealFlight?.id == flight.id { dealFlight = nil }
+                        if let target = seatHit(at: value.location,
+                                                anchors: anchors, size: size,
+                                                seats: state.seats) {
+                            // Deal to a player: confirmation continues from
+                            // the FINGER to the plate and slides away.
+                            Haptics.play()
+                            let plate = CGPoint(x: anchors[target].x * size.width,
+                                                y: anchors[target].y * size.height)
+                            let flight = (id: UUID(), from: value.location, to: plate)
+                            dealFlight = flight
+                            host.drawCard(for: target)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                                if dealFlight?.id == flight.id { dealFlight = nil }
+                            }
+                            return
+                        }
+                        // Released on open felt: pull the top card straight
+                        // onto the table, face-down where it was dropped.
+                        let deckPos = CGPoint(x: deckAnchor.x * size.width,
+                                              y: deckAnchor.y * size.height)
+                        let farFromDeck = hypot(deckPos.x - value.location.x,
+                                                deckPos.y - value.location.y) > 130
+                        if farFromDeck, let top = state.drawPile.last {
+                            Haptics.play()
+                            host.moveTableCard(top.id, to: .table, seat: state.seats[0].id)
+                            host.freePlayLayout[top.id] = CGPoint(
+                                x: min(0.94, max(0.06, value.location.x / size.width)),
+                                y: min(0.92, max(0.08, value.location.y / size.height)))
+                            host.faceDownCards.insert(top.id)
                         }
                     }
             )
@@ -82,7 +146,7 @@ struct TableGameView: View {
     /// finger, the plate glow, and the dealt-card flight.
     @ViewBuilder
     private func dealVisuals(state: GameState, size: CGSize) -> some View {
-        let anchors = TableGeometry.seatAnchors(count: state.seats.count)
+        let anchors = effectiveAnchors(state)
         if let location = dealDragLocation {
             CardView(card: Card(id: "dealing", kind: .standard(suit: .spades, rank: 2)),
                      faceUp: false, elevation: 1)
@@ -100,9 +164,7 @@ struct TableGameView: View {
             }
         }
         if let flight = dealFlight {
-            DealFlightView(from: CGPoint(x: deckAnchor.x * size.width,
-                                         y: deckAnchor.y * size.height),
-                           to: flight.to)
+            DealFlightView(from: flight.from, to: flight.to)
                 .id(flight.id)
         }
     }
@@ -140,18 +202,41 @@ struct TableGameView: View {
     // MARK: plates
 
     private func seatPlates(state: GameState, size: CGSize) -> some View {
-        let anchors = TableGeometry.seatAnchors(count: state.seats.count)
+        let anchors = effectiveAnchors(state)
         return ForEach(state.seats) { seat in
             SeatPlateView(seat: seat, state: state)
+                .scaleEffect(draggingPlateSeat == seat.id ? 1.08 : 1)
+                .shadow(color: .black.opacity(draggingPlateSeat == seat.id ? 0.5 : 0),
+                        radius: 12, y: 6)
                 .position(x: anchors[seat.id].x * size.width,
                           y: anchors[seat.id].y * size.height)
+                // Sit wherever you like: drag your plate to match your
+                // real chair. Everything (deals, tosses, glows) follows.
+                .gesture(
+                    DragGesture(minimumDistance: 8)
+                        .onChanged { value in
+                            if draggingPlateSeat != seat.id {
+                                draggingPlateSeat = seat.id
+                                Haptics.tick()
+                            }
+                            plateOverrides[seat.id] = CGPoint(
+                                x: min(0.96, max(0.04, value.location.x / size.width)),
+                                y: min(0.95, max(0.05, value.location.y / size.height)))
+                        }
+                        .onEnded { _ in
+                            draggingPlateSeat = nil
+                            Haptics.arm()
+                        }
+                )
+                .animation(.spring(response: 0.3, dampingFraction: 0.8),
+                           value: draggingPlateSeat)
         }
     }
 
     // MARK: trick
 
     private func trickCards(state: GameState, size: CGSize) -> some View {
-        let anchors = TableGeometry.seatAnchors(count: state.seats.count)
+        let anchors = effectiveAnchors(state)
         let trick = state.round?.currentTrick ?? []
         let winnerSeat: Int? = {
             if case .trickComplete(let winner) = state.phase { return winner }
@@ -235,7 +320,7 @@ struct TableGameView: View {
                         }
                         .onEnded { value in
                             touchedCardID = nil
-                            let anchors = TableGeometry.seatAnchors(count: state.seats.count)
+                            let anchors = effectiveAnchors(state)
                             // Dropped on the deck: bury it back in the pile.
                             let deckPos = CGPoint(x: deckAnchor.x * size.width,
                                                   y: deckAnchor.y * size.height)
@@ -274,6 +359,37 @@ struct TableGameView: View {
         }
     }
 
+    /// UNO / Crazy Eights: the discard is the heart of the table. Top few
+    /// cards stacked with settle jitter; each new play slides in from its
+    /// player's edge on the felt-friction curve.
+    private func shedPile(state: GameState, size: CGSize) -> some View {
+        let anchors = effectiveAnchors(state)
+        let recent = state.discardPile.suffix(4)
+        let cardWidth = min(size.width * 0.125, 140)
+        let pileCenter = CGPoint(x: 0.52 * size.width, y: 0.47 * size.height)
+        return ForEach(Array(recent.enumerated()), id: \.element.id) { index, card in
+            let jitter = TableGeometry.jitterDegrees(cardID: card.id)
+            let entryOffset: CGSize = {
+                guard let seat = host.seatByPlayedCard[card.id],
+                      anchors.indices.contains(seat) else { return CGSize(width: 0, height: 90) }
+                let anchor = anchors[seat]
+                return CGSize(width: ((anchor.x - 0.5) * 1.22 + 0.5) * size.width - pileCenter.x,
+                              height: ((anchor.y - 0.47) * 1.22 + 0.47) * size.height - pileCenter.y)
+            }()
+            CardView(card: card, faceUp: true)
+                .frame(width: cardWidth)
+                .rotationEffect(.degrees(jitter * 1.8))
+                .position(x: pileCenter.x + CGFloat(jitter) * 0.35,
+                          y: pileCenter.y + CGFloat(TableGeometry.jitterDegrees(cardID: card.id + "y")) * 0.3)
+                .zIndex(Double(index))
+                .transition(.asymmetric(
+                    insertion: .offset(entryOffset).combined(with: .scale(scale: 1.12))
+                        .animation(FeltPhysics.slide(duration: 0.45)),
+                    removal: .opacity))
+                .animation(FeltPhysics.slide(duration: 0.45), value: state.discardPile.count)
+        }
+    }
+
     /// A literal flip: rotate to edge-on (90°), swap the printed side
     /// while the card is invisible, then finish the turn from −90° back
     /// to flat. One continuous motion to the eye.
@@ -303,7 +419,7 @@ struct TableGameView: View {
         // Cards present before this view existed (rejoin, relaunch) stay put.
         guard host.freePlayLayout[card.id] == nil else { return }
 
-        let anchors = TableGeometry.seatAnchors(count: state.seats.count)
+        let anchors = effectiveAnchors(state)
         let seat = host.seatByPlayedCard[card.id]
         let toss = FeltPhysics.toss(
             cardID: card.id,
@@ -325,6 +441,48 @@ struct TableGameView: View {
             }
         }
     }
+
+/// Press-and-hold exit: a timer ring fills while you hold; release early
+/// and nothing happens. Accidental elbow-proof, kid-resistant.
+struct HoldToCloseButton: View {
+    @Binding var progress: CGFloat
+    let onComplete: () -> Void
+    @State private var holding = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(.black.opacity(0.55))
+                .frame(width: 64, height: 64)
+            Circle()
+                .stroke(.white.opacity(0.15), lineWidth: 4)
+                .frame(width: 56, height: 56)
+            Circle()
+                .trim(from: 0, to: progress)
+                .stroke(CardStyle.gold, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                .frame(width: 56, height: 56)
+                .rotationEffect(.degrees(-90))
+            Image(systemName: "xmark")
+                .font(.title3.weight(.bold))
+                .foregroundStyle(.white.opacity(0.9))
+        }
+        .scaleEffect(holding ? 1.1 : 1)
+        .onLongPressGesture(minimumDuration: 1.2, maximumDistance: 40) {
+            Haptics.play()
+            progress = 0
+            onComplete()
+        } onPressingChanged: { pressing in
+            holding = pressing
+            if pressing {
+                Haptics.tick()
+                withAnimation(.linear(duration: 1.2)) { progress = 1 }
+            } else {
+                withAnimation(.easeOut(duration: 0.2)) { progress = 0 }
+            }
+        }
+        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: holding)
+    }
+}
 
 /// The dealt card back gliding from the deck to a nameplate.
 struct DealFlightView: View {

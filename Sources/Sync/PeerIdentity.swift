@@ -1,14 +1,19 @@
 import Foundation
 import MultipeerConnectivity
 
-/// Stable identity for this device across launches, so a phone that dies
-/// mid-game reclaims its exact seat (and hand) on reconnect.
+/// Identity split, learned the hard way:
+///
+/// - `deviceID` is DURABLE — it names the seat. A phone that dies, locks,
+///   or reinstalls reclaims its exact hand with this.
+/// - MCPeerID is DISPOSABLE — a fresh one for every connection attempt.
+///   Reusing an archived peerID leaves a ghost session on the host that
+///   rejects the returning peer (observed: stuck "Reconnecting…" that even
+///   force-quit couldn't clear, because relaunch reused the same identity).
 enum PeerIdentity {
     private static let deviceIDKey = "gn.deviceID"
-    private static let peerNameKey = "gn.peerDisplayName"
 
-    /// Persistent random ID — the host keys seat reclaim off this, never off
-    /// the MCPeerID (which can be recreated).
+    /// Persistent random ID — the host keys seat reclaim off this, never
+    /// off the transient Multipeer identity.
     static var deviceID: String {
         if let existing = UserDefaults.standard.string(forKey: deviceIDKey) { return existing }
         let fresh = UUID().uuidString
@@ -16,19 +21,11 @@ enum PeerIdentity {
         return fresh
     }
 
-    /// MCPeerID must be reused, not recreated each session, or Multipeer
-    /// treats every relaunch as a brand-new peer and leaks ghost sessions.
-    static func peerID(displayName: String) -> MCPeerID {
-        let defaults = UserDefaults.standard
-        if let data = defaults.data(forKey: peerNameKey),
-           let archived = try? NSKeyedUnarchiver.unarchivedObject(ofClass: MCPeerID.self, from: data),
-           archived.displayName == displayName {
-            return archived
-        }
-        let fresh = MCPeerID(displayName: displayName)
-        if let data = try? NSKeyedArchiver.archivedData(withRootObject: fresh, requiringSecureCoding: true) {
-            defaults.set(data, forKey: peerNameKey)
-        }
-        return fresh
+    /// Always brand-new. The 4-char suffix keeps displayNames unique so
+    /// two attempts from the same phone can never collide on the host.
+    static func freshPeerID(displayName: String) -> MCPeerID {
+        let suffix = String(UUID().uuidString.prefix(4))
+        let base = String(displayName.prefix(58))
+        return MCPeerID(displayName: "\(base)·\(suffix)")
     }
 }

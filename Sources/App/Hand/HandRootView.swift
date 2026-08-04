@@ -63,6 +63,10 @@ struct HandRootView: View {
         case .bidding, .choosingTrump:
             if client.snapshot?.phase == .choosingTrump(seat: client.mySeat ?? -1) {
                 TrumpChooserView(client: client)
+            } else if client.snapshot?.gameKind == .uno {
+                // UNO has no bids — someone else is naming a color after a
+                // wild. The bid wheel would be nonsense here.
+                UnoWaitingForColorView()
             } else {
                 BidEntryView(client: client)
             }
@@ -121,38 +125,87 @@ struct LobbyWaitView: View {
     }
 }
 
-/// Dealer flipped a Wizard: choose trump, privately, on your phone.
+/// Dealer flipped a Wizard, someone named a wild eight, or an UNO wild
+/// landed: choose the new suit/color, privately, on your phone.
 struct TrumpChooserView: View {
     @Bindable var client: GameClientController
 
+    private var isUno: Bool { client.snapshot?.gameKind == .uno }
+    private var isCrazyEights: Bool { client.snapshot?.gameKind == .crazyEights }
+
     var body: some View {
         VStack(spacing: 24) {
-            Text(client.snapshot?.gameKind == .crazyEights
-                 ? "Wild eight!\nName the new suit"
-                 : "You flipped a Wizard —\npick the trump suit")
+            Text(title)
                 .font(.system(.title2, design: .serif).weight(.semibold))
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.white)
-            HStack(spacing: 18) {
-                ForEach(Suit.allCases, id: \.self) { suit in
-                    Button {
-                        Haptics.play()
-                        if client.snapshot?.gameKind == .crazyEights {
-                            client.declareSuit(suit)
-                        } else {
-                            client.chooseTrump(suit)
-                        }
-                    } label: {
-                        Text(suit.symbol)
-                            .font(.system(size: 44))
-                            .foregroundStyle(suit.isRed ? CardStyle.crimson : CardStyle.ink)
-                            .frame(width: 74, height: 74)
-                            .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(CardStyle.stockTop))
-                    }
-                    .buttonStyle(.plain)
-                }
+            if isUno {
+                unoColorRow
+            } else {
+                suitRow
             }
+        }
+    }
+
+    private var title: String {
+        if isUno { return "Pick a color" }
+        if isCrazyEights { return "Wild eight!\nName the new suit" }
+        return "You flipped a Wizard —\npick the trump suit"
+    }
+
+    /// UNO's four colors, drawn as rounded swatches rather than suit glyphs.
+    private var unoColorRow: some View {
+        HStack(spacing: 18) {
+            ForEach(UnoColor.allCases, id: \.self) { color in
+                Button {
+                    Haptics.play()
+                    client.declareSuit(color.suit)
+                } label: {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(UnoStyle.field(for: color))
+                        .frame(width: 74, height: 74)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .strokeBorder(.white.opacity(0.9), lineWidth: 3)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var suitRow: some View {
+        HStack(spacing: 18) {
+            ForEach(Suit.allCases, id: \.self) { suit in
+                Button {
+                    Haptics.play()
+                    if isCrazyEights {
+                        client.declareSuit(suit)
+                    } else {
+                        client.chooseTrump(suit)
+                    }
+                } label: {
+                    Text(suit.symbol)
+                        .font(.system(size: 44))
+                        .foregroundStyle(suit.isRed ? CardStyle.crimson : CardStyle.ink)
+                        .frame(width: 74, height: 74)
+                        .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(CardStyle.stockTop))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
+/// Someone else is naming the color after a wild — the phone just waits.
+struct UnoWaitingForColorView: View {
+    var body: some View {
+        VStack(spacing: 14) {
+            ProgressView().tint(CardStyle.gold)
+            Text("Waiting for a color…")
+                .font(.system(.title3, design: .serif).weight(.semibold))
+                .foregroundStyle(.white.opacity(0.85))
         }
     }
 }
@@ -173,7 +226,7 @@ struct HandRecapView: View {
                     .font(.system(.title2, design: .serif).weight(.semibold))
                     .foregroundStyle(.white)
             }
-            if let bid = client.snapshot?.myBid, let taken = client.snapshot?.myTricksWon {
+            if let bid = myBid, let taken = myTricksWon {
                 Text(bid == taken ? "Nailed it: \(taken) of \(bid) ✓"
                                   : "Took \(taken), bid \(bid)")
                     .font(.title3)
@@ -184,5 +237,18 @@ struct HandRecapView: View {
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.5))
         }
+    }
+
+    // Bids/tricks live on RoundState (keyed by seat). By roundComplete/
+    // gameOver the host may or may not have cleared `round` yet, so fall
+    // back to the just-completed entry in roundHistory.
+    private var myBid: Int? {
+        guard let snap = client.snapshot else { return nil }
+        return snap.round?.bids[snap.mySeat] ?? snap.roundHistory.last?.bids[snap.mySeat]
+    }
+
+    private var myTricksWon: Int? {
+        guard let snap = client.snapshot else { return nil }
+        return snap.round?.tricksWon[snap.mySeat] ?? snap.roundHistory.last?.tricksWon[snap.mySeat]
     }
 }

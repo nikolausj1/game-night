@@ -20,6 +20,7 @@ public extension GameKind {
         case .wizard: return WizardRules()
         case .ohHell: return OhHellRules()
         case .crazyEights: return CrazyEightsRules()
+        case .uno: return UnoRules()
         case .freePlay: return FreePlayRules()
         }
     }
@@ -38,6 +39,7 @@ enum TrickMath {
             case .wizard: return nil
             case .jester: continue
             case .standard(let suit, _): return suit
+            case .uno: continue // UNO cards never appear in trick games
             }
         }
         return nil

@@ -17,6 +17,8 @@ struct CardFaceView: View {
                     specialFace(letter: "W", title: "WIZARD", color: CardStyle.wizardIndigo, width: w)
                 case .jester:
                     specialFace(letter: "J", title: "JESTER", color: CardStyle.jesterPlum, width: w)
+                case .uno(let color, let symbol):
+                    UnoCardFaceView(color: color, symbol: symbol)
                 }
             }
         }
@@ -221,6 +223,9 @@ struct StarburstShape: Shape {
         CardFaceView(card: Card(id: "d7", kind: .standard(suit: .diamonds, rank: 7)))
         CardFaceView(card: Card(id: "W0", kind: .wizard))
         CardFaceView(card: Card(id: "J0", kind: .jester))
+        CardFaceView(card: Card(id: "u-r7", kind: .uno(color: .red, symbol: .number(7))))
+        CardFaceView(card: Card(id: "u-yskip", kind: .uno(color: .yellow, symbol: .skip)))
+        CardFaceView(card: Card(id: "u-wild", kind: .uno(color: nil, symbol: .wild)))
     }
     .frame(height: 240)
     .padding()

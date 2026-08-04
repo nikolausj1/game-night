@@ -55,6 +55,11 @@ final class AnnouncerDirector {
                 let margin = sorted.count >= 2 ? sorted[0] - sorted[1] : 0
                 announcer.announceGameWon(winnerName: state.seats[seat].playerName, margin: margin)
 
+            case .unoCalled(let seat):
+                sfx.play(.tableKnock)
+                _ = announcer.announceLastCard()
+                _ = state.seats.indices.contains(seat) // seat reserved for name call-outs later
+
             case .illegalAttempt, .undone, .suitDeclared:
                 break // private moments; the table doesn't call them out
             }

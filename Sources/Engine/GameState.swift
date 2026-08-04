@@ -58,6 +58,11 @@ public struct RoundState: Codable, Sendable, Equatable {
     public var completedTricks: [[TrickPlay]]
     public var leadSeat: Int
     public var turnSeat: Int
+    /// UNO: +1 clockwise, -1 after a reverse. Other games leave it at 1.
+    public var direction: Int
+    /// UNO: accumulated draw-two / wild-draw-four penalty awaiting the next
+    /// player (stack or absorb). Other games leave it at 0.
+    public var pendingDraw: Int
 
     public init(
         roundNumber: Int,
@@ -70,7 +75,9 @@ public struct RoundState: Codable, Sendable, Equatable {
         currentTrick: [TrickPlay],
         completedTricks: [[TrickPlay]],
         leadSeat: Int,
-        turnSeat: Int
+        turnSeat: Int,
+        direction: Int = 1,
+        pendingDraw: Int = 0
     ) {
         self.roundNumber = roundNumber
         self.cardsPerPlayer = cardsPerPlayer
@@ -83,6 +90,33 @@ public struct RoundState: Codable, Sendable, Equatable {
         self.completedTricks = completedTricks
         self.leadSeat = leadSeat
         self.turnSeat = turnSeat
+        self.direction = direction
+        self.pendingDraw = pendingDraw
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case roundNumber, cardsPerPlayer, dealerSeat, trumpCard, trumpSuit
+        case bids, tricksWon, currentTrick, completedTricks, leadSeat, turnSeat
+        case direction, pendingDraw
+    }
+
+    /// Custom decode so states encoded before the UNO fields existed still
+    /// load: `direction` defaults to 1, `pendingDraw` to 0.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        roundNumber = try container.decode(Int.self, forKey: .roundNumber)
+        cardsPerPlayer = try container.decode(Int.self, forKey: .cardsPerPlayer)
+        dealerSeat = try container.decode(Int.self, forKey: .dealerSeat)
+        trumpCard = try container.decodeIfPresent(Card.self, forKey: .trumpCard)
+        trumpSuit = try container.decodeIfPresent(Suit.self, forKey: .trumpSuit)
+        bids = try container.decode([Int: Int].self, forKey: .bids)
+        tricksWon = try container.decode([Int: Int].self, forKey: .tricksWon)
+        currentTrick = try container.decode([TrickPlay].self, forKey: .currentTrick)
+        completedTricks = try container.decode([[TrickPlay]].self, forKey: .completedTricks)
+        leadSeat = try container.decode(Int.self, forKey: .leadSeat)
+        turnSeat = try container.decode(Int.self, forKey: .turnSeat)
+        direction = try container.decodeIfPresent(Int.self, forKey: .direction) ?? 1
+        pendingDraw = try container.decodeIfPresent(Int.self, forKey: .pendingDraw) ?? 0
     }
 }
 

@@ -2,6 +2,15 @@ import Foundation
 import MultipeerConnectivity
 import Observation
 
+/// One chair at the table as the menu configures it: a human (mapped to a
+/// connected lobby player, in lobby order) or a bot (no device, driven by
+/// BotDirector). `id` is the seat index — pass them in seat order.
+struct SeatSpec: Identifiable {
+    let id: Int
+    var name: String
+    var isBot: Bool
+}
+
 /// The iPad's brain: owns the authoritative engine and the host session,
 /// routes player actions in and snapshots/events out. The table UI observes
 /// this; the phones only ever see their own redacted snapshots.
@@ -17,6 +26,11 @@ final class GameHostController {
 
     /// Lobby roster before a game starts: deviceID → chosen name.
     private(set) var lobbyPlayers: [(deviceID: String, name: String)] = []
+
+    /// Seats occupied by computer players this game. BotDirector reads this;
+    /// `botAction` refuses anything outside it so a bot can never move for a
+    /// human.
+    private(set) var botSeats: Set<Int> = []
 
     /// Table UI + announcer director subscribe here.
     var onEvents: (([GameEvent]) -> Void)?
@@ -53,17 +67,95 @@ final class GameHostController {
         engine = demo
     }
 
+    /// Resume hook: adopt an engine restored from a saved game, mirroring
+    /// `adoptDemoEngine`. `seats` rebuilds `botSeats` the same way
+    /// `startGame(kind:rules:seats:)` does, so BotDirector keeps auto-playing
+    /// bot turns after a resume. It can't rebuild `seatByDevice` too, though
+    /// — that reclaim table keys off deviceID, which `SeatSpec` doesn't
+    /// carry — so, same as any full app relaunch mid-game, a resumed game
+    /// doesn't yet auto-reclaim seats by returning phones. That's a
+    /// pre-existing limitation of the reclaim design, not something new here.
+    func adoptRestoredGame(_ engine: HostEngine, seats: [SeatSpec],
+                           deviceMap: [String: Int] = [:]) {
+        self.engine = engine
+        botSeats = Set(seats.filter(\.isBot).map(\.id))
+        // Restore the deviceID→seat reclaim table so phones that were at
+        // the table when it was saved walk right back into their seats.
+        seatByDevice = deviceMap
+        emit([])
+    }
+
+    /// Hold-to-close: park the game (autosave has it) and return to the
+    /// menu. Connected phones stay in the lobby for the next deal.
+    func closeTable() {
+        engine = nil
+        botSeats = []
+        seatByDevice = [:]
+        seatByPlayedCard = [:]
+        throwVelocityByCard = [:]
+        freePlayLayout = [:]
+        faceDownCards = []
+        stateVersion += 1
+    }
+
     // MARK: game lifecycle (driven by table UI)
 
+    /// All-human convenience: every connected lobby player gets a seat in
+    /// lobby order. Delegates to the SeatSpec entry point below.
     func startGame(kind: GameKind, rules: RulesConfig) {
-        let seats = lobbyPlayers.enumerated().map { index, player in
-            Seat(id: index, playerName: player.name, colorIndex: index, isConnected: true, isHost: false)
+        let specs = lobbyPlayers.enumerated().map { index, player in
+            SeatSpec(id: index, name: player.name, isBot: false)
         }
-        seatByDevice = Dictionary(uniqueKeysWithValues: lobbyPlayers.enumerated().map { ($1.deviceID, $0) })
+        startGame(kind: kind, rules: rules, seats: specs)
+    }
+
+    /// Mixed-table entry point: humans map onto connected lobby players in
+    /// lobby order (deviceID → seat reclaim keeps working); bot seats have no
+    /// device and are driven by BotDirector. Seat ids are assigned by array
+    /// position — the engine requires contiguous 0-based seats.
+    func startGame(kind: GameKind, rules: RulesConfig, seats specs: [SeatSpec]) {
+        var seats: [Seat] = []
+        var deviceMap: [String: Int] = [:]
+        var bots: Set<Int> = []
+        var humanIndex = 0
+
+        for (seatID, spec) in specs.enumerated() {
+            if spec.isBot {
+                let color = BotRoster.identity(named: spec.name)?.colorIndex ?? seatID
+                seats.append(Seat(id: seatID, playerName: spec.name, colorIndex: color,
+                                  isConnected: true, isHost: false))
+                bots.insert(seatID)
+            } else if humanIndex < lobbyPlayers.count {
+                let player = lobbyPlayers[humanIndex]
+                humanIndex += 1
+                let name = spec.name.isEmpty ? player.name : spec.name
+                deviceMap[player.deviceID] = seatID
+                seats.append(Seat(id: seatID, playerName: name, colorIndex: seatID,
+                                  isConnected: true, isHost: false))
+            } else {
+                // More human seats than connected players: seat exists but
+                // starts unclaimed. A late `hello` can't reclaim it (no
+                // deviceID yet), so the menu should avoid this — but the
+                // engine stays consistent either way.
+                seats.append(Seat(id: seatID, playerName: spec.name, colorIndex: seatID,
+                                  isConnected: false, isHost: false))
+            }
+        }
+
+        seatByDevice = deviceMap
+        botSeats = bots
         let engine = HostEngine(seats: seats, gameKind: kind, rules: rules,
                                 seed: UInt64.random(in: UInt64.min...UInt64.max))
         self.engine = engine
         emit(engine.apply(.startGame(kind, rules, seed: engine.state.seed)))
+    }
+
+    /// BotDirector's single entry: a bot's PlayerAction takes exactly the
+    /// same road as a phone's (engine apply → emit → events + snapshots).
+    /// Human seats and table actions are refused by construction.
+    func botAction(_ action: PlayerAction, from seat: Int) {
+        guard let engine, botSeats.contains(seat) else { return }
+        emit(engine.apply(action, from: seat))
     }
 
     func tableAction(_ action: TableAction) {
@@ -100,6 +192,12 @@ final class GameHostController {
     private func handle(_ msg: NetMessage, from peer: MCPeerID) {
         switch msg {
         case .hello(let name, let deviceID):
+            // Ghost hygiene: this device may be returning with a brand-new
+            // peer identity (that's the reconnect design). Forget any old
+            // peer that claimed the same deviceID so nothing double-routes.
+            for (oldPeer, oldDevice) in deviceByPeer where oldDevice == deviceID && oldPeer != peer {
+                deviceByPeer.removeValue(forKey: oldPeer)
+            }
             deviceByPeer[peer] = deviceID
             if let seat = seatByDevice[deviceID], let engine {
                 // Reclaim: same device returns mid-game → same seat, exact hand.

@@ -3,13 +3,14 @@ import Foundation
 /// The games Game Night can host. `fiveHundred` will join later; adding a
 /// case only requires a config row below plus a `GameRules` implementation.
 public enum GameKind: String, Codable, CaseIterable, Sendable {
-    case wizard, ohHell, crazyEights, freePlay
+    case wizard, ohHell, crazyEights, uno, freePlay
 
     public var displayName: String {
         switch self {
         case .wizard: return "Wizard"
         case .ohHell: return "Oh Hell"
         case .crazyEights: return "Crazy Eights"
+        case .uno: return "UNO"
         case .freePlay: return "Free Play"
         }
     }
@@ -19,6 +20,7 @@ public enum GameKind: String, Codable, CaseIterable, Sendable {
         case .wizard: return 3
         case .ohHell: return 3
         case .crazyEights: return 2
+        case .uno: return 2
         // 1 on purpose: solo free play is the "deal myself a hand and
         // fiddle" test mode (and solitaire night is legitimate).
         case .freePlay: return 1
@@ -30,6 +32,7 @@ public enum GameKind: String, Codable, CaseIterable, Sendable {
         case .wizard: return 6
         case .ohHell: return 7
         case .crazyEights: return 6
+        case .uno: return 8
         case .freePlay: return 8
         }
     }
@@ -39,13 +42,13 @@ public enum GameKind: String, Codable, CaseIterable, Sendable {
     public var isTrickTaking: Bool {
         switch self {
         case .wizard, .ohHell: return true
-        case .crazyEights, .freePlay: return false
+        case .crazyEights, .uno, .freePlay: return false
         }
     }
 
     /// Cards dealt per round, in round order.
     /// Wizard: 1...(60 ÷ players). Oh Hell: 1 up to (52 ÷ players), then back
-    /// down to 1. Crazy Eights / Free Play have no round schedule.
+    /// down to 1. Crazy Eights / UNO / Free Play have no round schedule.
     public func roundsSchedule(playerCount: Int) -> [Int] {
         guard playerCount >= minPlayers, playerCount <= maxPlayers else { return [] }
         switch self {
@@ -57,7 +60,7 @@ public enum GameKind: String, Codable, CaseIterable, Sendable {
             let maxCards = 52 / playerCount
             guard maxCards >= 1 else { return [] }
             return Array(1...maxCards) + Array((1..<maxCards).reversed())
-        case .crazyEights, .freePlay:
+        case .crazyEights, .uno, .freePlay:
             return []
         }
     }

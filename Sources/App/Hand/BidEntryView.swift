@@ -6,10 +6,10 @@ struct BidEntryView: View {
     @Bindable var client: GameClientController
     @State private var bid: Int = 0
 
-    private var maxBid: Int { client.snapshot?.cardsPerRound ?? 0 }
+    private var maxBid: Int { client.snapshot?.round?.cardsPerPlayer ?? 0 }
     private var isMyBidTurn: Bool {
         guard let snap = client.snapshot, let seat = client.mySeat else { return false }
-        return snap.phase == .bidding && snap.turnSeat == seat
+        return snap.phase == .bidding && snap.round?.turnSeat == seat
     }
 
     var body: some View {
@@ -87,8 +87,9 @@ struct BidEntryView: View {
             case .wizard: strong += 1
             case .standard(let suit, let rank):
                 if rank == 14 { strong += 1 }
-                else if let trump = client.snapshot?.trumpSuit, suit == trump, rank >= 12 { strong += 1 }
+                else if let trump = client.snapshot?.round?.trumpSuit, suit == trump, rank >= 12 { strong += 1 }
             case .jester: break
+            case .uno: break // this coach only runs for trick-taking games
             }
         }
         return "Coach: \(strong) likely \(strong == 1 ? "winner" : "winners") in this hand."

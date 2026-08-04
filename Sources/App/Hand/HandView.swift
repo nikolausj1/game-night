@@ -8,11 +8,13 @@ struct HandView: View {
     @State private var selectedCardID: String?
     @State private var dragState = CardDragState()
     @State private var departingCardID: String?
+    @AppStorage("gn.handSort") private var sortModeRaw: String = HandSortMode.asDealt.rawValue
 
-    private var hand: [Card] { client.snapshot?.myHand ?? [] }
+    private var sortMode: HandSortMode { HandSortMode(rawValue: sortModeRaw) ?? .asDealt }
+    private var hand: [Card] { sortMode.sorted(client.snapshot?.myHand ?? []) }
     private var isMyTurn: Bool {
         guard let snap = client.snapshot, let seat = client.mySeat else { return false }
-        return snap.turnSeat == seat && snap.phase == .playing
+        return snap.round?.turnSeat == seat && snap.phase == .playing
     }
 
     var body: some View {
@@ -64,7 +66,7 @@ struct HandView: View {
                 CardView(card: card, faceUp: true, elevation: elevation)
                     .frame(width: cardWidth)
                     .rotationEffect(isSelected && dragState.isDragging
-                        ? tiltWhileDragging(slot.angle)
+                        ? tiltWhileDragging(slot.angle, handHeight: size.height)
                         : slot.angle)
                     .offset(x: slot.offset.width + dragOffset.width,
                             y: slot.offset.height + dragOffset.height)
@@ -77,11 +79,19 @@ struct HandView: View {
         }
         .frame(maxWidth: .infinity)
         .offset(y: 30) // fan sits slightly into the bottom edge, like held cards
+        // Reflows the whole fan when the sort chip (in HandStatusStrip) cycles
+        // modes — it shares this @AppStorage key, so this is the local
+        // guarantee that reordering animates rather than jumping.
+        .animation(.spring(response: 0.4, dampingFraction: 0.78), value: sortModeRaw)
     }
 
-    /// A dragged card levels out as it rises — you're pulling it free of the fan.
-    private func tiltWhileDragging(_ restAngle: Angle) -> Angle {
-        let progress = Double(dragState.playProgress(handHeight: 800))
+    /// A dragged card levels out as it rises — you're pulling it free of the
+    /// fan. Must use the SAME dimension as the play-progress threshold
+    /// (the container's actual height) or the tilt and the play gesture
+    /// disagree — this used to hardcode a portrait-sized 800pt, which broke
+    /// in landscape (and on any device shorter than that).
+    private func tiltWhileDragging(_ restAngle: Angle, handHeight: CGFloat) -> Angle {
+        let progress = Double(dragState.playProgress(handHeight: handHeight))
         return .degrees(restAngle.degrees * (1 - progress))
     }
 
@@ -137,27 +147,15 @@ struct HandView: View {
 
     // MARK: chrome
 
+    // Drawing is an iPad-side (table) affordance only — the phone is
+    // hand-only, so this hint no longer offers a draw button for any game
+    // kind, including Crazy Eights and Free Play.
     private var playZoneHint: some View {
         VStack(spacing: 10) {
             Image(systemName: "chevron.up")
                 .font(.title3.weight(.semibold))
             Text(hintText)
                 .font(.system(.subheadline, design: .serif))
-            if (client.snapshot?.gameKind == .crazyEights && isMyTurn)
-                || client.snapshot?.gameKind == .freePlay {
-                Button {
-                    Haptics.tick()
-                    client.drawCard()
-                } label: {
-                    Label("Draw a card", systemImage: "square.stack.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(Capsule().fill(.white.opacity(0.14)))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(CardStyle.gold)
-            }
         }
         .foregroundStyle(.white.opacity(dragState.isDragging ? 0.9 : 0.35))
         .animation(.easeInOut(duration: 0.2), value: dragState.isDragging)

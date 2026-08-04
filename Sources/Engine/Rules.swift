@@ -16,14 +16,42 @@ public struct RulesConfig: Codable, Sendable, Equatable {
     /// illegal plays are always blocked.
     public var softEnforcement: Bool
 
+    /// UNO only: draw-two / wild-draw-four penalties may be stacked onto the
+    /// next player instead of drawn immediately. Default on.
+    public var stackDrawCards: Bool
+
+    /// UNO only: keep drawing until a playable card appears (vs. strict
+    /// draw-one-then-pass). The v1 engine treats this as always false; the
+    /// flag exists so the setting can ship without a wire change.
+    public var drawUntilPlayable: Bool
+
     public init(
         screwTheDealer: Bool = false,
         missScoresTricks: Bool = true,
-        softEnforcement: Bool = true
+        softEnforcement: Bool = true,
+        stackDrawCards: Bool = true,
+        drawUntilPlayable: Bool = false
     ) {
         self.screwTheDealer = screwTheDealer
         self.missScoresTricks = missScoresTricks
         self.softEnforcement = softEnforcement
+        self.stackDrawCards = stackDrawCards
+        self.drawUntilPlayable = drawUntilPlayable
+    }
+
+    /// Older encodes predate the UNO flags; default them on decode so saved
+    /// games and old peers still parse.
+    private enum CodingKeys: String, CodingKey {
+        case screwTheDealer, missScoresTricks, softEnforcement, stackDrawCards, drawUntilPlayable
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        screwTheDealer = try container.decode(Bool.self, forKey: .screwTheDealer)
+        missScoresTricks = try container.decode(Bool.self, forKey: .missScoresTricks)
+        softEnforcement = try container.decode(Bool.self, forKey: .softEnforcement)
+        stackDrawCards = try container.decodeIfPresent(Bool.self, forKey: .stackDrawCards) ?? true
+        drawUntilPlayable = try container.decodeIfPresent(Bool.self, forKey: .drawUntilPlayable) ?? false
     }
 }
 

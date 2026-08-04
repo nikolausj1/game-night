@@ -67,3 +67,99 @@ struct CardDragState {
         return 0.4 + 0.6 * playProgress(handHeight: handHeight)
     }
 }
+
+/// How the hand is displayed. Purely a presentation reorder — never touches
+/// the underlying snapshot, so it's safe to flip anytime, including mid-turn.
+/// Persisted via @AppStorage("gn.handSort") by whichever view last set it;
+/// every reader of that key sees the same value.
+enum HandSortMode: String, CaseIterable {
+    case asDealt, bySuitColor, byRank
+
+    var icon: String {
+        switch self {
+        case .asDealt: return "hand.raised.fill"
+        case .bySuitColor: return "square.grid.2x2.fill"
+        case .byRank: return "arrow.up.arrow.down"
+        }
+    }
+
+    var next: HandSortMode {
+        switch self {
+        case .asDealt: return .bySuitColor
+        case .bySuitColor: return .byRank
+        case .byRank: return .asDealt
+        }
+    }
+
+    func sorted(_ cards: [Card]) -> [Card] {
+        switch self {
+        case .asDealt:
+            return cards
+        case .bySuitColor:
+            return cards.sorted { Self.groupKey($0) < Self.groupKey($1) }
+        case .byRank:
+            return cards.sorted { Self.rankKey($0) < Self.rankKey($1) }
+        }
+    }
+
+    /// Suit/color grouping: standard cards by suit, UNO cards by color
+    /// (wilds sort last within their group), Wizards/Jesters trail.
+    private static func groupKey(_ card: Card) -> (Int, Int) {
+        switch card.kind {
+        case .standard(let suit, let rank):
+            return (suitOrder(suit), rank)
+        case .uno(let color, let symbol):
+            return (10 + unoColorOrder(color), symbolOrder(symbol))
+        case .wizard:
+            return (100, 0)
+        case .jester:
+            return (101, 0)
+        }
+    }
+
+    /// Rank/value: low to high within a kind; Jesters (always-low) first,
+    /// Wizards (always-high) last.
+    private static func rankKey(_ card: Card) -> (Int, Int) {
+        switch card.kind {
+        case .jester:
+            return (-1, 0)
+        case .standard(_, let rank):
+            return (0, rank)
+        case .uno(_, let symbol):
+            return (0, symbolOrder(symbol))
+        case .wizard:
+            return (2, 0)
+        }
+    }
+
+    private static func suitOrder(_ suit: Suit) -> Int {
+        switch suit {
+        case .clubs: return 0
+        case .diamonds: return 1
+        case .hearts: return 2
+        case .spades: return 3
+        }
+    }
+
+    /// Wilds (no color) sort after all four colors.
+    private static func unoColorOrder(_ color: UnoColor?) -> Int {
+        guard let color else { return 4 }
+        switch color {
+        case .red: return 0
+        case .yellow: return 1
+        case .green: return 2
+        case .blue: return 3
+        }
+    }
+
+    private static func symbolOrder(_ symbol: UnoSymbol) -> Int {
+        switch symbol {
+        case .number(let n): return n
+        case .skip: return 20
+        case .reverse: return 21
+        case .drawTwo: return 22
+        case .wild: return 23
+        case .wildDrawFour: return 24
+        }
+    }
+}

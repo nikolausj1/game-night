@@ -513,6 +513,357 @@ let stateData = try! JSONEncoder().encode(midGame.state)
 check((try! JSONDecoder().decode(GameState.self, from: stateData)) == midGame.state,
       "GameState round-trips through JSON")
 
+// MARK: - UNO deck composition & IDs
+
+let uno = DeckBuilder.uno108()
+func ucard(_ id: String) -> Card { uno.first { $0.id == id }! }
+
+check(uno.count == 108, "uno108 has 108 cards")
+check(Set(uno.map(\.id)).count == 108, "uno108 ids unique")
+check(UnoColor.allCases.allSatisfy { c in uno.filter { $0.unoColor == c && $0.unoSymbol == .number(0) }.count == 1 },
+      "one zero per color")
+check(UnoColor.allCases.allSatisfy { c in (1...9).allSatisfy { n in uno.filter { $0.unoColor == c && $0.unoSymbol == .number(n) }.count == 2 } },
+      "two of each 1-9 per color")
+check(UnoColor.allCases.allSatisfy { c in uno.filter { $0.unoColor == c && $0.unoSymbol == .skip }.count == 2 },
+      "two skips per color")
+check(UnoColor.allCases.allSatisfy { c in uno.filter { $0.unoColor == c && $0.unoSymbol == .reverse }.count == 2 },
+      "two reverses per color")
+check(UnoColor.allCases.allSatisfy { c in uno.filter { $0.unoColor == c && $0.unoSymbol == .drawTwo }.count == 2 },
+      "two draw-twos per color")
+check(uno.filter { $0.unoSymbol == .wild }.count == 4, "four wilds")
+check(uno.filter { $0.unoSymbol == .wildDrawFour }.count == 4, "four wild draw fours")
+check(uno.allSatisfy { $0.unoColor != nil || $0.unoSymbol == .wild || $0.unoSymbol == .wildDrawFour },
+      "only wilds lack a printed color")
+check(uno.contains { $0.id == "u_r5a" } && uno.contains { $0.id == "u_wild0" } && uno.contains { $0.id == "u_wd43" }
+      && uno.contains { $0.id == "u_gSa" } && uno.contains { $0.id == "u_b0" },
+      "id scheme spot checks (u_r5a / u_wild0 / u_wd43 / u_gSa / u_b0)")
+
+// MARK: - UNO color ↔ suit mapping
+
+check(Suit.hearts.unoColor == .red && Suit.diamonds.unoColor == .yellow
+      && Suit.clubs.unoColor == .green && Suit.spades.unoColor == .blue,
+      "fixed mapping: red↔hearts, yellow↔diamonds, green↔clubs, blue↔spades")
+check(UnoColor.allCases.allSatisfy { $0.suit.unoColor == $0 } && Suit.allCases.allSatisfy { $0.unoColor.suit == $0 },
+      "color↔suit mapping round-trips both ways")
+
+// MARK: - UNO GameKind config
+
+check(GameKind.uno.displayName == "UNO", "uno display name")
+check(GameKind.uno.minPlayers == 2 && GameKind.uno.maxPlayers == 8, "uno 2-8 players")
+check(!GameKind.uno.usesWizardDeck && !GameKind.uno.isTrickTaking, "uno: no wizard deck, not trick-taking")
+check(GameKind.uno.roundsSchedule(playerCount: 4).isEmpty, "uno has no round schedule")
+
+// MARK: - UNO rules config flags
+
+check(RulesConfig().stackDrawCards == true && RulesConfig().drawUntilPlayable == false,
+      "UNO flags default: stacking on, drawUntilPlayable off")
+var legacyRulesDict = try! JSONSerialization.jsonObject(
+    with: try! JSONEncoder().encode(RulesConfig(stackDrawCards: false, drawUntilPlayable: true))) as! [String: Any]
+legacyRulesDict.removeValue(forKey: "stackDrawCards")
+legacyRulesDict.removeValue(forKey: "drawUntilPlayable")
+let legacyRules = try! JSONDecoder().decode(
+    RulesConfig.self, from: try! JSONSerialization.data(withJSONObject: legacyRulesDict))
+check(legacyRules.stackDrawCards == true && legacyRules.drawUntilPlayable == false,
+      "pre-UNO RulesConfig decodes with defaults")
+
+// MARK: - UNO crafted-state helper (also exercises HostEngine(restoring:))
+
+func unoEngine(
+    hands: [Int: [Card]], top: Card, turn: Int, players: Int,
+    direction: Int = 1, pending: Int = 0,
+    rules: RulesConfig = RulesConfig(), drawPile: [Card] = [], declared: Suit? = nil
+) -> HostEngine {
+    var fullHands = hands
+    for s in 0..<players where fullHands[s] == nil { fullHands[s] = [] }
+    let round = RoundState(
+        roundNumber: 1, cardsPerPlayer: 7, dealerSeat: 0, trumpCard: nil,
+        trumpSuit: declared, bids: [:], tricksWon: [:], currentTrick: [],
+        completedTricks: [], leadSeat: turn, turnSeat: turn,
+        direction: direction, pendingDraw: pending)
+    let state = GameState(
+        gameKind: .uno, rules: rules, seats: makeSeats(players), phase: .playing,
+        round: round, hands: fullHands, drawPile: drawPile, discardPile: [top],
+        roundHistory: [], seed: 42)
+    return HostEngine(restoring: state)
+}
+
+// MARK: - UNO legality matrix
+
+let ur = UnoRules()
+let baseUno = unoEngine(hands: [:], top: ucard("u_r5a"), turn: 1, players: 3).state
+check(ur.legality(of: ucard("u_r9a"), hand: [], trick: [], trump: nil, state: baseUno).isLegal, "color match is legal")
+check(ur.legality(of: ucard("u_g5a"), hand: [], trick: [], trump: nil, state: baseUno).isLegal, "symbol match is legal")
+check(!ur.legality(of: ucard("u_g9a"), hand: [], trick: [], trump: nil, state: baseUno).isLegal, "no match is illegal")
+check(ur.legality(of: ucard("u_wild0"), hand: [], trick: [], trump: nil, state: baseUno).isLegal, "wild always legal")
+check(ur.legality(of: ucard("u_wd40"), hand: [], trick: [], trump: nil, state: baseUno).isLegal, "wild draw four always legal")
+check(ur.legality(of: ucard("u_rSa"), hand: [], trick: [], trump: nil, state: baseUno).isLegal, "action card color match legal")
+check(!ur.legality(of: ucard("u_gSa"), hand: [], trick: [], trump: nil, state: baseUno).isLegal, "action card with neither color nor symbol illegal")
+
+let declaredUno = unoEngine(hands: [:], top: ucard("u_wild0"), turn: 1, players: 3, declared: .spades).state
+check(ur.legality(of: ucard("u_b2a"), hand: [], trick: [], trump: nil, state: declaredUno).isLegal, "declared blue (spades) allows blue")
+check(!ur.legality(of: ucard("u_r2a"), hand: [], trick: [], trump: nil, state: declaredUno).isLegal, "declared blue blocks red")
+check(ur.legality(of: ucard("u_wd41"), hand: [], trick: [], trump: nil, state: declaredUno).isLegal, "wild legal on a declared color")
+
+// MARK: - UNO deal & starter reshuffle rule
+
+let unoDeal = freshEngine(.uno, players: 3, seed: 9)
+check((0..<3).allSatisfy { unoDeal.state.hands[$0]?.count == 7 }, "uno deals 7 cards each")
+check(unoDeal.state.discardPile.count == 1, "uno flips one starter card")
+check(unoDeal.state.drawPile.count == 86, "108 - 21 dealt - 1 starter = 86 in draw pile")
+check(unoDeal.state.phase == .playing && unoDeal.state.round?.turnSeat == 1, "uno starts left of dealer")
+check(unoDeal.state.round?.direction == 1 && unoDeal.state.round?.pendingDraw == 0,
+      "uno round starts direction +1, no pending draw")
+var starterAlwaysColored = true
+var unoDealConserved = true
+for seed in 0..<300 {
+    let e = freshEngine(.uno, players: 3, seed: UInt64(seed))
+    guard let s = e.state.discardPile.first else { starterAlwaysColored = false; continue }
+    if s.unoColor == nil { starterAlwaysColored = false }
+    if e.state.drawPile.count + 21 + e.state.discardPile.count != 108 { unoDealConserved = false }
+}
+check(starterAlwaysColored, "starter is never a wild across 300 seeds (reshuffle-flip)")
+check(unoDealConserved, "reshuffle-flip conserves all 108 cards")
+
+// MARK: - UNO turn effects: number / skip / reverse
+
+let eNum = unoEngine(hands: [1: [ucard("u_r7a"), ucard("u_g2a")]], top: ucard("u_r5a"), turn: 1, players: 3)
+let numEvents = eNum.apply(.playCard(cardID: "u_r7a", force: false), from: 1)
+check(playedCard(numEvents) != nil && eNum.state.round?.turnSeat == 2, "number play advances the turn")
+check(numEvents.contains(.unoCalled(seat: 1)), "unoCalled fires when a play leaves one card")
+check(isIllegal(eNum.apply(.playCard(cardID: "u_g2a", force: false), from: 1)), "out-of-turn uno play rejected")
+
+let eSkip = unoEngine(hands: [1: [ucard("u_rSa"), ucard("u_g2a")]], top: ucard("u_r5a"), turn: 1, players: 3)
+_ = eSkip.apply(.playCard(cardID: "u_rSa", force: false), from: 1)
+check(eSkip.state.round?.turnSeat == 0, "skip jumps over the next player")
+
+let eRev = unoEngine(hands: [1: [ucard("u_rRa"), ucard("u_g2a")]], top: ucard("u_r5a"), turn: 1, players: 3)
+_ = eRev.apply(.playCard(cardID: "u_rRa", force: false), from: 1)
+check(eRev.state.round?.direction == -1 && eRev.state.round?.turnSeat == 0,
+      "reverse flips direction and the turn runs backwards")
+
+let eRev2 = unoEngine(hands: [0: [ucard("u_rRa"), ucard("u_g2a")], 1: [ucard("u_b3a")]],
+                      top: ucard("u_r5a"), turn: 0, players: 2)
+_ = eRev2.apply(.playCard(cardID: "u_rRa", force: false), from: 0)
+check(eRev2.state.round?.turnSeat == 0, "2-player reverse acts as a skip (same player again)")
+
+let eClear = unoEngine(hands: [1: [ucard("u_b2a"), ucard("u_g2a")]], top: ucard("u_wild0"),
+                       turn: 1, players: 3, declared: .spades)
+_ = eClear.apply(.playCard(cardID: "u_b2a", force: false), from: 1)
+check(eClear.state.round?.trumpSuit == nil, "a fresh play clears the declared color")
+
+// MARK: - UNO wild color declaration
+
+let eWild = unoEngine(hands: [1: [ucard("u_wild0"), ucard("u_g2a")],
+                              2: [ucard("u_r2a"), ucard("u_b9a")]],
+                      top: ucard("u_r5a"), turn: 1, players: 3)
+_ = eWild.apply(.playCard(cardID: "u_wild0", force: false), from: 1)
+check(eWild.state.phase == .choosingTrump(seat: 1), "wild moves to the color-choice phase")
+check(isIllegal(eWild.apply(.declareSuit(.spades), from: 2)), "only the wild's player declares the color")
+check(isIllegal(eWild.apply(.playCard(cardID: "u_g2a", force: false), from: 1)),
+      "no card plays while a color choice is pending")
+let declareEvents = eWild.apply(.declareSuit(.spades), from: 1)
+check(declareEvents.contains(.suitDeclared(.spades)), "color declaration announced via suitDeclared")
+check(eWild.state.round?.trumpSuit == .spades && eWild.state.phase == .playing && eWild.state.round?.turnSeat == 2,
+      "declared color recorded, play resumes with the next player")
+check(isIllegal(eWild.apply(.playCard(cardID: "u_r2a", force: false), from: 2)), "declared blue blocks a red play")
+check(playedCard(eWild.apply(.playCard(cardID: "u_b9a", force: false), from: 2)) != nil, "declared blue allows a blue play")
+
+// MARK: - UNO draw-two stacking: accumulate → absorb → skip
+
+let eChain = unoEngine(
+    hands: [0: [ucard("u_rDa"), ucard("u_r1a")],
+            1: [ucard("u_gDa"), ucard("u_g1a")],
+            2: [ucard("u_b1a"), ucard("u_b2a"), ucard("u_wild1")]],
+    top: ucard("u_r5a"), turn: 0, players: 3,
+    drawPile: [ucard("u_y1a"), ucard("u_y1b"), ucard("u_y2a"), ucard("u_y2b"), ucard("u_y3a"), ucard("u_y3b")])
+_ = eChain.apply(.playCard(cardID: "u_rDa", force: false), from: 0)
+check(eChain.state.round?.pendingDraw == 2 && eChain.state.round?.turnSeat == 1, "drawTwo sets pendingDraw to 2")
+_ = eChain.apply(.playCard(cardID: "u_gDa", force: false), from: 1)
+check(eChain.state.round?.pendingDraw == 4 && eChain.state.round?.turnSeat == 2, "stacked drawTwo accumulates to 4")
+check(isIllegal(eChain.apply(.playCard(cardID: "u_b1a", force: false), from: 2)), "a number can't answer a draw chain")
+check(isIllegal(eChain.apply(.playCard(cardID: "u_wild1", force: false), from: 2)), "a plain wild can't answer a draw chain")
+_ = eChain.apply(.drawCard, from: 2)
+check(eChain.state.hands[2]?.count == 3 + 4, "absorbing draws the whole 4-card penalty")
+check(eChain.state.round?.pendingDraw == 0 && eChain.state.round?.turnSeat == 0,
+      "absorbing clears the pending draw and skips the turn")
+
+// MARK: - UNO wild draw four on a draw-two chain
+
+let eW4 = unoEngine(
+    hands: [0: [ucard("u_rDb"), ucard("u_r1b")],
+            1: [ucard("u_wd41"), ucard("u_g1b")],
+            2: [ucard("u_gDb"), ucard("u_b2b"), ucard("u_b3a")]],
+    top: ucard("u_r5b"), turn: 0, players: 3,
+    drawPile: [ucard("u_y4a"), ucard("u_y4b"), ucard("u_y5a"), ucard("u_y5b"),
+               ucard("u_y6a"), ucard("u_y6b"), ucard("u_y7a"), ucard("u_y7b")])
+_ = eW4.apply(.playCard(cardID: "u_rDb", force: false), from: 0)
+let w4Events = eW4.apply(.playCard(cardID: "u_wd41", force: false), from: 1)
+check(playedCard(w4Events) != nil && eW4.state.round?.pendingDraw == 6, "wild draw four stacks on a +2 chain (2+4=6)")
+check(eW4.state.phase == .choosingTrump(seat: 1), "a stacked wild draw four still asks for a color")
+_ = eW4.apply(.declareSuit(.clubs), from: 1)
+check(eW4.state.phase == .playing && eW4.state.round?.turnSeat == 2, "after the color pick the next player faces the stack")
+check(isIllegal(eW4.apply(.playCard(cardID: "u_gDb", force: false), from: 2)), "a drawTwo can't answer a +4 chain")
+_ = eW4.apply(.drawCard, from: 2)
+check(eW4.state.hands[2]?.count == 3 + 6 && eW4.state.round?.pendingDraw == 0, "absorbing a 2+4 chain draws 6")
+
+// MARK: - UNO non-stacking: immediate penalty
+
+let noStack = RulesConfig(stackDrawCards: false)
+let eNo = unoEngine(
+    hands: [0: [ucard("u_rDa"), ucard("u_r2b")], 1: [ucard("u_g1a")], 2: [ucard("u_b1b")]],
+    top: ucard("u_r5a"), turn: 0, players: 3, rules: noStack,
+    drawPile: [ucard("u_y8a"), ucard("u_y8b"), ucard("u_y9a"), ucard("u_y9b")])
+_ = eNo.apply(.playCard(cardID: "u_rDa", force: false), from: 0)
+check(eNo.state.hands[1]?.count == 3 && eNo.state.round?.pendingDraw == 0,
+      "non-stacking drawTwo deals 2 to the victim immediately")
+check(eNo.state.round?.turnSeat == 2, "non-stacking drawTwo skips the victim")
+
+let eNoW = unoEngine(
+    hands: [0: [ucard("u_wd42"), ucard("u_r2a")], 1: [ucard("u_g1b")], 2: [ucard("u_b2a")]],
+    top: ucard("u_r5b"), turn: 0, players: 3, rules: noStack,
+    drawPile: [ucard("u_y0"), ucard("u_g0"), ucard("u_b0"), ucard("u_r0"), ucard("u_y5a")])
+_ = eNoW.apply(.playCard(cardID: "u_wd42", force: false), from: 0)
+check(eNoW.state.phase == .choosingTrump(seat: 0) && eNoW.state.hands[1]?.count == 1,
+      "non-stacking wild draw four picks a color before the penalty lands")
+_ = eNoW.apply(.declareSuit(.hearts), from: 0)
+check(eNoW.state.hands[1]?.count == 5 && eNoW.state.round?.pendingDraw == 0,
+      "non-stacking wild draw four deals 4 after the color pick")
+check(eNoW.state.round?.turnSeat == 2 && eNoW.state.round?.trumpSuit == .hearts,
+      "victim skipped and red (hearts) declared")
+
+// MARK: - UNO voluntary draw: one card, turn passes
+
+let eDraw = unoEngine(hands: [1: [ucard("u_g9b")], 2: [ucard("u_b4a")]],
+                      top: ucard("u_r5a"), turn: 1, players: 3,
+                      drawPile: [ucard("u_y6a"), ucard("u_y6b")])
+_ = eDraw.apply(.drawCard, from: 1)
+check(eDraw.state.hands[1]?.count == 2 && eDraw.state.round?.turnSeat == 2,
+      "voluntary draw takes exactly one card and passes the turn")
+check(isIllegal(eDraw.apply(.drawCard, from: 1)), "drawing out of turn is rejected")
+
+// MARK: - UNO soft enforcement
+
+let eForce = unoEngine(hands: [1: [ucard("u_g9a"), ucard("u_g8a")]], top: ucard("u_r5a"), turn: 1, players: 3)
+check(isIllegal(eForce.apply(.playCard(cardID: "u_g9a", force: false), from: 1)),
+      "illegal uno play blocked without force")
+check(playedCard(eForce.apply(.playCard(cardID: "u_g9a", force: true), from: 1))?.forced == true,
+      "soft enforcement pushes an illegal uno play through as forced")
+
+// MARK: - UNO win: unoCalled then gameWon
+
+let eWin = unoEngine(hands: [0: [ucard("u_r9b"), ucard("u_r8a")],
+                             1: [ucard("u_r3a"), ucard("u_r4a")]],
+                     top: ucard("u_r5a"), turn: 0, players: 2)
+let winFirst = eWin.apply(.playCard(cardID: "u_r9b", force: false), from: 0)
+check(winFirst.contains(.unoCalled(seat: 0)), "unoCalled announced at exactly one card")
+_ = eWin.apply(.playCard(cardID: "u_r3a", force: false), from: 1)
+let winLast = eWin.apply(.playCard(cardID: "u_r8a", force: false), from: 0)
+check(winLast.contains(.gameWon(seat: 0)) && eWin.state.phase == .gameOver, "emptying the hand wins the game")
+check(eWin.state.hands[0]?.isEmpty == true, "uno winner's hand is empty at gameOver")
+check(isIllegal(eWin.apply(.playCard(cardID: "u_r4a", force: false), from: 1)), "no plays after uno gameOver")
+
+// MARK: - RoundState back-compat decode (direction / pendingDraw defaults)
+
+let modernRound = RoundState(
+    roundNumber: 2, cardsPerPlayer: 7, dealerSeat: 1, trumpCard: nil, trumpSuit: nil,
+    bids: [:], tricksWon: [:], currentTrick: [], completedTricks: [],
+    leadSeat: 0, turnSeat: 0, direction: -1, pendingDraw: 4)
+let modernRoundData = try! JSONEncoder().encode(modernRound)
+check((try! JSONDecoder().decode(RoundState.self, from: modernRoundData)) == modernRound,
+      "RoundState round-trips direction and pendingDraw")
+var legacyRoundDict = try! JSONSerialization.jsonObject(with: modernRoundData) as! [String: Any]
+legacyRoundDict.removeValue(forKey: "direction")
+legacyRoundDict.removeValue(forKey: "pendingDraw")
+let legacyRound = try! JSONDecoder().decode(
+    RoundState.self, from: try! JSONSerialization.data(withJSONObject: legacyRoundDict))
+check(legacyRound.direction == 1 && legacyRound.pendingDraw == 0,
+      "pre-UNO RoundState decodes with direction 1 and pendingDraw 0")
+
+// MARK: - HostEngine(restoring:) save/resume round-trip
+
+let saveSource = freshEngine(.uno, players: 3, seed: 21)
+let savedData = try! JSONEncoder().encode(saveSource.state)
+let restoredState = try! JSONDecoder().decode(GameState.self, from: savedData)
+let restored = HostEngine(restoring: restoredState)
+check(restored.state == saveSource.state, "restoring init resumes the exact saved state")
+check(restored.apply(.approveUndo).isEmpty, "restored engine starts with no undo history")
+let restoredSeat = restored.state.round!.turnSeat
+var restoredActed = false
+for candidate in restored.state.hands[restoredSeat]! {
+    if playedCard(restored.apply(.playCard(cardID: candidate.id, force: false), from: restoredSeat)) != nil {
+        restoredActed = true
+        break
+    }
+}
+if !restoredActed { restoredActed = !isIllegal(restored.apply(.drawCard, from: restoredSeat)) }
+check(restoredActed, "restored engine keeps accepting play")
+
+// MARK: - unoCalled event codable
+
+let unoEvents: [GameEvent] = [.unoCalled(seat: 2), .suitDeclared(.hearts)]
+check((try! JSONDecoder().decode([GameEvent].self, from: try! JSONEncoder().encode(unoEvents))) == unoEvents,
+      "unoCalled round-trips through JSON")
+
+// MARK: - Full seeded 3-player UNO game
+
+func driveUno(seed: UInt64, players: Int) -> (finished: Bool, sawUnoCall: Bool, sawDeclared: Bool, engine: HostEngine) {
+    let engine = freshEngine(.uno, players: players, seed: seed)
+    var sawUnoCall = false
+    var sawDeclared = false
+    var steps = 0
+    while steps < 20_000 {
+        steps += 1
+        switch engine.state.phase {
+        case .choosingTrump(let seat):
+            let color = (engine.state.hands[seat] ?? []).compactMap(\.unoColor).first ?? .red
+            let evs = engine.apply(.declareSuit(color.suit), from: seat)
+            if evs.contains(.suitDeclared(color.suit)) { sawDeclared = true }
+        case .playing:
+            let seat = engine.state.round!.turnSeat
+            var acted = false
+            for candidate in engine.state.hands[seat]! {
+                let evs = engine.apply(.playCard(cardID: candidate.id, force: false), from: seat)
+                if evs.contains(.unoCalled(seat: seat)) { sawUnoCall = true }
+                if playedCard(evs) != nil { acted = true; break }
+            }
+            if !acted, isIllegal(engine.apply(.drawCard, from: seat)) {
+                return (false, sawUnoCall, sawDeclared, engine)
+            }
+        case .gameOver:
+            return (true, sawUnoCall, sawDeclared, engine)
+        default:
+            return (false, sawUnoCall, sawDeclared, engine)
+        }
+    }
+    return (false, sawUnoCall, sawDeclared, engine)
+}
+
+var unoFinished = false
+var unoSawCall = false
+var unoSawDeclared = false
+var unoWinnerEmpty = false
+var unoConserved = true
+var unoWonEmitted = false
+for seed in 0..<40 {
+    let result = driveUno(seed: UInt64(seed), players: 3)
+    guard result.finished else { continue }
+    unoFinished = true
+    unoSawCall = unoSawCall || result.sawUnoCall
+    unoSawDeclared = unoSawDeclared || result.sawDeclared
+    let hands = result.engine.state.hands
+    unoWinnerEmpty = unoWinnerEmpty || hands.values.contains { $0.isEmpty }
+    unoWonEmitted = true // gameOver phase only reachable via gameWon in uno
+    let totalCards = hands.values.reduce(0) { $0 + $1.count }
+        + result.engine.state.drawPile.count + result.engine.state.discardPile.count
+    if totalCards != 108 { unoConserved = false }
+    if unoSawCall && unoSawDeclared && unoWinnerEmpty { break }
+}
+check(unoFinished, "seeded 3-player uno game reaches gameOver by first-legal-card play")
+check(unoSawCall, "a full uno game emitted unoCalled")
+check(unoSawDeclared, "a full uno game declared a wild color")
+check(unoWinnerEmpty && unoWonEmitted, "uno winner finished with an empty hand")
+check(unoConserved, "all 108 cards accounted for at uno gameOver")
+
 // MARK: - Summary
 
 let total = passCount + failCount

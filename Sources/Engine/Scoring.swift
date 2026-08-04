@@ -13,7 +13,7 @@ public enum Scoring {
         case .ohHell:
             if bid == tricksTaken { return 10 + tricksTaken }
             return missScoresTricks ? tricksTaken : 0
-        case .crazyEights, .freePlay:
+        case .crazyEights, .uno, .freePlay:
             return 0
         }
     }

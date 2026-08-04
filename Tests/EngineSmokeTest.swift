@@ -555,15 +555,15 @@ check(GameKind.uno.roundsSchedule(playerCount: 4).isEmpty, "uno has no round sch
 
 // MARK: - UNO rules config flags
 
-check(RulesConfig().stackDrawCards == true && RulesConfig().drawUntilPlayable == false,
-      "UNO flags default: stacking on, drawUntilPlayable off")
+check(RulesConfig().stackDrawCards == true && RulesConfig().drawUntilPlayable == true,
+      "UNO flags default: stacking on, drawUntilPlayable on (the family rule)")
 var legacyRulesDict = try! JSONSerialization.jsonObject(
-    with: try! JSONEncoder().encode(RulesConfig(stackDrawCards: false, drawUntilPlayable: true))) as! [String: Any]
+    with: try! JSONEncoder().encode(RulesConfig(stackDrawCards: false, drawUntilPlayable: false))) as! [String: Any]
 legacyRulesDict.removeValue(forKey: "stackDrawCards")
 legacyRulesDict.removeValue(forKey: "drawUntilPlayable")
 let legacyRules = try! JSONDecoder().decode(
     RulesConfig.self, from: try! JSONSerialization.data(withJSONObject: legacyRulesDict))
-check(legacyRules.stackDrawCards == true && legacyRules.drawUntilPlayable == false,
+check(legacyRules.stackDrawCards == true && legacyRules.drawUntilPlayable == true,
       "pre-UNO RulesConfig decodes with defaults")
 
 // MARK: - UNO crafted-state helper (also exercises HostEngine(restoring:))
@@ -731,15 +731,53 @@ check(eNoW.state.hands[1]?.count == 5 && eNoW.state.round?.pendingDraw == 0,
 check(eNoW.state.round?.turnSeat == 2 && eNoW.state.round?.trumpSuit == .hearts,
       "victim skipped and red (hearts) declared")
 
-// MARK: - UNO voluntary draw: one card, turn passes
+// MARK: - UNO voluntary draw, toggle OFF: exactly one card, turn passes
 
-let eDraw = unoEngine(hands: [1: [ucard("u_g9b")], 2: [ucard("u_b4a")]],
+let eDrawOff = unoEngine(hands: [1: [ucard("u_g9b")], 2: [ucard("u_b4a")]],
                       top: ucard("u_r5a"), turn: 1, players: 3,
+                      rules: RulesConfig(drawUntilPlayable: false),
                       drawPile: [ucard("u_y6a"), ucard("u_y6b")])
-_ = eDraw.apply(.drawCard, from: 1)
-check(eDraw.state.hands[1]?.count == 2 && eDraw.state.round?.turnSeat == 2,
-      "voluntary draw takes exactly one card and passes the turn")
-check(isIllegal(eDraw.apply(.drawCard, from: 1)), "drawing out of turn is rejected")
+let offDrawEvents = eDrawOff.apply(.drawCard, from: 1)
+check(eDrawOff.state.hands[1]?.count == 2 && eDrawOff.state.round?.turnSeat == 2,
+      "toggle off: voluntary draw takes exactly one card and passes the turn")
+check(!offDrawEvents.contains { if case .cardsDrawn = $0 { return true }; return false },
+      "toggle off never emits cardsDrawn")
+check(isIllegal(eDrawOff.apply(.drawCard, from: 1)), "drawing out of turn is rejected")
+
+// MARK: - UNO voluntary draw, toggle ON (default): draw-until-playable
+
+// Two unplayable draws (green 9, yellow 6 vs. a red-5 top) then a red 3
+// that's finally legal: all three land in the hand, the drawer keeps the
+// turn, and the drawn-into playable card is not auto-played.
+let eDrawUntil = unoEngine(hands: [:], top: ucard("u_r5a"), turn: 1, players: 3,
+                            drawPile: [ucard("u_g9b"), ucard("u_y6a"), ucard("u_r3a")])
+let untilEvents = eDrawUntil.apply(.drawCard, from: 1)
+check(eDrawUntil.state.hands[1]?.count == 3, "draw-until: all three drawn cards land in the hand")
+check(eDrawUntil.state.round?.turnSeat == 1, "draw-until: turn stays with the drawer once a playable card appears")
+check(eDrawUntil.state.discardPile.last?.id == "u_r5a", "draw-until: the newly playable card is not auto-played")
+check(untilEvents.contains(.cardsDrawn(seat: 1, count: 3)), "draw-until: cardsDrawn(seat:1, count:3) emitted")
+check(Set((eDrawUntil.state.hands[1] ?? []).map(\.id)) == ["u_g9b", "u_y6a", "u_r3a"],
+      "draw-until: exactly the drawn cards are in hand")
+
+// Declared wild color, not the (nil) top color, is the playability target.
+let eDrawDeclared = unoEngine(hands: [:], top: ucard("u_wild0"), turn: 1, players: 3,
+                               drawPile: [ucard("u_r3a"), ucard("u_g4a"), ucard("u_b5a")],
+                               declared: .spades) // spades ↔ blue
+let declaredEvents = eDrawDeclared.apply(.drawCard, from: 1)
+check(eDrawDeclared.state.hands[1]?.count == 3, "draw-until respects declared color: draws until the blue card")
+check(eDrawDeclared.state.round?.turnSeat == 1, "draw-until respects declared color: turn stays with the drawer")
+check(declaredEvents.contains(.cardsDrawn(seat: 1, count: 3)), "draw-until respects declared color: cardsDrawn count 3")
+
+// Dry deck: both draws stay unplayable, the pile and discard both run out,
+// so drawing stops and the turn passes instead of stalling.
+let eDrawDry = unoEngine(hands: [:], top: ucard("u_r5a"), turn: 1, players: 3,
+                          drawPile: [ucard("u_g9a"), ucard("u_y9a")])
+let dryEvents = eDrawDry.apply(.drawCard, from: 1)
+check(eDrawDry.state.hands[1]?.count == 2, "dry deck: both drawn cards still land in hand")
+check(eDrawDry.state.drawPile.isEmpty && eDrawDry.state.discardPile.count == 1,
+      "dry deck: draw pile and recyclable discard are both exhausted")
+check(eDrawDry.state.round?.turnSeat == 2, "dry deck: no playable card found, so the turn passes instead of stalling")
+check(dryEvents.contains(.cardsDrawn(seat: 1, count: 2)), "dry deck: cardsDrawn still reports the two cards drawn")
 
 // MARK: - UNO soft enforcement
 
@@ -804,12 +842,19 @@ let unoEvents: [GameEvent] = [.unoCalled(seat: 2), .suitDeclared(.hearts)]
 check((try! JSONDecoder().decode([GameEvent].self, from: try! JSONEncoder().encode(unoEvents))) == unoEvents,
       "unoCalled round-trips through JSON")
 
+let cardsDrawnEvents: [GameEvent] = [.cardsDrawn(seat: 1, count: 3)]
+check((try! JSONDecoder().decode([GameEvent].self, from: try! JSONEncoder().encode(cardsDrawnEvents))) == cardsDrawnEvents,
+      "cardsDrawn round-trips through JSON")
+
 // MARK: - Full seeded 3-player UNO game
 
-func driveUno(seed: UInt64, players: Int) -> (finished: Bool, sawUnoCall: Bool, sawDeclared: Bool, engine: HostEngine) {
-    let engine = freshEngine(.uno, players: players, seed: seed)
+func driveUno(
+    seed: UInt64, players: Int, rules: RulesConfig = RulesConfig()
+) -> (finished: Bool, sawUnoCall: Bool, sawDeclared: Bool, sawMultiDraw: Bool, engine: HostEngine) {
+    let engine = freshEngine(.uno, players: players, rules: rules, seed: seed)
     var sawUnoCall = false
     var sawDeclared = false
+    var sawMultiDraw = false
     var steps = 0
     while steps < 20_000 {
         steps += 1
@@ -826,16 +871,22 @@ func driveUno(seed: UInt64, players: Int) -> (finished: Bool, sawUnoCall: Bool, 
                 if evs.contains(.unoCalled(seat: seat)) { sawUnoCall = true }
                 if playedCard(evs) != nil { acted = true; break }
             }
-            if !acted, isIllegal(engine.apply(.drawCard, from: seat)) {
-                return (false, sawUnoCall, sawDeclared, engine)
+            if !acted {
+                let drawEvents = engine.apply(.drawCard, from: seat)
+                if isIllegal(drawEvents) {
+                    return (false, sawUnoCall, sawDeclared, sawMultiDraw, engine)
+                }
+                if drawEvents.contains(where: { if case .cardsDrawn(_, let count) = $0 { return count > 1 }; return false }) {
+                    sawMultiDraw = true
+                }
             }
         case .gameOver:
-            return (true, sawUnoCall, sawDeclared, engine)
+            return (true, sawUnoCall, sawDeclared, sawMultiDraw, engine)
         default:
-            return (false, sawUnoCall, sawDeclared, engine)
+            return (false, sawUnoCall, sawDeclared, sawMultiDraw, engine)
         }
     }
-    return (false, sawUnoCall, sawDeclared, engine)
+    return (false, sawUnoCall, sawDeclared, sawMultiDraw, engine)
 }
 
 var unoFinished = false
@@ -863,6 +914,25 @@ check(unoSawCall, "a full uno game emitted unoCalled")
 check(unoSawDeclared, "a full uno game declared a wild color")
 check(unoWinnerEmpty && unoWonEmitted, "uno winner finished with an empty hand")
 check(unoConserved, "all 108 cards accounted for at uno gameOver")
+
+// MARK: - Full seeded games with drawUntilPlayable ON (the default): no stalls
+
+var drawUntilFinishedCount = 0
+var drawUntilConserved = true
+var drawUntilSawMultiDraw = false
+for seed in 100..<140 {
+    let result = driveUno(seed: UInt64(seed), players: 4, rules: RulesConfig(drawUntilPlayable: true))
+    guard result.finished else { continue }
+    drawUntilFinishedCount += 1
+    drawUntilSawMultiDraw = drawUntilSawMultiDraw || result.sawMultiDraw
+    let hands = result.engine.state.hands
+    let totalCards = hands.values.reduce(0) { $0 + $1.count }
+        + result.engine.state.drawPile.count + result.engine.state.discardPile.count
+    if totalCards != 108 { drawUntilConserved = false }
+}
+check(drawUntilFinishedCount == 40, "every seeded 4-player draw-until-playable game reaches gameOver (no stalls)")
+check(drawUntilSawMultiDraw, "at least one seeded game exercised a multi-card draw-until-playable pull")
+check(drawUntilConserved, "all 108 cards accounted for at gameOver under draw-until-playable")
 
 // MARK: - Summary
 

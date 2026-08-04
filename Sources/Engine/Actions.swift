@@ -42,4 +42,9 @@ public enum GameEvent: Codable, Sendable, Equatable {
     case suitDeclared(Suit)
     /// UNO: a play just left this seat holding exactly one card.
     case unoCalled(seat: Int)
+    /// UNO: a voluntary draw pulled `count` cards into this seat's hand
+    /// (drawUntilPlayable draws more than one when the first few misses are
+    /// unplayable). The turn does not pass — the drawer must play next,
+    /// unless the deck ran dry first.
+    case cardsDrawn(seat: Int, count: Int)
 }

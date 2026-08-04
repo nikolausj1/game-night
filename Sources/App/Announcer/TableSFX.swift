@@ -72,6 +72,9 @@ final class TableSFX {
             guard let url = Self.resolvedURL(basename: effect.rawValue) else { continue }
             guard let player = try? AVAudioPlayer(contentsOf: url) else { continue }
             player.volume = Self.volumes[effect] ?? 0.5
+            // Rate is set per-play (see play(_:intensity:)) — enabling it
+            // once here is what makes .rate assignments take effect at all.
+            player.enableRate = true
             player.prepareToPlay()
             players[effect] = player
         }
@@ -81,8 +84,25 @@ final class TableSFX {
     /// mid-playback (e.g. rapid taps during a fast multi-card deal).
     /// Silently no-ops if the clip wasn't found/loaded at init.
     func play(_ effect: Effect) {
+        play(effect, intensity: 1.0)
+    }
+
+    /// Velocity-pitched playback: `intensity` (0.3...1.6, "how hard did
+    /// this land") maps to both playback rate (0.85...1.30) and volume, so
+    /// a hard flick reads as a hard flick and a gentle nudge stays quiet.
+    ///
+    /// Players are pooled — one `AVAudioPlayer` per effect, reused across
+    /// every call — so `rate` MUST be reset on every play. Without this, a
+    /// high-intensity throw's pitch bleeds into the next, unrelated play
+    /// of the same effect.
+    func play(_ effect: Effect, intensity: Double) {
         guard let player = players[effect] else { return }
         if player.isPlaying { player.stop() }
+        let rateIntensity = max(0.3, min(intensity, 1.6))
+        let rate = 0.85 + (rateIntensity - 0.3) / (1.6 - 0.3) * (1.30 - 0.85)
+        player.rate = Float(rate)
+        let baseVolume = Self.volumes[effect] ?? 0.5
+        player.volume = baseVolume * Float(0.75 + 0.25 * min(intensity, 1.2))
         player.currentTime = 0
         player.play()
     }

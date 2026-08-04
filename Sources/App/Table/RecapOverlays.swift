@@ -67,6 +67,8 @@ struct RoundRecapOverlay: View {
 struct GameOverOverlay: View {
     @Bindable var host: GameHostController
     let state: GameState
+    /// Back to the menu (the game is over — no save needed).
+    var onMenu: (() -> Void)? = nil
 
     private var finalStandings: [(seat: Seat, total: Int)] {
         let totals = Scoring.totals(history: state.roundHistory, kind: state.gameKind, missScoresTricks: state.rules.missScoresTricks)
@@ -91,17 +93,30 @@ struct GameOverOverlay: View {
                 .foregroundStyle(CardStyle.stockTop)
             }
         } action: {
-            Button {
-                host.tableAction(.newDeal)
-            } label: {
-                Text("Play again")
-                    .font(.title3.weight(.bold))
-                    .padding(.horizontal, 34)
-                    .padding(.vertical, 12)
+            HStack(spacing: 14) {
+                Button {
+                    host.tableAction(.newDeal)
+                } label: {
+                    Text("Play again")
+                        .font(.title3.weight(.bold))
+                        .padding(.horizontal, 30)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(CardStyle.gold)
+                .foregroundStyle(CardStyle.ink)
+
+                Button {
+                    onMenu?()
+                } label: {
+                    Text("Back to menu")
+                        .font(.title3.weight(.semibold))
+                        .padding(.horizontal, 22)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.bordered)
+                .tint(CardStyle.stockTop)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(CardStyle.gold)
-            .foregroundStyle(CardStyle.ink)
         }
     }
 

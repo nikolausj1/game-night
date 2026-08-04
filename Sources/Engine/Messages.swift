@@ -29,6 +29,12 @@ public enum NetMessage: Codable, Sendable, Equatable {
     /// the flick velocity in points/sec on the thrower's screen. The table
     /// uses it to give the card a matching slide; the engine never sees it.
     case throwInfo(cardID: String, vx: Double, vy: Double)
+    /// Dev tool, free play only, presentation-only (like throwInfo): which
+    /// play animation the table should use for this card's landing —
+    /// `pileDrop` true for the airborne arc onto a neat pile, false for the
+    /// trick-game friction slide. Sent just before the throwInfo/playCard
+    /// pair so the table already knows the style when the card lands.
+    case throwStyle(cardID: String, pileDrop: Bool)
     /// Dice mode, phone → table: the pour. `intensity` (0.3…1.5) scales the
     /// table-side launch velocity and tumble time. The dice results are
     /// rolled on the table (seeded RNG), never on the phone.

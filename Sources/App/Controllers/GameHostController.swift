@@ -43,6 +43,12 @@ final class GameHostController {
     /// card. Consumed once by the physics when the card lands.
     var throwVelocityByCard: [String: CGSize] = [:]
 
+    /// Dev tool, free play only: cards whose flick should land with the
+    /// airborne pile-drop animation instead of the trick-game friction
+    /// slide. Presentation-only, set by `.throwStyle` just before the
+    /// matching throwInfo/playCard pair arrives.
+    var pileDropCards: Set<String> = []
+
     /// Dice mode (dice games live OUTSIDE the card engine — see
     /// App/Dice/DiceGameController): deviceID → dice seat, set by the dice
     /// controller when a dice game starts and cleared when it ends. Plays
@@ -241,6 +247,14 @@ final class GameHostController {
         case .throwInfo(let cardID, let vx, let vy):
             throwVelocityByCard[cardID] = CGSize(width: vx, height: vy)
             if throwVelocityByCard.count > 64 { throwVelocityByCard.removeAll() } // stale-flick hygiene
+
+        case .throwStyle(let cardID, let pileDrop):
+            if pileDrop {
+                pileDropCards.insert(cardID)
+            } else {
+                pileDropCards.remove(cardID)
+            }
+            if pileDropCards.count > 64 { pileDropCards.removeAll() } // stale-flick hygiene
 
         case .dicePour(let intensity):
             // Same deviceID-keyed routing as .action, against the dice

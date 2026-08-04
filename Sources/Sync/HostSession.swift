@@ -36,9 +36,15 @@ final class HostSession: NSObject {
         let encryption: MCEncryptionPreference = .required
         #endif
         self.session = MCSession(peer: peerID, securityIdentity: nil, encryptionPreference: encryption)
+        // "ts" lets phones prefer the LIVE table over ghost advertisements:
+        // force-quit apps leave stale Bonjour records in the mDNS cache for
+        // minutes, and a client that courts the first "table" it sees can
+        // spin forever on a corpse (observed in the field). Newest wins.
         self.advertiser = MCNearbyServiceAdvertiser(
             peer: peerID,
-            discoveryInfo: ["role": "table"],
+            discoveryInfo: ["role": "table",
+                            "ts": String(Int(Date().timeIntervalSince1970)),
+                            "name": tableName],
             serviceType: Self.serviceType
         )
         super.init()

@@ -30,9 +30,11 @@ final class DiceLauncher {
 }
 
 /// Left-Right-Center, table-side. Owns all rules state (chips, pot, turn),
-/// rolls the dice with a seeded RNG, drives bot turns, and pushes each
-/// phone its personalized `DiceClientState` after every mutation — the
-/// dice-world mirror of GameHostController's engine + emit loop.
+/// requests physical rolls from the table's 3D dice scene (the settled
+/// faces ARE the result — physics is the RNG), drives bot turns, and
+/// pushes each phone its personalized `DiceClientState` after every
+/// mutation — the dice-world mirror of GameHostController's engine + emit
+/// loop.
 ///
 /// LCR rules as implemented:
 /// - Everyone starts with 3 chips.
@@ -58,13 +60,14 @@ final class DiceGameController {
         let colorIndex: Int
     }
 
-    /// One roll in flight, for the table's physics layer. `faces` are the
-    /// authoritative results — the view tumbles the dice, then locks each
-    /// one to its face as it slows.
+    /// One roll in flight, for the table's 3D physics layer. The controller
+    /// no longer pre-rolls faces — it asks the scene to throw `count` real
+    /// dice and the PHYSICS decides: when they settle, the scene reads the
+    /// up-faces and reports back via `completeRoll(id:faces:)`.
     struct Roll: Equatable {
         let id: Int
         let seat: Int
-        let faces: [LcrFace]
+        let count: Int
         let intensity: Double // 0.3…1.5
     }
 
@@ -137,18 +140,12 @@ final class DiceGameController {
         scheduleBotIfNeeded()
     }
 
-    /// Shared timing contract with DiceTableView's physics: how long the
-    /// dice tumble for a given pour intensity. The controller resolves the
-    /// roll (chips move, turn advances) just after this elapses.
-    static func settleDuration(intensity: Double) -> Double {
-        let norm = min(1, max(0, (intensity - 0.3) / 1.2))
-        return 1.2 + 1.0 * norm // 1.2…2.2s
-    }
-
     // MARK: - Rolling
 
     /// Single entry for every roll: phone pours, plate taps, and bots all
-    /// land here. Ignores anything that isn't the current turn.
+    /// land here. Ignores anything that isn't the current turn. Publishes
+    /// a `Roll` request; the table's SceneKit layer throws real dice and
+    /// calls `completeRoll(id:faces:)` with what physics settled on.
     func roll(from seat: Int, intensity rawIntensity: Double) {
         guard !gameOver, !rollInFlight, seat == turnSeat,
               seats.indices.contains(seat) else { return }
@@ -156,24 +153,36 @@ final class DiceGameController {
         guard count > 0 else { return } // turn skipping should prevent this
 
         let intensity = min(1.5, max(0.3, rawIntensity))
-        var faces: [LcrFace] = []
-        for _ in 0..<count { faces.append(drawFace()) }
-
         rollCounter += 1
-        let roll = Roll(id: rollCounter, seat: seat, faces: faces, intensity: intensity)
+        let roll = Roll(id: rollCounter, seat: seat, count: count, intensity: intensity)
         rollInFlight = true
         currentRoll = roll
         stateVersion += 1
         TableSFX.shared.play(.dicePour)
 
-        // Resolve after the table's dice have settled (+ a beat to read them).
-        let delay = Self.settleDuration(intensity: intensity) + 0.35
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            self?.resolve(rollID: roll.id)
+        // Watchdog: if no scene reports back (table view torn down
+        // mid-roll, physics wedged), fall back to seeded RNG faces so the
+        // game never hangs. In normal play the scene answers in 2–5s.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard let self, self.rollInFlight, self.currentRoll?.id == roll.id else { return }
+            var faces: [LcrFace] = []
+            for _ in 0..<count { faces.append(self.drawFace()) }
+            self.resolve(rollID: roll.id, faces: faces)
         }
     }
 
-    /// One die: 3 dot sides, 1 left, 1 right, 1 center.
+    /// The physics layer's report: the dice have settled and these are the
+    /// faces pointing up (die order). A short beat lets everyone read the
+    /// table before the chips move.
+    func completeRoll(id: Int, faces: [LcrFace]) {
+        guard rollInFlight, currentRoll?.id == id else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { [weak self] in
+            self?.resolve(rollID: id, faces: faces)
+        }
+    }
+
+    /// Watchdog fallback only — one die: 3 dot sides, 1 left, 1 right,
+    /// 1 center. Live results come from DieFaceReader, not this.
     private func drawFace() -> LcrFace {
         switch Int.random(in: 0..<6, using: &rng) {
         case 0, 1, 2: return .dot
@@ -183,13 +192,13 @@ final class DiceGameController {
         }
     }
 
-    private func resolve(rollID: Int) {
+    private func resolve(rollID: Int, faces: [LcrFace]) {
         guard let roll = currentRoll, roll.id == rollID, rollInFlight else { return }
         rollInFlight = false
 
         var transfers: [ChipTransfer] = []
         let n = seats.count
-        for face in roll.faces {
+        for face in faces {
             guard chips[roll.seat] > 0 else { break } // defensive; can't overdraw
             switch face {
             case .dot:

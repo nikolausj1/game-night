@@ -44,9 +44,14 @@ final class GameClientController {
 
     /// velocity: the flick in points/sec on this screen — presentation
     /// data for the table's physics, never game state.
-    func playCard(_ cardID: String, velocity: CGSize = .zero) {
+    /// pileDrop: dev-tool only (free play), presentation-only — nil means
+    /// "don't send", so every existing caller keeps its current behavior.
+    func playCard(_ cardID: String, velocity: CGSize = .zero, pileDrop: Bool? = nil) {
         pendingIllegal = nil
         lastAttemptedCardID = cardID
+        if let pileDrop, case .connected = connectionState {
+            session.send(.throwStyle(cardID: cardID, pileDrop: pileDrop))
+        }
         if velocity != .zero {
             session.send(.throwInfo(cardID: cardID,
                                     vx: Double(velocity.width),
@@ -106,7 +111,7 @@ final class GameClientController {
             }
         case .rejected(let reason):
             lastRejection = reason
-        case .hello, .seatClaim, .action, .heartbeat, .throwInfo, .dicePour:
+        case .hello, .seatClaim, .action, .heartbeat, .throwInfo, .throwStyle, .dicePour:
             break // client-outbound only
         }
     }

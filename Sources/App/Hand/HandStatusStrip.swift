@@ -31,6 +31,9 @@ struct HandStatusStrip: View {
             if let bid = myBid {
                 BidProgressChip(bid: bid, taken: myTricksWon ?? 0)
             }
+            if client.snapshot?.gameKind == .freePlay {
+                ThrowStyleChip()
+            }
             HandSortChip()
         }
         .padding(.horizontal, 16)
@@ -125,6 +128,33 @@ struct HandSortChip: View {
                 .background(Circle().fill(.white.opacity(0.12)))
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Dev tool, free play only: which play animation your flicks use on the
+/// table. Tap toggles between the trick-game friction slide and the
+/// airborne pile-drop arc. Persisted so it survives app relaunch, matches
+/// HandSortChip's small capsule footprint.
+struct ThrowStyleChip: View {
+    @AppStorage("gn.devThrowStyle") private var throwStyleRaw: String = "slide"
+
+    private var isPile: Bool { throwStyleRaw == "pile" }
+
+    var body: some View {
+        Button {
+            Haptics.tick()
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                throwStyleRaw = isPile ? "slide" : "pile"
+            }
+        } label: {
+            Image(systemName: isPile ? "arrow.up.forward" : "arrow.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.75))
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(.white.opacity(0.12)))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isPile ? "Throw style: pile" : "Throw style: slide")
     }
 }
 

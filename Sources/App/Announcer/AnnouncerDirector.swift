@@ -33,7 +33,9 @@ final class AnnouncerDirector {
                 announcer.announceTrumpReveal(suitName: suit?.rawValue)
 
             case .cardPlayed(_, let card, _):
-                sfx.play(.cardSlide)
+                // Slide SFX now fires from the table's arrival animations
+                // with real throw intensity (TableGameView) — playing it
+                // here too would double it.
                 if case .wizard = card.kind { announcer.announceWizardPlayed() }
                 if case .jester = card.kind { announcer.announceJesterPlayed() }
 
@@ -59,6 +61,9 @@ final class AnnouncerDirector {
                 sfx.play(.tableKnock)
                 _ = announcer.announceLastCard()
                 _ = state.seats.indices.contains(seat) // seat reserved for name call-outs later
+
+            case .cardsDrawn:
+                break // mechanical: no announcer line for a draw-until-playable pull
 
             case .illegalAttempt, .undone, .suitDeclared:
                 break // private moments; the table doesn't call them out

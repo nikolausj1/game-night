@@ -24,6 +24,31 @@ final class ClientSession: NSObject {
     private var outSeq: UInt64 = 0
     private var tablePeer: MCPeerID?
 
+    /// Discovered tables, ghost-resistant selection state.
+    struct TableCandidate { var ts: Double; var name: String }
+    private var candidates: [MCPeerID: TableCandidate] = [:]
+    private var blacklist: [MCPeerID: Date] = [:]
+
+    /// Peer displayNames carry a uniquing "·XXXX" suffix — never show it.
+    private func cleanName(_ displayName: String) -> String {
+        displayName.components(separatedBy: "·").first ?? displayName
+    }
+
+    /// Court the most recently launched, non-blacklisted table.
+    private func tryBestCandidate() {
+        guard tablePeer == nil else { return }
+        let now = Date()
+        blacklist = blacklist.filter { now.timeIntervalSince($0.value) < 25 }
+        guard let best = candidates
+            .filter({ blacklist[$0.key] == nil })
+            .max(by: { $0.value.ts < $1.value.ts }) else { return }
+        tablePeer = best.key
+        setState(.connecting(tableName: best.value.name))
+        // Short timeout: a ghost that won't answer should cost seconds,
+        // not a stare-down. notConnected/timeout blacklists and cycles.
+        browser.invitePeer(best.key, to: session, withContext: nil, timeout: 6)
+    }
+
     /// Watchdog: the host broadcasts a heartbeat every few seconds; if the
     /// session claims "connected" but nothing arrives, it's wedged.
     private var lastReceiveAt = Date.distantPast
@@ -85,6 +110,7 @@ final class ClientSession: NSObject {
         }
         log.info("refresh: rebuilding transport with fresh peer identity")
         tablePeer = nil
+        candidates = [:] // fresh browser re-reports live peers only
         rebuildTransport()
         setState(.searching)
         browser.startBrowsingForPeers()
@@ -154,18 +180,22 @@ final class ClientSession: NSObject {
 extension ClientSession: MCNearbyServiceBrowserDelegate {
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
         guard info?["role"] == "table" else { return }
-        // First table wins; multiple simultaneous tables in one house is a
-        // v2 problem (QR code would disambiguate).
-        guard tablePeer == nil || tablePeer == peerID else { return }
-        tablePeer = peerID
-        setState(.connecting(tableName: peerID.displayName))
-        browser.invitePeer(peerID, to: session, withContext: nil, timeout: 15)
+        // Collect candidates instead of marrying the first one: after a few
+        // force-quits the mDNS cache is littered with ghost tables, and the
+        // ghost usually surfaces first. Newest launch timestamp wins;
+        // failed invites get blacklisted so we cycle instead of spinning.
+        let ts = Double(info?["ts"] ?? "") ?? 0
+        let name = info?["name"] ?? cleanName(peerID.displayName)
+        candidates[peerID] = TableCandidate(ts: ts, name: name)
+        tryBestCandidate()
     }
 
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
+        candidates.removeValue(forKey: peerID)
         if peerID == tablePeer, case .connecting = connectionState {
             tablePeer = nil
             setState(.searching)
+            tryBestCandidate()
         }
     }
 
@@ -180,15 +210,28 @@ extension ClientSession: MCSessionDelegate {
         switch state {
         case .connected:
             lastReceiveAt = Date()
-            setState(.connected(tableName: peerID.displayName))
+            let name = candidates[peerID]?.name ?? cleanName(peerID.displayName)
+            blacklist = [:]
+            setState(.connected(tableName: name))
             // Introduce ourselves immediately; the host replies with a
             // snapshot (and our old seat, if we had one). Send the CLEAN
             // player name — the peer displayName carries a uniquing suffix.
             send(.hello(name: playerName, deviceID: PeerIdentity.deviceID))
         case .notConnected:
-            // The old session object is dead — rebuild everything so the
-            // next discovery starts clean. (Sessions do not survive locks.)
-            DispatchQueue.main.async { self.refresh() }
+            // Invite failed or link died. If we were still courting, this
+            // candidate is likely a ghost: blacklist it and try the next
+            // table rather than re-courting the same corpse forever.
+            DispatchQueue.main.async {
+                if case .connecting = self.connectionState {
+                    self.blacklist[peerID] = Date()
+                    self.tablePeer = nil
+                    self.setState(.searching)
+                    self.tryBestCandidate()
+                } else {
+                    // Was fully connected and dropped: full rebuild.
+                    self.refresh()
+                }
+            }
         case .connecting:
             break
         @unknown default:

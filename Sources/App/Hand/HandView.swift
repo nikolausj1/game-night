@@ -8,7 +8,13 @@ struct HandView: View {
     @State private var selectedCardID: String?
     @State private var dragState = CardDragState()
     @State private var departingCardID: String?
+    // Gyroscope parallax: tiny, silky, never touches gesture math. See
+    // HandMotion for the baseline-recentering + low-pass model.
+    @State private var motion = HandMotion()
     @AppStorage("gn.handSort") private var sortModeRaw: String = HandSortMode.asDealt.rawValue
+    // Dev tool, free play only: mirrors ThrowStyleChip's stored value —
+    // read here so playSelectedCard knows which animation to request.
+    @AppStorage("gn.devThrowStyle") private var throwStyleRaw: String = "slide"
 
     private var sortMode: HandSortMode { HandSortMode(rawValue: sortModeRaw) ?? .asDealt }
     private var hand: [Card] { sortMode.sorted(client.snapshot?.myHand ?? []) }
@@ -44,6 +50,8 @@ struct HandView: View {
                     )
                 }
             }
+            .onAppear { motion.start() }
+            .onDisappear { motion.stop() }
         }
     }
 
@@ -54,6 +62,14 @@ struct HandView: View {
         let layout = HandFanLayout(cardCount: hand.count,
                                    containerWidth: size.width,
                                    cardWidth: cardWidth)
+
+        // Gyroscope parallax, applied to rendering offsets only — driven
+        // straight off HandMotion's already-low-passed values, no
+        // animation wrapper needed (that would double-smooth and add lag).
+        let parallaxX = CGFloat(motion.tiltX) * 10   // ±10pt horizontal
+        let parallaxY = CGFloat(motion.tiltY) * 4    // ±4pt vertical
+        let parallaxRoll = Angle.degrees(motion.tiltX * 1.5) // ±1.5° fan roll
+
         return ZStack {
             ForEach(Array(hand.enumerated()), id: \.element.id) { index, card in
                 let isSelected = selectedCardID == card.id
@@ -62,14 +78,19 @@ struct HandView: View {
                 let elevation = isSelected
                     ? dragState.elevation(handHeight: size.height)
                     : 0
+                // Parallax depth: cards toward the wings of the fan drift
+                // ~20% more than the center card, so the fan reads as a
+                // curved surface tilting rather than a flat sticker.
+                let depth = layout.normalizedDistanceFromCenter(for: index) * 0.2
+                let cardParallax = CGSize(width: parallaxX * depth, height: parallaxY * depth)
 
                 CardView(card: card, faceUp: true, elevation: elevation)
                     .frame(width: cardWidth)
                     .rotationEffect(isSelected && dragState.isDragging
                         ? tiltWhileDragging(slot.angle, handHeight: size.height)
                         : slot.angle)
-                    .offset(x: slot.offset.width + dragOffset.width,
-                            y: slot.offset.height + dragOffset.height)
+                    .offset(x: slot.offset.width + dragOffset.width + cardParallax.width,
+                            y: slot.offset.height + dragOffset.height + cardParallax.height)
                     .zIndex(isSelected ? 100 : slot.zIndex)
                     .opacity(departingCardID == card.id ? 0 : 1)
                     .gesture(playGesture(for: card, in: size))
@@ -78,7 +99,10 @@ struct HandView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .offset(y: 30) // fan sits slightly into the bottom edge, like held cards
+        // fan sits slightly into the bottom edge, like held cards, plus
+        // the whole-fan parallax shift and a subtle roll from tilting.
+        .offset(x: parallaxX, y: 30 + parallaxY)
+        .rotationEffect(parallaxRoll)
         // Reflows the whole fan when the sort chip (in HandStatusStrip) cycles
         // modes — it shares this @AppStorage key, so this is the local
         // guarantee that reordering animates rather than jumping.
@@ -134,7 +158,8 @@ struct HandView: View {
             dragState.translation.height = -size.height
             departingCardID = card.id
         }
-        client.playCard(card.id, velocity: velocity)
+        let pileDrop: Bool? = client.snapshot?.gameKind == .freePlay ? (throwStyleRaw == "pile") : nil
+        client.playCard(card.id, velocity: velocity, pileDrop: pileDrop)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             dragState = CardDragState()
             selectedCardID = nil

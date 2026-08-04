@@ -17,6 +17,7 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 32) {
                         cardBacksSection
                         tableSection
+                        motionSection
                     }
                     .padding(.horizontal, 28)
                     .padding(.top, 20)
@@ -111,6 +112,57 @@ struct SettingsView: View {
                     }
                 }
             }
+        }
+    }
+
+    @AppStorage("gn.tableMotion") private var tableMotionOn = true
+    @AppStorage("gn.tableMotionSens") private var tableMotionSens = 1.0
+
+    /// The table feels being touched: bump it and things hop, handle it
+    /// and things drift. Off switch + how touchy it is.
+    private var motionSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionLabel("Table Motion")
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle(isOn: $tableMotionOn) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("The table feels bumps")
+                            .font(.system(.body, design: .serif).weight(.semibold))
+                            .foregroundStyle(CardStyle.stockTop)
+                        Text("Knock the table and loose cards and dice react.")
+                            .font(.caption)
+                            .foregroundStyle(CardStyle.stockTop.opacity(0.55))
+                    }
+                }
+                .tint(CardStyle.gold)
+
+                if tableMotionOn {
+                    HStack(spacing: 12) {
+                        Image(systemName: "tortoise.fill")
+                            .font(.caption)
+                            .foregroundStyle(CardStyle.stockTop.opacity(0.5))
+                        Slider(value: $tableMotionSens, in: 0.5...2.0)
+                            .tint(CardStyle.gold)
+                        Image(systemName: "hare.fill")
+                            .font(.caption)
+                            .foregroundStyle(CardStyle.stockTop.opacity(0.5))
+                    }
+                    Text(sensitivityLabel)
+                        .font(.system(.caption, design: .serif).italic())
+                        .foregroundStyle(CardStyle.gold.opacity(0.85))
+                }
+            }
+            .padding(18)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.black.opacity(0.25)))
+        }
+    }
+
+    private var sensitivityLabel: String {
+        switch tableMotionSens {
+        case ..<0.8: return "Sturdy oak — only real thumps register."
+        case ..<1.3: return "Solid table — bumps and handling both felt."
+        default: return "Rickety card table — every touch travels."
         }
     }
 

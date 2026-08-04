@@ -21,8 +21,9 @@ public struct RulesConfig: Codable, Sendable, Equatable {
     public var stackDrawCards: Bool
 
     /// UNO only: keep drawing until a playable card appears (vs. strict
-    /// draw-one-then-pass). The v1 engine treats this as always false; the
-    /// flag exists so the setting can ship without a wire change.
+    /// draw-one-then-pass). Default on — the table's house rule: "you have
+    /// to keep drawing until you find a playable card". All drawn cards join
+    /// the hand; the turn stays with the drawer, who then plays.
     public var drawUntilPlayable: Bool
 
     public init(
@@ -30,7 +31,7 @@ public struct RulesConfig: Codable, Sendable, Equatable {
         missScoresTricks: Bool = true,
         softEnforcement: Bool = true,
         stackDrawCards: Bool = true,
-        drawUntilPlayable: Bool = false
+        drawUntilPlayable: Bool = true
     ) {
         self.screwTheDealer = screwTheDealer
         self.missScoresTricks = missScoresTricks
@@ -51,7 +52,7 @@ public struct RulesConfig: Codable, Sendable, Equatable {
         missScoresTricks = try container.decode(Bool.self, forKey: .missScoresTricks)
         softEnforcement = try container.decode(Bool.self, forKey: .softEnforcement)
         stackDrawCards = try container.decodeIfPresent(Bool.self, forKey: .stackDrawCards) ?? true
-        drawUntilPlayable = try container.decodeIfPresent(Bool.self, forKey: .drawUntilPlayable) ?? false
+        drawUntilPlayable = try container.decodeIfPresent(Bool.self, forKey: .drawUntilPlayable) ?? true
     }
 }
 

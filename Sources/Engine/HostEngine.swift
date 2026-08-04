@@ -406,12 +406,41 @@ public final class HostEngine {
                 state.round = round
                 return []
             }
-            // Voluntary draw: strict draw-once-then-pass (v1 ignores
-            // rules.drawUntilPlayable).
+            // Voluntary draw.
             guard !state.drawPile.isEmpty || state.discardPile.count > 1 else {
                 return reject(seat, "The draw pile is empty")
             }
             pushUndo()
+            if state.rules.drawUntilPlayable {
+                // Family rule: keep drawing until a playable card turns up.
+                // Every drawn card joins the hand; the drawn-into playable
+                // card is NOT auto-played — the turn stays with the drawer,
+                // who must then play (any currently-playable card, not just
+                // the one that was drawn). If the deck and recyclable
+                // discard both run dry before a playable card appears, stop
+                // drawing and pass the turn instead of stalling forever.
+                var drawnCount = 0
+                var foundPlayable = false
+                while let drawn = drawOneCard(to: seat) {
+                    drawnCount += 1
+                    if ruleset.legality(
+                        of: drawn, hand: state.hands[seat] ?? [], trick: [], trump: round.trumpSuit, state: state
+                    ).isLegal {
+                        foundPlayable = true
+                        break
+                    }
+                }
+                var events: [GameEvent] = []
+                if drawnCount > 0 {
+                    events.append(.cardsDrawn(seat: seat, count: drawnCount))
+                }
+                if !foundPlayable {
+                    round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 1)
+                }
+                state.round = round
+                return events
+            }
+            // Toggle off: strict draw-once-then-pass.
             drawCards(1, to: seat)
             round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 1)
             state.round = round
@@ -669,17 +698,27 @@ public final class HostEngine {
     /// early only if both piles are exhausted.
     private func drawCards(_ count: Int, to seat: Int) {
         for _ in 0..<count {
-            if state.drawPile.isEmpty {
-                guard state.discardPile.count > 1 else { break }
-                let top = state.discardPile.removeLast()
-                let recycled = state.discardPile
-                state.discardPile = [top]
-                state.drawPile = DeckBuilder.shuffled(recycled, seed: state.seed &+ dealSerial)
-                dealSerial &+= 1
-            }
-            guard !state.drawPile.isEmpty else { break }
-            state.hands[seat, default: []].append(state.drawPile.removeFirst())
+            guard drawOneCard(to: seat) != nil else { break }
         }
+    }
+
+    /// Draws exactly one card into `seat`'s hand, recycling the discard pile
+    /// (minus its top card) if the draw pile is empty. Returns the drawn
+    /// card, or `nil` if both piles are exhausted (never draws partially).
+    @discardableResult
+    private func drawOneCard(to seat: Int) -> Card? {
+        if state.drawPile.isEmpty {
+            guard state.discardPile.count > 1 else { return nil }
+            let top = state.discardPile.removeLast()
+            let recycled = state.discardPile
+            state.discardPile = [top]
+            state.drawPile = DeckBuilder.shuffled(recycled, seed: state.seed &+ dealSerial)
+            dealSerial &+= 1
+        }
+        guard !state.drawPile.isEmpty else { return nil }
+        let card = state.drawPile.removeFirst()
+        state.hands[seat, default: []].append(card)
+        return card
     }
 
     private func reject(_ seat: Int, _ reason: String) -> [GameEvent] {

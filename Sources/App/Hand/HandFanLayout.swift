@@ -44,6 +44,16 @@ struct HandFanLayout {
                     offset: CGSize(width: x, height: y),
                     zIndex: Double(index))
     }
+
+    /// 0 at the fan's center card, 1 at the wings. Used to scale
+    /// depth-dependent effects (like gyroscope parallax) so cards farther
+    /// from center move more than ones dead center — a fanned hand isn't a
+    /// rigid plane, so a uniform shift alone reads flat.
+    func normalizedDistanceFromCenter(for index: Int) -> CGFloat {
+        guard cardCount > 1 else { return 0 }
+        let t = CGFloat(index) / CGFloat(cardCount - 1)
+        return abs(t - 0.5) * 2
+    }
 }
 
 /// Interactive state for one card being dragged out of the fan.

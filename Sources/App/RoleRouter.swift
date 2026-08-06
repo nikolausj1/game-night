@@ -23,6 +23,17 @@ struct RoleRouter: View {
     @AppStorage("gn.playerName") private var playerName = ""
 
     var body: some View {
+        // Sim-verify hook: -autoCupPreview shows the dice cup interior
+        // standalone (see DiceCupPreviewHarness).
+        if CommandLine.arguments.contains("-autoCupPreview") {
+            DiceCupPreviewHarness()
+        } else {
+            roleSwitch
+        }
+    }
+
+    @ViewBuilder
+    private var roleSwitch: some View {
         switch role {
         case .undecided:
             RolePickerView(

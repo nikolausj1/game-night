@@ -5,9 +5,16 @@ import UIKit
 /// gravity, invisible static bounds, the shadow-catching floor, and the
 /// rate-limited contact-sound gate.
 enum DiceScenePhysics {
-    /// Scaled-up gravity: at our world scale (a die is 2 units), true 9.8
-    /// reads floaty — 2.2× gives the snap of real bone on felt.
-    static let gravity = SCNVector3(0, -9.8 * 2.2, 0)
+    /// Scaled-up gravity. At our world scale a die is 2 units for ~16mm of
+    /// real bone, so TRUE scale gravity would be ~1200 units/s² — pure 9.8
+    /// reads like the moon. 5× is the sweet spot found by eye: throws
+    /// arc down hard, bounces die fast, and a frozen frame mid-roll looks
+    /// like a thrown die instead of a drifting balloon.
+    static let gravity = SCNVector3(0, -9.8 * 5.6, 0)
+
+    /// The cup runs softer gravity: it's a tiny closed world driven by
+    /// hand motion, and heavier gravity there just glues dice to the wall.
+    static let cupGravityStrength: CGFloat = 9.8 * 2.6
 
     /// An invisible static collider box. No geometry is attached to the
     /// node at all — the physics shape alone does the work, so there is
@@ -19,8 +26,10 @@ enum DiceScenePhysics {
         let shape = SCNPhysicsShape(
             geometry: SCNBox(width: width, height: height, length: length, chamferRadius: 0))
         let body = SCNPhysicsBody(type: .static, shape: shape)
-        body.friction = 0.5
-        body.restitution = 0.4
+        // Padded wood rail: some life (die 0.7 × 0.5 → ~0.35 effective)
+        // but it doesn't launch dice back across the table.
+        body.friction = 0.4
+        body.restitution = 0.5
         body.categoryBitMask = Dice3D.boundsCategory
         body.collisionBitMask = Dice3D.dieCategory
         node.physicsBody = body
@@ -39,8 +48,11 @@ enum DiceScenePhysics {
             shape: SCNPhysicsShape(geometry: SCNBox(width: 600, height: 1, length: 600,
                                                     chamferRadius: 0),
                                    options: nil))
-        body.friction = 0.55
-        body.restitution = 0.38
+        // Felt over wood: high grip (bites the die into a tumble instead of
+        // a slide) and bounce-killing restitution — die 0.7 × 0.35 → ~0.25
+        // effective, so a thrown die bounces once or twice and dies.
+        body.friction = 1.0
+        body.restitution = 0.35
         body.categoryBitMask = Dice3D.boundsCategory
         body.collisionBitMask = Dice3D.dieCategory
         // Shape is centered on the node; sink it so the top surface is y=0.

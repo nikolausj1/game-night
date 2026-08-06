@@ -38,6 +38,11 @@ struct TableGameView: View {
     /// move (they're loose objects; that's the point).
     @State private var motionJitter: CGSize = .zero
 
+    /// Sandbox dice in free play — a physics toy, no rules attached.
+    @State private var freePlayDiceOn = false
+    @State private var freePlayRoll: DiceGameController.Roll?
+    @State private var freePlayRollCounter = 10_000 // clear of LCR roll ids
+
     private let deckAnchor = CGPoint(x: 0.20, y: 0.47)
 
     /// Default geometry bent by wherever the humans dragged their plates.
@@ -47,6 +52,29 @@ struct TableGameView: View {
             anchors[seat] = point
         }
         return anchors
+    }
+
+    /// Plates live ON the table's rim — the iPad lies flat in the middle,
+    /// so a plate's text must read for the person sitting past that edge.
+    private func snapToEdge(_ p: CGPoint) -> CGPoint {
+        let dLeft = p.x, dRight = 1 - p.x, dTop = p.y, dBottom = 1 - p.y
+        let nearest = min(dLeft, dRight, dTop, dBottom)
+        if nearest == dBottom { return CGPoint(x: min(0.86, max(0.14, p.x)), y: 0.94) }
+        if nearest == dTop { return CGPoint(x: min(0.86, max(0.14, p.x)), y: 0.06) }
+        if nearest == dLeft { return CGPoint(x: 0.055, y: min(0.84, max(0.16, p.y))) }
+        return CGPoint(x: 0.945, y: min(0.84, max(0.16, p.y)))
+    }
+
+    /// Reading orientation for the person nearest this plate's edge:
+    /// bottom reads normally, top is upside-down to us (right side up to
+    /// them), sides rotate toward their owners.
+    private func outwardAngle(_ p: CGPoint) -> Angle {
+        let dLeft = p.x, dRight = 1 - p.x, dTop = p.y, dBottom = 1 - p.y
+        let nearest = min(dLeft, dRight, dTop, dBottom)
+        if nearest == dBottom { return .degrees(0) }
+        if nearest == dTop { return .degrees(180) }
+        if nearest == dLeft { return .degrees(90) }
+        return .degrees(-90)
     }
 
     var body: some View {
@@ -77,6 +105,40 @@ struct TableGameView: View {
                         dealHotspot(state: state, size: geo.size)
                         freePlayCards(state: state, size: geo.size)
                         dealVisuals(state: state, size: geo.size)
+                        // Sandbox dice: a pure physics toy layered on the felt.
+                        if freePlayDiceOn {
+                            DiceTableSceneView(roll: freePlayRoll,
+                                               anchor: CGPoint(x: 0.5, y: 0.94),
+                                               onResult: { _, _ in freePlayRoll = nil })
+                                .allowsHitTesting(false)
+                            Button {
+                                Haptics.arm()
+                                freePlayRollCounter += 1
+                                freePlayRoll = DiceGameController.Roll(
+                                    id: freePlayRollCounter, seat: 0, count: 3,
+                                    intensity: Double.random(in: 0.5...1.3))
+                            } label: {
+                                Label("Roll", systemImage: "dice.fill")
+                                    .font(.system(.subheadline, design: .serif).weight(.semibold))
+                                    .foregroundStyle(CardStyle.gold)
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 10)
+                                    .background(Capsule().fill(.black.opacity(0.4)))
+                            }
+                            .buttonStyle(.plain)
+                            .position(x: geo.size.width - 130, y: geo.size.height - 96)
+                        }
+                        FreePlayTray(
+                            selectedDeck: state.rules.freePlayDeck,
+                            diceOn: freePlayDiceOn,
+                            onDeckChange: { deck in
+                                var rules = state.rules
+                                rules.freePlayDeck = deck
+                                host.tableAction(.startGame(.freePlay, rules,
+                                    seed: UInt64.random(in: UInt64.min...UInt64.max)))
+                            },
+                            onToggleDice: { freePlayDiceOn = $0 })
+                            .position(x: 205, y: geo.size.height - 44)
                         gatherButton(size: geo.size)
                     } else if state.gameKind.isTrickTaking {
                         trickCards(state: state, size: geo.size)
@@ -333,14 +395,18 @@ struct TableGameView: View {
     private func seatPlates(state: GameState, size: CGSize) -> some View {
         let anchors = effectiveAnchors(state)
         return ForEach(state.seats) { seat in
-            SeatPlateView(seat: seat, state: state)
+            let anchor = anchors[seat.id]
+            SeatPlateView(seat: seat, state: state,
+                          edgeAngle: outwardAngle(anchor))
+                .rotationEffect(outwardAngle(anchor))
                 .scaleEffect(draggingPlateSeat == seat.id ? 1.08 : 1)
                 .shadow(color: .black.opacity(draggingPlateSeat == seat.id ? 0.5 : 0),
                         radius: 12, y: 6)
-                .position(x: anchors[seat.id].x * size.width,
-                          y: anchors[seat.id].y * size.height)
+                .position(x: anchor.x * size.width, y: anchor.y * size.height)
                 // Sit wherever you like: drag your plate to match your
-                // real chair. Everything (deals, tosses, glows) follows.
+                // real chair. It rides the rim (snaps to the nearest edge,
+                // always readable from outside) and everything — deals,
+                // tosses, glows — follows.
                 .gesture(
                     DragGesture(minimumDistance: 8)
                         .onChanged { value in
@@ -352,9 +418,14 @@ struct TableGameView: View {
                                 x: min(0.96, max(0.04, value.location.x / size.width)),
                                 y: min(0.95, max(0.05, value.location.y / size.height)))
                         }
-                        .onEnded { _ in
+                        .onEnded { value in
                             draggingPlateSeat = nil
                             Haptics.arm()
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.75)) {
+                                plateOverrides[seat.id] = snapToEdge(CGPoint(
+                                    x: value.location.x / size.width,
+                                    y: value.location.y / size.height))
+                            }
                         }
                 )
                 .animation(.spring(response: 0.3, dampingFraction: 0.8),
@@ -626,40 +697,36 @@ struct TableGameView: View {
         }()
 
         let travel = hypot(restPos.x - entry.x, restPos.y - entry.y)
-        let flight = 0.34 + Double(travel / size.width) * 0.30
-        let apex = min(120, 60 + travel * 0.12) // arc height in points
+        let flight = 0.32 + Double(travel / size.width) * 0.26
+        let apex = min(90, 46 + travel * 0.09) // arc height in points
 
-        // Phase 0: leave the hand — already airborne at the table's edge.
+        // Leave the hand already airborne at the table's edge.
         shedPoses[card.id] = entry
-        shedRotations[card.id] = restRotation - TableGeometry.jitterDegrees(cardID: card.id) * 3.5
-        shedLifts[card.id] = apex * 0.45
+        shedRotations[card.id] = restRotation - TableGeometry.jitterDegrees(cardID: card.id) * 3.0
+        shedLifts[card.id] = apex * 0.5
 
+        // ONE continuous motion, no phase seams: the ground track glides
+        // entry → pile on a single decelerating curve; the lift rises and
+        // falls in two halves that MEET AT ZERO VELOCITY at the apex
+        // (easeOut up, easeIn down = C1-continuous), touching down exactly
+        // as the glide ends. Smoothness is the whole point here.
         DispatchQueue.main.async {
-            // Phase 1 (first half): rising toward the apex while the
-            // ground shadow tracks underneath. Ground motion starts fast.
-            withAnimation(.easeOut(duration: flight * 0.5)) {
-                shedPoses[card.id] = CGPoint(x: entry.x + (restPos.x - entry.x) * 0.58,
-                                             y: entry.y + (restPos.y - entry.y) * 0.58)
-                shedRotations[card.id] = restRotation - TableGeometry.jitterDegrees(cardID: card.id) * 1.2
+            withAnimation(.timingCurve(0.30, 0.0, 0.18, 1.0, duration: flight)) {
+                shedPoses[card.id] = restPos
+                shedRotations[card.id] = restRotation
+            }
+            withAnimation(.easeOut(duration: flight * 0.46)) {
                 shedLifts[card.id] = apex
             }
-            // Phase 2 (second half): descending onto the pile.
-            DispatchQueue.main.asyncAfter(deadline: .now() + flight * 0.5) {
-                withAnimation(.easeIn(duration: flight * 0.42)) {
-                    shedPoses[card.id] = restPos
-                    shedRotations[card.id] = restRotation
-                    shedLifts[card.id] = 10
+            DispatchQueue.main.asyncAfter(deadline: .now() + flight * 0.46) {
+                withAnimation(.easeIn(duration: flight * 0.54)) {
+                    shedLifts[card.id] = 0
                 }
-                // Phase 3: the last-inch drop — card and shadow merge.
-                DispatchQueue.main.asyncAfter(deadline: .now() + flight * 0.42) {
-                    withAnimation(.spring(response: 0.18, dampingFraction: 0.7)) {
-                        shedLifts[card.id] = 0
-                    }
-                    // The landing snap, pitched by how hard it flew in.
-                    if !isSpectator {
-                        TableSFX.shared.play(.cardSlide,
-                                             intensity: 0.6 + Double(travel / size.width) * 0.9)
-                    }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + flight) {
+                if !isSpectator {
+                    TableSFX.shared.play(.cardSlide,
+                                         intensity: 0.6 + Double(travel / size.width) * 0.9)
                 }
             }
         }
@@ -714,24 +781,21 @@ struct TableGameView: View {
             let apex = min(120, 60 + travel * 0.12)
 
             host.freePlayLayout[card.id] = entry
-            rotationByCard[card.id] = jitter * 1.8 - jitter * 3.5
-            fpLifts[card.id] = apex * 0.45
+            rotationByCard[card.id] = jitter * 1.8 - jitter * 3.0
+            fpLifts[card.id] = apex * 0.5
+            // Same seamless profile as the shed pile: one ground glide,
+            // C1-continuous lift meeting zero velocity at the apex.
             DispatchQueue.main.async {
-                withAnimation(.easeOut(duration: flight * 0.5)) {
-                    host.freePlayLayout[card.id] = CGPoint(x: entry.x + (rest.x - entry.x) * 0.58,
-                                                           y: entry.y + (rest.y - entry.y) * 0.58)
+                withAnimation(.timingCurve(0.30, 0.0, 0.18, 1.0, duration: flight)) {
+                    host.freePlayLayout[card.id] = rest
+                    rotationByCard[card.id] = jitter * 1.8
+                }
+                withAnimation(.easeOut(duration: flight * 0.46)) {
                     fpLifts[card.id] = apex
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + flight * 0.5) {
-                    withAnimation(.easeIn(duration: flight * 0.42)) {
-                        host.freePlayLayout[card.id] = rest
-                        rotationByCard[card.id] = jitter * 1.8
-                        fpLifts[card.id] = 10
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + flight * 0.42) {
-                        withAnimation(.spring(response: 0.18, dampingFraction: 0.7)) {
-                            fpLifts[card.id] = 0
-                        }
+                DispatchQueue.main.asyncAfter(deadline: .now() + flight * 0.46) {
+                    withAnimation(.easeIn(duration: flight * 0.54)) {
+                        fpLifts[card.id] = 0
                     }
                 }
             }

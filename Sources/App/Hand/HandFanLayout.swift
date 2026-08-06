@@ -7,10 +7,22 @@ struct HandFanLayout {
     let containerWidth: CGFloat
     let cardWidth: CGFloat
 
+    /// Hands bigger than this spread wider than the screen and become
+    /// horizontally scrollable (see HandView's browse gesture) instead of
+    /// crushing every card into a fixed arc width. ~10 is roughly where a
+    /// standard-width phone can no longer show every card at a legible size.
+    static let wideThreshold = 10
+
+    private var isWide: Bool { cardCount > Self.wideThreshold }
+
     /// Total angular spread grows with hand size but saturates so a 15-card
-    /// Wizard endgame hand still fits a thumb's reach.
+    /// Wizard endgame hand still fits a thumb's reach. Wide (>10-card) hands
+    /// don't saturate — they keep a steady per-card angular step so the fan
+    /// spreads naturally past the screen edge; `fanScroll` (HandView) brings
+    /// the off-screen ends to center instead.
     private var totalSpreadDegrees: CGFloat {
         guard cardCount > 1 else { return 0 }
+        if isWide { return CGFloat(cardCount - 1) * 6.5 }
         return min(46, CGFloat(cardCount - 1) * 6.5)
     }
 
@@ -23,26 +35,82 @@ struct HandFanLayout {
         let zIndex: Double
     }
 
-    func slot(for index: Int, selected: Bool = false) -> Slot {
+    /// The card's natural (unscrolled) x position on the arc, before the
+    /// container clamp or `scrollOffset` are applied. This is the reference
+    /// frame browsing scrolls against and what the fisheye/focus math in
+    /// HandView compares finger position to.
+    func rawX(for index: Int) -> CGFloat {
+        guard cardCount > 1 else { return 0 }
+        let t = CGFloat(index) / CGFloat(cardCount - 1)
+        let degrees = (t - 0.5) * totalSpreadDegrees
+        let radians = degrees * .pi / 180
+        return sin(radians) * pivotRadius
+    }
+
+    func slot(for index: Int, selected: Bool = false, scrollOffset: CGFloat = 0) -> Slot {
         guard cardCount > 0 else { return Slot(angle: .zero, offset: .zero, zIndex: 0) }
         let t = cardCount == 1 ? 0.5 : CGFloat(index) / CGFloat(cardCount - 1)
         let degrees = (t - 0.5) * totalSpreadDegrees
         let radians = degrees * .pi / 180
 
-        // Position on the arc around the below-screen pivot.
-        var x = sin(radians) * pivotRadius
+        // Position on the arc around the below-screen pivot, shifted by
+        // however far the hand has been browse-scrolled.
+        var x = rawX(for: index) + scrollOffset
         var y = (1 - cos(radians)) * pivotRadius
 
         // A touched card slides up out of the fan to say "I'm yours".
         if selected { y -= cardWidth * 0.55 }
 
-        // Keep extreme fans inside the container.
-        let maxX = (containerWidth - cardWidth) / 2
-        x = max(-maxX, min(maxX, x))
+        // Small hands already fit — keep them pinned inside the container,
+        // same as before. Wide hands are deliberately allowed to overflow;
+        // that's what makes them scrollable.
+        if !isWide {
+            let maxX = (containerWidth - cardWidth) / 2
+            x = max(-maxX, min(maxX, x))
+        }
 
         return Slot(angle: .degrees(Double(degrees)),
                     offset: CGSize(width: x, height: y),
                     zIndex: Double(index))
+    }
+
+    /// How far `fanScroll` may travel before the first/last card would
+    /// overshoot past center — lets browsing always bring either end of the
+    /// hand to the middle, but no further. Narrow hands don't scroll at all.
+    func scrollBounds() -> ClosedRange<CGFloat> {
+        guard isWide, cardCount > 1 else { return 0...0 }
+        let halfWidth = abs(rawX(for: cardCount - 1))
+        guard halfWidth > 0 else { return 0...0 }
+        return -halfWidth...halfWidth
+    }
+
+    /// The card nearest the fan's center once `scroll` is applied — used to
+    /// drive the browse-focus haptic as a momentum glide settles past cards
+    /// with no finger left to track.
+    func nearestIndex(toScroll scroll: CGFloat) -> Int {
+        guard cardCount > 1 else { return 0 }
+        var best = 0
+        var bestDistance = CGFloat.greatestFiniteMagnitude
+        for i in 0..<cardCount {
+            let distance = abs(rawX(for: i) + scroll)
+            if distance < bestDistance { bestDistance = distance; best = i }
+        }
+        return best
+    }
+
+    /// The card nearest a given displayed x (e.g. the browsing finger) —
+    /// used to drive the focus haptic while the finger is still down. Uses
+    /// actual displayed positions (via `slot`), so it's correct for both
+    /// scrolling wide hands and static narrow ones.
+    func nearestIndex(toDisplayedX x: CGFloat, scrollOffset: CGFloat) -> Int {
+        guard cardCount > 1 else { return 0 }
+        var best = 0
+        var bestDistance = CGFloat.greatestFiniteMagnitude
+        for i in 0..<cardCount {
+            let distance = abs(slot(for: i, scrollOffset: scrollOffset).offset.width - x)
+            if distance < bestDistance { bestDistance = distance; best = i }
+        }
+        return best
     }
 
     /// 0 at the fan's center card, 1 at the wings. Used to scale

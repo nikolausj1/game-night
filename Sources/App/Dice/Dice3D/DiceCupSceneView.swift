@@ -2,13 +2,19 @@ import SwiftUI
 import SceneKit
 import CoreMotion
 
-/// The inside of the dice cup, first person: camera looking straight down
-/// into a leather cylinder, dice resting on its floor. CoreMotion drives
-/// the physics continuously — tilting the phone tilts gravity so the dice
-/// slide and roll around the floor; shakes become real impulses, so a
-/// gentle shake skitters them and a hard one launches them up toward your
-/// eye, tumbling. Every clack you hear (and feel) is an actual physics
-/// contact, rate-limited — the sound matches what the eyes see.
+/// The inside of the dice cup, first person: the PHONE IS THE CUP. Its
+/// depth runs the long way of the phone — the camera sits inside near the
+/// closed end looking obliquely up the cup's axis, so the near wall sweeps
+/// past the bottom of the screen, the leather interior fills the frame
+/// edge to edge, and the far rim reads as an ellipse arc near the top with
+/// warm light spilling in through the opening. Dice live against the far
+/// wall (a held phone tilts the cup back, so gravity pins them there),
+/// silhouetted against the opening's glow. CoreMotion drives the physics
+/// continuously — tilting the phone tilts gravity so the dice slide and
+/// roll around the interior; shakes become real impulses, so a gentle
+/// shake skitters them and a hard one launches them up toward the mouth,
+/// tumbling. Every clack you hear (and feel) is an actual physics contact,
+/// rate-limited — the sound matches what the eyes see.
 struct DiceCupSceneView: UIViewRepresentable {
     /// How many dice are in the cup (min(chips, 3)).
     let diceCount: Int
@@ -31,17 +37,16 @@ struct DiceCupSceneView: UIViewRepresentable {
     func makeCoordinator() -> DiceCupSceneCoordinator { DiceCupSceneCoordinator() }
 }
 
-final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate,
-                                     SCNSceneRendererDelegate {
-    // Cup geometry, scene units (a die is 2).
-    private let cupInnerRadius: CGFloat = 5.0
+final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
+    // Cup geometry, scene units (a die is 2). Deep tumbler: the depth is
+    // the phone's long axis, the mouth is at +Y (top of the screen).
+    private let cupInnerRadius: CGFloat = 5.2
     private let cupWall: CGFloat = 0.55
-    private let cupHeight: CGFloat = 10.0
+    private let cupHeight: CGFloat = 15.0
 
     private let scene = SCNScene()
     private weak var view: SCNView?
     private var dice: [DieNode] = []
-    private var shadows: [DieShadowNode] = []
     private var audio = CupAudio()
     private var contactThrottle: DiceContactThrottle?
     private let clackHaptic = UIImpactFeedbackGenerator(style: .light)
@@ -51,16 +56,22 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate,
     func attach(to view: SCNView, model: DiceCupModel) {
         self.view = view
         view.scene = scene
-        view.backgroundColor = .clear
+        view.backgroundColor = .black // interior fills the frame; no felt behind
         view.allowsCameraControl = false
         view.isUserInteractionEnabled = false // SwiftUI keeps the pour swipe
         view.preferredFramesPerSecond = 60
         view.antialiasingMode = .multisampling2X
         view.rendersContinuously = true // motion drives physics nonstop
-        view.delegate = self // per-frame contact-shadow tracking
 
-        scene.background.contents = UIColor.clear
-        scene.physicsWorld.gravity = DiceScenePhysics.gravity
+        scene.background.contents = UIColor.black
+        // Until the first real motion sample lands (and always in the
+        // simulator), assume the natural hold: phone reclined ~25° from
+        // flat, the way a seated player actually looks at a screen.
+        // Gravity then pins the dice into the far-wall/floor corner,
+        // right where the opening's light falls on them.
+        let s = DiceScenePhysics.cupGravityStrength
+        scene.physicsWorld.gravity = SCNVector3(0, -0.55 * s, -0.84 * s)
+        scene.physicsWorld.timeStep = 1.0 / 120.0
         scene.physicsWorld.contactDelegate = self
 
         buildCup()
@@ -139,68 +150,112 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate,
         }()
         scene.rootNode.addChildNode(floorNode)
 
+        // Rolled rim at the mouth: the ellipse arc the eye catches near the
+        // top of the screen, where interior leather meets the light.
+        let rim = SCNTorus(ringRadius: cupInnerRadius + cupWall / 2, pipeRadius: 0.45)
+        rim.ringSegmentCount = 64
+        let rimLeather = SCNMaterial()
+        rimLeather.diffuse.contents = UIColor(red: 0.30, green: 0.18, blue: 0.10, alpha: 1)
+        rimLeather.lightingModel = .blinn
+        rimLeather.specular.contents = UIColor(white: 0.5, alpha: 1)
+        rimLeather.shininess = 0.3
+        rim.materials = [rimLeather]
+        let rimNode = SCNNode(geometry: rim)
+        rimNode.position = SCNVector3(0, cupHeight, 0)
+        scene.rootNode.addChildNode(rimNode)
+
+        // The world beyond the mouth: a big warm glow disc — the "room
+        // light" the cup is open to. Constant-lit so it just burns bright.
+        let sky = SCNPlane(width: 40, height: 40)
+        let skyMaterial = SCNMaterial()
+        skyMaterial.diffuse.contents = CupTextures.openingGlow()
+        skyMaterial.emission.contents = CupTextures.openingGlow()
+        skyMaterial.lightingModel = .constant
+        skyMaterial.isDoubleSided = true
+        sky.materials = [skyMaterial]
+        let skyNode = SCNNode(geometry: sky)
+        skyNode.position = SCNVector3(0, cupHeight + 7, 0)
+        skyNode.eulerAngles = SCNVector3(Float.pi / 2, 0, 0) // face down the cup
+        scene.rootNode.addChildNode(skyNode)
+
         // Invisible lid just above the rim: hard shakes launch the dice
-        // toward the camera, but never through it.
+        // toward the mouth, but never out of the cup.
         scene.rootNode.addChildNode(DiceScenePhysics.boundsNode(
             width: 30, height: 1, length: 30,
-            position: SCNVector3(0, cupHeight + 1.0, 0)))
+            position: SCNVector3(0, cupHeight + 1.6, 0)))
     }
 
     private func buildLights() {
+        // Deep-cup mood: dim warm ambient so the closed end falls into
+        // shadow and the interior shades darker the deeper you look.
         let ambient = SCNNode()
         ambient.light = {
             let light = SCNLight()
             light.type = .ambient
-            light.intensity = 420
-            light.color = UIColor(red: 1.0, green: 0.93, blue: 0.84, alpha: 1)
+            light.intensity = 260
+            light.color = UIColor(red: 1.0, green: 0.90, blue: 0.78, alpha: 1)
             return light
         }()
         scene.rootNode.addChildNode(ambient)
 
-        // Lamp over the shoulder: an omni above the mouth, slightly off
-        // axis, so the interior wall shades around the circle and the
-        // dice throw contact shadows on the cup floor.
+        // The room lamp beyond the mouth: warm light entering from the
+        // opening, falling off down the cup — dice near the mouth catch
+        // it, the wall gradient sells the depth.
         let lamp = SCNNode()
         lamp.light = {
             let light = SCNLight()
             light.type = .omni
-            light.intensity = 900
-            light.color = UIColor(red: 1.0, green: 0.95, blue: 0.86, alpha: 1)
-            light.attenuationStartDistance = 8
-            light.attenuationEndDistance = 40
+            light.intensity = 1600
+            light.color = UIColor(red: 1.0, green: 0.93, blue: 0.80, alpha: 1)
+            light.attenuationStartDistance = 6
+            light.attenuationEndDistance = 46
             return light
         }()
-        lamp.position = SCNVector3(3.5, 18, -2.5)
+        lamp.position = SCNVector3(2.0, cupHeight + 9, -2.0)
         scene.rootNode.addChildNode(lamp)
 
+        // Key shining DOWN the cup axis so dice faces read and throw
+        // shadows deeper into the cup.
         let key = SCNNode()
         key.light = {
             let light = SCNLight()
             light.type = .directional
-            light.intensity = 500
+            light.intensity = 620
             light.castsShadow = true
             light.shadowMode = .forward
-            light.shadowColor = UIColor.black.withAlphaComponent(0.5)
-            light.shadowRadius = 6
+            light.shadowColor = UIColor.black.withAlphaComponent(0.55)
+            light.shadowRadius = 7
             light.shadowSampleCount = 8
-            light.orthographicScale = 9
+            light.orthographicScale = 10
             return light
         }()
-        key.eulerAngles = SCNVector3(-Float.pi * 0.45, 0.3, 0)
+        key.eulerAngles = SCNVector3(-Float.pi * 0.42, 0.25, 0)
         scene.rootNode.addChildNode(key)
     }
 
+    /// Oblique interior camera: sitting inside the cup near the closed
+    /// end, offset toward the near (+Z) wall, looking up the axis at the
+    /// far wall just below the rim. The near wall sweeps past the bottom
+    /// of the frame; wide FOV makes the walls converge toward the mouth.
     private func buildCamera() {
         let cameraNode = SCNNode()
         cameraNode.camera = {
             let camera = SCNCamera()
-            camera.fieldOfView = 52
-            camera.zNear = 0.4
-            camera.zFar = 80
+            camera.fieldOfView = 82 // wide: interior edge-to-edge
+            camera.projectionDirection = .vertical
+            camera.zNear = 0.3
+            camera.zFar = 90
             return camera
         }()
-        cameraNode.position = SCNVector3(0, 14.5, 0)
-        cameraNode.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0) // straight down
+        cameraNode.position = SCNVector3(0, 6.2, 4.4)
+        // Aim at the far wall well below the rim: the rim arc and a band
+        // of opening light sit in the top fifth, the middle is leather
+        // wall, and the floor/far-wall corner — where a held cup's dice
+        // actually gather — rides just above the bottom edge. Up-hint +Z
+        // keeps screen-right = scene +X so tilting the phone right rolls
+        // dice toward the right of the screen.
+        cameraNode.look(at: SCNVector3(0, cupHeight * 0.45, -cupInnerRadius),
+                        up: SCNVector3(0, 0, 1), localFront: SCNVector3(0, 0, -1))
         scene.rootNode.addChildNode(cameraNode)
         view?.pointOfView = cameraNode
     }
@@ -212,33 +267,21 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate,
         guard clamped != dice.count else { return }
         dice.forEach { $0.removeFromParentNode() }
         dice = []
-        shadows.forEach { $0.removeFromParentNode() }
-        shadows = []
         for index in 0..<clamped {
             let die = DieNode(lcrDie: index)
-            let angle = CGFloat(index) * 2.1 + CGFloat.random(in: -0.3...0.3)
-            let radius = CGFloat.random(in: 0.5...2.2)
-            die.position = SCNVector3(cos(angle) * radius,
-                                      Dice3D.side * (0.6 + CGFloat(index) * 0.9),
-                                      sin(angle) * radius)
+            // Drop in up the cup, spread across the width — gravity (tilted
+            // by the hold) settles them against the far wall where the
+            // opening's light lands. No shadow planes here: the camera
+            // never sees the floor, and the key light does the work.
+            let spread = CGFloat(index) - CGFloat(clamped - 1) / 2
+            die.position = SCNVector3(spread * Dice3D.side * 1.6 + .random(in: -0.5...0.5),
+                                      5.0 + CGFloat(index) * Dice3D.side * 0.8,
+                                      CGFloat.random(in: -2.6 ... -1.2))
             die.eulerAngles = SCNVector3(CGFloat.random(in: 0..<(2 * .pi)),
                                          CGFloat.random(in: 0..<(2 * .pi)),
                                          CGFloat.random(in: 0..<(2 * .pi)))
             scene.rootNode.addChildNode(die)
             dice.append(die)
-
-            let shadow = DieShadowNode()
-            scene.rootNode.addChildNode(shadow)
-            shadows.append(shadow)
-        }
-    }
-
-    /// Per-frame: keep each contact shadow under its die.
-    func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
-        guard shadows.count == dice.count else { return }
-        let floorY = Float(Dice3D.side / 2)
-        for index in dice.indices {
-            shadows[index].track(dice[index], floorY: floorY)
         }
     }
 
@@ -249,17 +292,22 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate,
     /// tilts); acceleration spikes become impulses (gentle shake =
     /// skitter, hard shake = airborne dice).
     private func apply(_ dm: CMDeviceMotion) {
-        // Device gravity → cup space. Screen right = +X, screen up = −Z,
-        // out of the screen = cup-up (+Y). Face-up phone: g=(0,0,−1) →
-        // scene (0,−1,0); upright phone: dice rest against the near wall.
+        // Device gravity → cup space. The cup's depth runs the phone's
+        // long axis: screen right = +X, screen up (toward the mouth) = +Y,
+        // out of the screen = +Z. That's the DEVICE frame exactly, so
+        // gravity maps 1:1. Upright phone: dice fall to the closed end.
+        // Held tilted toward the face (the natural grip): dice pin against
+        // the far wall, lit by the opening. Face-down: they pour out past
+        // the mouth — which is exactly when the pour fires.
         let g = dm.gravity
-        let strength = 9.8 * 2.2
+        let strength = DiceScenePhysics.cupGravityStrength
         scene.physicsWorld.gravity = SCNVector3(CGFloat(g.x) * strength,
-                                                CGFloat(g.z) * strength,
-                                                CGFloat(-g.y) * strength)
+                                                CGFloat(g.y) * strength,
+                                                CGFloat(g.z) * strength)
 
         // Shake impulses. The cup jerks, the dice lag: push them opposite
-        // the hand's acceleration, plus lift when it's a real jolt.
+        // the hand's acceleration, plus lift toward the mouth when it's a
+        // real jolt.
         let a = dm.userAcceleration
         let magnitude = sqrt(a.x * a.x + a.y * a.y + a.z * a.z)
         let now = Date()
@@ -274,8 +322,8 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate,
             let jitter: (CGFloat) -> CGFloat = { CGFloat.random(in: -$0...$0) }
             let impulse = SCNVector3(
                 CGFloat(-a.x) * lateralScale + jitter(0.04),
-                lift * CGFloat.random(in: 0.8...1.15),
-                CGFloat(a.y) * lateralScale + jitter(0.04))
+                CGFloat(-a.y) * lateralScale * 0.6 + lift * CGFloat.random(in: 0.8...1.15),
+                CGFloat(-a.z) * lateralScale + jitter(0.04))
             die.physicsBody?.applyForce(impulse, asImpulse: true)
             // A twist of spin so airborne dice tumble, faces cycling.
             die.physicsBody?.applyTorque(
@@ -313,6 +361,30 @@ enum CupTextures {
             context.move(to: CGPoint(x: 0, y: stitchY))
             context.addLine(to: CGPoint(x: size.width, y: stitchY))
             context.strokePath()
+        }
+    }
+
+    /// The warm room-light disc visible through the cup's mouth: bright
+    /// gold-white core fading to amber at the edges. Emissive — it IS the
+    /// light the eye sees past the rim.
+    static func openingGlow() -> UIImage {
+        cached("glow") { context, size in
+            let space = CGColorSpaceCreateDeviceRGB()
+            let core = UIColor(red: 1.0, green: 0.96, blue: 0.86, alpha: 1)
+            let mid = UIColor(red: 0.98, green: 0.82, blue: 0.55, alpha: 1)
+            let edge = UIColor(red: 0.35, green: 0.24, blue: 0.12, alpha: 1)
+            if let gradient = CGGradient(
+                colorsSpace: space,
+                colors: [core.cgColor, mid.cgColor, edge.cgColor] as CFArray,
+                locations: [0, 0.45, 1]) {
+                context.drawRadialGradient(
+                    gradient,
+                    startCenter: CGPoint(x: size.width / 2, y: size.height / 2),
+                    startRadius: 0,
+                    endCenter: CGPoint(x: size.width / 2, y: size.height / 2),
+                    endRadius: size.width / 2,
+                    options: [])
+            }
         }
     }
 

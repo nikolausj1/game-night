@@ -10,12 +10,20 @@ enum Dice3D {
     /// Rounded-edge radius (real dice are heavily chamfered).
     static let chamfer: CGFloat = side * 0.18
 
-    // Physics material — tuned for a lively-but-settling tumble.
+    // Physics material — tuned for a real thrown-dice feel. SceneKit
+    // (Bullet underneath) COMBINES restitution/friction of the two bodies
+    // in a contact multiplicatively, so these are calibrated as pairs:
+    //   die 0.70 × felt floor 0.35  → ~0.25 effective (felt kills bounce)
+    //   die 0.70 × die 0.70         → ~0.49 effective (bone-on-bone is lively)
+    //   die 0.60 × felt floor 1.00  → ~0.60 effective grip (dice bite, tumble)
+    // Rolling friction starts LOW so the throw carries, then the table
+    // scene ramps it (plus damping) as a die slows — dice tumble-stop in
+    // about a second instead of gliding like pucks.
     static let mass: CGFloat = 0.02
-    static let restitution: CGFloat = 0.42
-    static let friction: CGFloat = 0.55
-    static let rollingFriction: CGFloat = 0.09
-    static let angularDamping: CGFloat = 0.18
+    static let restitution: CGFloat = 0.70
+    static let friction: CGFloat = 0.60
+    static let rollingFriction: CGFloat = 0.05
+    static let angularDamping: CGFloat = 0.12
 
     /// Physics categories.
     static let dieCategory = 1 << 0
@@ -75,11 +83,19 @@ final class DieNode: SCNNode {
         let body = SCNPhysicsBody(
             type: .dynamic,
             shape: SCNPhysicsShape(geometry: box, options: nil)) // convex hull of the rounded cube
-        body.mass = Dice3D.mass
-        body.restitution = Dice3D.restitution
-        body.friction = Dice3D.friction
+        // No two real dice are identical: tiny paint-fill and drilling
+        // asymmetries shift mass and inertia. Jitter both (and the surface
+        // coefficients a whisker) so every die in a throw rolls its own way.
+        body.mass = Dice3D.mass * CGFloat.random(in: 0.90...1.12)
+        body.usesDefaultMomentOfInertia = false
+        let inertia = body.mass * Dice3D.side * Dice3D.side / 6 // uniform cube baseline
+        body.momentOfInertia = SCNVector3(inertia * CGFloat.random(in: 0.82...1.22),
+                                          inertia * CGFloat.random(in: 0.82...1.22),
+                                          inertia * CGFloat.random(in: 0.82...1.22))
+        body.restitution = Dice3D.restitution + CGFloat.random(in: -0.05...0.04)
+        body.friction = Dice3D.friction + CGFloat.random(in: -0.05...0.06)
         body.rollingFriction = Dice3D.rollingFriction
-        body.angularDamping = Dice3D.angularDamping
+        body.angularDamping = Dice3D.angularDamping + CGFloat.random(in: -0.02...0.03)
         body.categoryBitMask = Dice3D.dieCategory
         body.collisionBitMask = Dice3D.dieCategory | Dice3D.boundsCategory
         body.contactTestBitMask = Dice3D.dieCategory | Dice3D.boundsCategory

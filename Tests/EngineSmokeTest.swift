@@ -469,6 +469,37 @@ check(fp.state.drawPile.last == fpTop && fp.state.discardPile.isEmpty, "free mov
 check(isIllegal(fp.apply(.freeMoveCard(cardID: "nope", to: .table, x: 0, y: 0, rotation: 0), from: 0)),
       "moving an unknown card is rejected")
 
+// MARK: - Free Play deck selection
+
+check(RulesConfig().freePlayDeck == .standard52, "free play deck defaults to standard52")
+
+let fpWizardDeck = freshEngine(.freePlay, players: 2, rules: RulesConfig(freePlayDeck: .wizard60), seed: 5)
+check(fpWizardDeck.state.drawPile.count == 60, "wizard60 deck selection lands 60 cards in the draw pile")
+check(fpWizardDeck.state.drawPile.contains { $0.isWizard }, "wizard60 free-play deck includes wizards")
+
+let fpUnoDeck = freshEngine(.freePlay, players: 2, rules: RulesConfig(freePlayDeck: .uno108), seed: 6)
+check(fpUnoDeck.state.drawPile.count == 108, "uno108 deck selection lands 108 cards in the draw pile")
+
+// Back-compat decode: saves from before the deck picker existed default to standard52.
+var legacyFreePlayDict = try! JSONSerialization.jsonObject(
+    with: try! JSONEncoder().encode(RulesConfig(freePlayDeck: .uno108))) as! [String: Any]
+legacyFreePlayDict.removeValue(forKey: "freePlayDeck")
+let legacyFreePlayRules = try! JSONDecoder().decode(
+    RulesConfig.self, from: try! JSONSerialization.data(withJSONObject: legacyFreePlayDict))
+check(legacyFreePlayRules.freePlayDeck == .standard52, "pre-freePlayDeck RulesConfig decodes with the standard52 default")
+
+// UNO cards move through the same free-move / draw / play paths as any other deck.
+let fpUnoCards = freshEngine(.freePlay, players: 2, rules: RulesConfig(freePlayDeck: .uno108), seed: 7)
+let fpUnoTop = fpUnoCards.state.drawPile.first!
+_ = fpUnoCards.apply(.freeMoveCard(cardID: fpUnoTop.id, to: .hand, x: 0, y: 0, rotation: 0), from: 0)
+check(fpUnoCards.state.hands[0] == [fpUnoTop], "uno card free-moves deck → hand in free play")
+let fpUnoDrawEvents = fpUnoCards.apply(.drawCard, from: 1)
+check(!isIllegal(fpUnoDrawEvents) && fpUnoCards.state.hands[1]?.count == 1,
+      "uno card draws normally through the free-play draw path")
+let fpUnoPlayEvents = fpUnoCards.apply(.playCard(cardID: fpUnoTop.id, force: false), from: 0)
+check(playedCard(fpUnoPlayEvents)?.card.id == fpUnoTop.id, "uno card plays via playCard in free play")
+check(fpUnoCards.state.discardPile.contains { $0.id == fpUnoTop.id }, "played uno card lands on the discard pile")
+
 // MARK: - NetCodec round-trips (every message case)
 
 let sampleSnapshot = midGame.state.snapshot(for: 1)

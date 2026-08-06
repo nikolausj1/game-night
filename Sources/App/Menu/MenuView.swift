@@ -97,6 +97,16 @@ struct MenuView: View {
                 }
                 DiceLauncher.shared.start(host: host, seats: bots)
             }
+            // Sim-verify hook: L·R·C with a phoneless HUMAN in seat 0
+            // (tap the plate to roll) — exercises the pending-coin drags.
+            if CommandLine.arguments.contains("-autoStartLcrHuman"),
+               DiceLauncher.shared.controller == nil {
+                var seats = [SeatSpec(id: 0, name: "You", isBot: false)]
+                for (index, bot) in BotRoster.random(count: 2).enumerated() {
+                    seats.append(SeatSpec(id: index + 1, name: bot.name, isBot: true))
+                }
+                DiceLauncher.shared.start(host: host, seats: seats)
+            }
         }
         .sheet(isPresented: $showSettings) { SettingsView() }
     }
@@ -229,8 +239,8 @@ private struct GameChip: View {
     var body: some View {
         Button(action: onTap) {
             VStack(spacing: 6) {
-                Text(kind.emblem)
-                    .font(.system(size: 30))
+                GameEmblem(kind: kind)
+                    .frame(height: GameEmblem.height)
                 Text(kind.displayName)
                     .font(.system(.headline, design: .serif))
             }
@@ -254,8 +264,8 @@ private struct DiceGameChip: View {
     var body: some View {
         Button(action: onTap) {
             VStack(spacing: 6) {
-                Text("🎲")
-                    .font(.system(size: 30))
+                MiniDiceTrio()
+                    .frame(height: GameEmblem.height)
                 Text("L·R·C")
                     .font(.system(.headline, design: .serif))
             }
@@ -271,6 +281,12 @@ private struct DiceGameChip: View {
 }
 
 extension GameKind {
+    /// Free Play has no legality/bidding rules to expose.
+    var hasHouseRules: Bool { self != .freePlay }
+
+    /// Still used by `ResumeStripView`'s compact resume cards — the game
+    /// picker itself has moved on to real card-art emblems (`GameEmblem`
+    /// below), but the resume strip's tighter layout keeps the emoji mark.
     var emblem: String {
         switch self {
         case .wizard: return "🧙"
@@ -280,7 +296,115 @@ extension GameKind {
         case .freePlay: return "🃏"
         }
     }
+}
 
-    /// Free Play has no legality/bidding rules to expose.
-    var hasHouseRules: Bool { self != .freePlay }
+// MARK: - Chip emblems (real card/dice art, not emoji)
+
+/// Miniature art for each game chip, built from the app's own card views —
+/// tiny, unmistakable, and consistent with the felt everyone actually plays
+/// on, instead of an emoji standing in for it.
+private struct GameEmblem: View {
+    /// Common target height for every chip's emblem, card or dice.
+    static let height: CGFloat = 34
+
+    let kind: GameKind
+
+    var body: some View {
+        switch kind {
+        case .wizard:
+            // A wizard card fanned against a heart ace — the two things
+            // that make Wizard Wizard: the special card and trump suit.
+            FannedPair(height: Self.height,
+                       leftCard: Card(id: "W0", kind: .wizard),
+                       rightCard: Card(id: "h14", kind: .standard(suit: .hearts, rank: 14)))
+        case .ohHell:
+            CardView(card: Card(id: "s14", kind: .standard(suit: .spades, rank: 14)))
+                .frame(height: Self.height)
+        case .crazyEights:
+            CardView(card: Card(id: "c8", kind: .standard(suit: .clubs, rank: 8)))
+                .frame(height: Self.height)
+        case .uno:
+            UnoCardBackView()
+                .frame(height: Self.height)
+        case .freePlay:
+            // A loose spread of backs: no fixed rules, just cards on felt.
+            FannedBacks(height: Self.height)
+        }
+    }
+}
+
+/// Two mini card faces fanned in a shallow V, center-anchored — the
+/// wizard chip's wizard + heart-ace pair.
+private struct FannedPair: View {
+    let height: CGFloat
+    let leftCard: Card
+    let rightCard: Card
+
+    var body: some View {
+        ZStack {
+            CardView(card: leftCard)
+                .frame(height: height)
+                .rotationEffect(.degrees(-9))
+                .offset(x: -height * 0.16)
+            CardView(card: rightCard)
+                .frame(height: height)
+                .rotationEffect(.degrees(9))
+                .offset(x: height * 0.16)
+        }
+    }
+}
+
+/// Three mini card backs spread in a shallow fan — Free Play's chip art:
+/// no fixed rules, just loose cards on felt.
+private struct FannedBacks: View {
+    let height: CGFloat
+
+    var body: some View {
+        ZStack {
+            CardBackView()
+                .frame(height: height)
+                .rotationEffect(.degrees(-12))
+                .offset(x: -height * 0.18)
+            CardBackView()
+                .frame(height: height)
+            CardBackView()
+                .frame(height: height)
+                .rotationEffect(.degrees(12))
+                .offset(x: height * 0.18)
+        }
+    }
+}
+
+/// L·R·C's chip art: three tiny dice faces, drawn as rounded squares with
+/// letter pips — the game's whole identity is "roll an L, R, or C".
+private struct MiniDiceTrio: View {
+    var body: some View {
+        HStack(spacing: 3) {
+            MiniDieFace(label: "L")
+            MiniDieFace(label: "R")
+            MiniDieFace(label: "C")
+        }
+    }
+}
+
+private struct MiniDieFace: View {
+    let label: String
+    var size: CGFloat = 26
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+            .fill(LinearGradient(colors: [CardStyle.stockTop, CardStyle.stockBottom],
+                                 startPoint: .top, endPoint: .bottom))
+            .overlay(
+                RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+                    .strokeBorder(CardStyle.ink.opacity(0.3), lineWidth: 1)
+            )
+            .overlay(
+                Text(label)
+                    .font(.system(size: size * 0.52, weight: .heavy, design: .rounded))
+                    .foregroundStyle(CardStyle.crimson)
+            )
+            .frame(width: size, height: size)
+            .shadow(color: .black.opacity(0.3), radius: 1.5, y: 1)
+    }
 }

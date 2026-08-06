@@ -633,7 +633,7 @@ public final class HostEngine {
 
     private func setUpFreePlay() -> [GameEvent] {
         state.phase = .dealing
-        state.drawPile = DeckBuilder.shuffled(DeckBuilder.standard52(), seed: state.seed &+ dealSerial)
+        state.drawPile = DeckBuilder.shuffled(state.rules.freePlayDeck.buildDeck(), seed: state.seed &+ dealSerial)
         dealSerial &+= 1
         state.hands = Dictionary(uniqueKeysWithValues: state.seats.map { ($0.id, [Card]()) })
         state.discardPile = []

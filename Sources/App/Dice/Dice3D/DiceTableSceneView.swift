@@ -82,6 +82,11 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     /// OBSERVED motion (SCNPhysicsBody's velocity getters don't track the
     /// live simulation, they just echo whatever was last assigned).
     private var lastPoses: [(position: simd_float3, orientation: simd_quatf)] = []
+    /// Per-die rolling-resistance tier (0 fast/airborne, 1 slowing,
+    /// 2 dying). Felt's rolling resistance RISES as a die slows — that's
+    /// why real dice tumble-stop instead of gliding — and Bullet's constant
+    /// coefficients can't express it, so the render loop ramps them.
+    private var resistanceTiers: [Int] = []
 
     private var contactThrottle: DiceContactThrottle?
 
@@ -97,6 +102,16 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     /// because those faces are already the recorded result.
     func jolt(intensity: Double) {
         let midRoll = activeRollID != nil && !reported
+        if midRoll {
+            // A slam re-loosens the felt grip: back to tier 0 so the
+            // re-tumble carries like a fresh throw.
+            resistanceTiers = Array(repeating: 0, count: dice.count)
+            for die in dice {
+                die.physicsBody?.damping = 0.1
+                die.physicsBody?.angularDamping = Dice3D.angularDamping
+                die.physicsBody?.rollingFriction = Dice3D.rollingFriction
+            }
+        }
         for die in dice {
             guard let body = die.physicsBody else { continue }
             body.isAffectedByGravity = true
@@ -144,6 +159,9 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
 
         scene.background.contents = UIColor.clear
         scene.physicsWorld.gravity = DiceScenePhysics.gravity
+        // Dice are tiny fast bodies: a 120Hz solver step keeps corner
+        // impacts crisp (60Hz visibly tunnels energy on chamfered edges).
+        scene.physicsWorld.timeStep = 1.0 / 120.0
         scene.physicsWorld.contactDelegate = self
 
         scene.rootNode.addChildNode(DiceScenePhysics.physicsFloor())
@@ -198,7 +216,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         let halfW = worldWidth / 2 - wallInset
         let halfH = worldHeight / 2 - wallInset
         let thickness: CGFloat = 3
-        let height: CGFloat = 14
+        let height: CGFloat = 22 // tall enough that arced throws can't hop the rail
         let specs: [(CGFloat, CGFloat, CGFloat, CGFloat, CGFloat)] = [
             // (boxW, boxL, x, z, _)
             (worldWidth + 8, thickness, 0, -(halfH + thickness / 2), 0),
@@ -236,25 +254,35 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         shadows.forEach { $0.removeFromParentNode() }
         shadows = []
 
-        // Entry point: the roller's edge of the felt, clamped inside the
-        // rails. Heading: toward the middle with a little aim wander.
+        // Entry point: ABOVE the roller's edge of the felt, clamped inside
+        // the rails. Real dice arrive from a cup held over the table: they
+        // spawn high near the roller, travel toward the middle AND down,
+        // and their first contact with the felt is a BOUNCE mid-tumble —
+        // never a flat puck-slide in from the rail.
         let halfW = worldWidth / 2 - wallInset - Dice3D.side
         let halfH = worldHeight / 2 - wallInset - Dice3D.side
-        let entryX = max(-halfW, min(halfW, (anchor.x - 0.5) * worldWidth))
-        let entryZ = max(-halfH, min(halfH, (anchor.y - 0.5) * worldHeight))
+        // The cup is tipped out OVER the felt, not at the rim: pull the
+        // entry point ~25% toward center so first contact lands on open
+        // felt instead of against the roller's own plate.
+        let entryX = max(-halfW, min(halfW, (anchor.x - 0.5) * worldWidth * 0.75))
+        let entryZ = max(-halfH, min(halfH, (anchor.y - 0.5) * worldHeight * 0.75))
         let heading = atan2(-entryZ, -entryX) // toward world center
 
         let norm = min(1, max(0, (roll.intensity - 0.3) / 1.2))
-        let baseSpeed = 13.0 + 18.0 * norm
+        // A harder pour = flatter, faster arc from a little higher up.
+        let baseSpeed = 10.0 + 12.0 * norm         // horizontal carry
+        let dropHeight = 26.0 + 10.0 * norm        // cup height above the felt
+        let plungeSpeed = 22.0 + 10.0 * norm       // downward launch (cup tips out)
 
         for index in 0..<roll.count {
             let die = DieNode(lcrDie: index)
-            // Fan the dice out perpendicular to the throw line.
+            // Fan the dice out perpendicular to the throw line, and stagger
+            // their heights slightly — a cupful never leaves as one layer.
             let lateral = (CGFloat(index) - CGFloat(roll.count - 1) / 2) * Dice3D.side * 1.4
             die.position = SCNVector3(
-                entryX + -sin(heading) * lateral + .random(in: -0.4...0.4),
-                Dice3D.side * (1.4 + CGFloat(index) * 0.5),
-                entryZ + cos(heading) * lateral + .random(in: -0.4...0.4))
+                entryX + -sin(heading) * lateral + .random(in: -0.5...0.5),
+                dropHeight + CGFloat(index) * Dice3D.side * 0.8 + .random(in: -1.5...1.5),
+                entryZ + cos(heading) * lateral + .random(in: -0.5...0.5))
             // Random initial orientation so no two throws start alike.
             die.eulerAngles = SCNVector3(CGFloat.random(in: 0..<(2 * .pi)),
                                          CGFloat.random(in: 0..<(2 * .pi)),
@@ -264,11 +292,12 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
             let aim = heading + CGFloat.random(in: -0.16...0.16)
                 + (CGFloat(index) - CGFloat(roll.count - 1) / 2) * 0.13
             let speed = baseSpeed * CGFloat.random(in: 0.85...1.15)
-            die.physicsBody?.velocity = SCNVector3(cos(aim) * speed,
-                                                   CGFloat.random(in: -2 ... 1),
-                                                   sin(aim) * speed)
+            die.physicsBody?.velocity = SCNVector3(
+                cos(aim) * speed,
+                -plungeSpeed * CGFloat.random(in: 0.85...1.15),
+                sin(aim) * speed)
             // Strong tumble: faces visibly cycle because the cube really spins.
-            let spin = CGFloat.random(in: 14...30)
+            let spin = CGFloat.random(in: 18...34)
             let ax = CGFloat.random(in: -1...1)
             let ay = CGFloat.random(in: -1...1)
             let az = CGFloat.random(in: -1...1)
@@ -290,6 +319,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         reported = false
         lastPoses = dice.map { ($0.presentation.simdWorldPosition,
                                 $0.presentation.simdWorldOrientation) }
+        resistanceTiers = Array(repeating: 0, count: dice.count)
         view?.rendersContinuously = true
     }
 
@@ -319,16 +349,54 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         var maxLinear: Float = 0   // units/s
         var maxAngular: Float = 0  // rad/s
         var minFlatness: Float = 1
+        var tierChanges: [(index: Int, tier: Int)] = []
+        let groundedY = Float(Dice3D.side) * 0.9
         for index in dice.indices {
             let node = dice[index].presentation
             let position = node.simdWorldPosition
             let orientation = node.simdWorldOrientation
             let previous = lastPoses[index]
-            maxLinear = max(maxLinear, simd_distance(position, previous.position) / dt)
+            let linear = simd_distance(position, previous.position) / dt
+            maxLinear = max(maxLinear, linear)
             let dot = min(1, abs(simd_dot(orientation.vector, previous.orientation.vector)))
             maxAngular = max(maxAngular, 2 * acos(dot) / dt)
             minFlatness = min(minFlatness, DieFaceReader.flatness(of: dice[index]))
             lastPoses[index] = (position, orientation)
+
+            // Speed-staged rolling resistance: airborne/fast dice carry,
+            // grounded slowing dice bite, near-stopped dice die on the spot.
+            // Tiers only ever escalate within a roll (no flicker back to
+            // "loose" from a bounce wobble).
+            let tier: Int
+            if position.y > groundedY || linear > 4.5 {
+                tier = 0
+            } else if linear > 1.8 {
+                tier = 1
+            } else {
+                tier = 2
+            }
+            if index < resistanceTiers.count, tier > resistanceTiers[index] {
+                resistanceTiers[index] = tier
+                tierChanges.append((index, tier))
+            }
+        }
+        if !tierChanges.isEmpty {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.reported else { return }
+                for change in tierChanges where self.dice.indices.contains(change.index) {
+                    guard let body = self.dice[change.index].physicsBody else { continue }
+                    switch change.tier {
+                    case 1:
+                        body.damping = 0.22
+                        body.angularDamping = 0.30
+                        body.rollingFriction = 0.22
+                    default:
+                        body.damping = 0.60
+                        body.angularDamping = 0.75
+                        body.rollingFriction = 0.80
+                    }
+                }
+            }
         }
 
         // Settled = barely moving AND every die lying flat on a face. The
@@ -351,9 +419,11 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
             return
         }
 
-        // Time budget: at 4.5s give any die still fidgeting (or cocked
-        // against a rail) one tiny settling shove; at 6s read regardless.
-        if elapsed > 4.5, !nudged {
+        // Time budget: at 3.2s give any die still fidgeting (or cocked
+        // against a rail) one tiny settling shove; at 5s read regardless.
+        // Real dice are done ~1.5s after first contact — anything past
+        // this budget is physics noise, not drama.
+        if elapsed > 3.2, !nudged {
             nudged = true
             DispatchQueue.main.async { [weak self] in
                 guard let self, !self.reported else { return }
@@ -364,7 +434,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
                 }
             }
         }
-        if elapsed > 6.0 {
+        if elapsed > 5.0 {
             finishRoll()
         }
     }
@@ -377,7 +447,8 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         reported = true
         let faces = dice.map { DieFaceReader.upFace(of: $0) }
         #if DEBUG
-        NSLog("Dice3D roll %d settled: %@", rollID,
+        let elapsed = (lastFrameTime ?? 0) - (rollStartTime ?? 0)
+        NSLog("Dice3D roll %d settled in %.2fs: %@", rollID, elapsed,
               faces.map(\.rawValue).joined(separator: ","))
         #endif
         DispatchQueue.main.async { [weak self] in

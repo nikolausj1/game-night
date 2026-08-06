@@ -37,6 +37,11 @@ final class TableSFX {
         case dicePour = "dice_pour"
         /// A chip sliding/passing between players (LCR transfers).
         case chipPass = "chip_pass"
+        /// Gentle bell: the table finished something politely on the
+        /// player's behalf (e.g. the LCR pending-coin watchdog moving an
+        /// absent player's owed coins). Synthesized locally as m4a —
+        /// `tools/generate_soft_chime.py`.
+        case softChime = "soft_chime"
     }
 
     /// Polite default playback volumes per effect (0...1) — the
@@ -54,6 +59,7 @@ final class TableSFX {
         .fanfareWin: 0.7,
         .dicePour: 0.65,
         .chipPass: 0.45,
+        .softChime: 0.4,
     ]
 
     /// One preloaded, prepared player per effect that resolved at init.
@@ -111,10 +117,17 @@ final class TableSFX {
     /// `Announcer.resolvedURL`: `SFX` as a true subdirectory, and the
     /// top-level bundle root (in case `SFX` gets flattened by an Xcode
     /// group instead of a folder reference).
+    /// Formats: mp3 first (the ElevenLabs clips), then m4a (locally
+    /// synthesized clips — afconvert can't write mp3).
     private static func resolvedURL(basename: String) -> URL? {
-        if let url = Bundle.main.url(forResource: basename, withExtension: "mp3", subdirectory: "SFX") {
-            return url
+        for ext in ["mp3", "m4a"] {
+            if let url = Bundle.main.url(forResource: basename, withExtension: ext, subdirectory: "SFX") {
+                return url
+            }
+            if let url = Bundle.main.url(forResource: basename, withExtension: ext) {
+                return url
+            }
         }
-        return Bundle.main.url(forResource: basename, withExtension: "mp3")
+        return nil
     }
 }

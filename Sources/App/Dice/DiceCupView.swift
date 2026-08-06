@@ -44,22 +44,16 @@ struct DiceCupView: View {
     // MARK: - Your turn: the cup
 
     private func cupStage(_ state: DiceClientState) -> some View {
-        VStack(spacing: 20) {
+        ZStack {
             if model.hasPoured {
                 pouredView
             } else {
-                Text("Your roll!")
-                    .font(.system(.largeTitle, design: .serif).weight(.bold))
-                    .foregroundStyle(CardStyle.gold)
-                Text(rollingDiceLabel(state))
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.7))
-
-                // Looking down into the cup: dice roll around inside as
-                // the phone tilts and shakes.
+                // The phone IS the cup: the interior fills the screen edge
+                // to edge — near wall sweeping past the bottom, walls
+                // converging up toward the lit mouth at the top. Dice roll
+                // around inside as the phone tilts and shakes.
                 DiceCupSceneView(diceCount: myDiceCount(state), model: model)
-                    .aspectRatio(1, contentMode: .fit)
-                    .frame(maxWidth: 380)
+                    .ignoresSafeArea()
                     .gesture(
                         DragGesture(minimumDistance: 30)
                             .onEnded { value in
@@ -70,14 +64,31 @@ struct DiceCupView: View {
                             }
                     )
 
-                energyMeter
-                Text("Shake to rattle the dice,\nthen flip your phone over to pour")
-                    .font(.footnote)
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.white.opacity(0.55))
+                VStack {
+                    VStack(spacing: 4) {
+                        Text("Your roll!")
+                            .font(.system(.title, design: .serif).weight(.bold))
+                            .foregroundStyle(CardStyle.gold)
+                        Text(rollingDiceLabel(state))
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.75))
+                    }
+                    .padding(.top, 8)
+                    .shadow(color: .black.opacity(0.8), radius: 6)
+                    Spacer()
+                    VStack(spacing: 10) {
+                        energyMeter
+                        Text("Shake to rattle the dice,\nthen flip your phone over to pour")
+                            .font(.footnote)
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.white.opacity(0.7))
+                            .shadow(color: .black.opacity(0.8), radius: 4)
+                    }
+                    .padding(.bottom, 14)
+                }
+                .allowsHitTesting(false)
             }
         }
-        .padding(.horizontal, 24)
     }
 
     private func myDiceCount(_ state: DiceClientState) -> Int {

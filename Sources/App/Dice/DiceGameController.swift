@@ -79,6 +79,17 @@ final class DiceGameController {
         let to: Int?
     }
 
+    /// A penalty coin a HUMAN roller still has to move by hand. Bots'
+    /// transfers apply instantly (they're animated flights); a human's
+    /// owed coins float up off their plate and wait to be DRAGGED to the
+    /// destination — the game blocks until every one lands. `to == nil`
+    /// → the pot.
+    struct PendingTransfer: Identifiable, Equatable {
+        let id: Int
+        let from: Int
+        let to: Int?
+    }
+
     let kind: DiceGameKind = .leftRightCenter
     private(set) var seats: [DiceSeat] = []
     private(set) var chips: [Int] = []
@@ -88,6 +99,8 @@ final class DiceGameController {
     private(set) var winnerSeat: Int?
     private(set) var currentRoll: Roll?
     private(set) var lastTransfers: [ChipTransfer] = []
+    /// Coins a human roller still owes by hand. Non-empty blocks the turn.
+    private(set) var pendingTransfers: [PendingTransfer] = []
     /// True from a roll until it resolves — the dice are still tumbling.
     private(set) var rollInFlight = false
     /// Monotonic bump on every mutation (same redraw-guarantee pattern as
@@ -98,6 +111,9 @@ final class DiceGameController {
     private var rng: SplitMix64
     private var rollCounter = 0
     private var transferCounter = 0
+    /// Bumps whenever a pending-transfer phase starts or ends, so a stale
+    /// watchdog can tell its phase is over.
+    private var pendingGeneration = 0
 
     init(host: GameHostController, seats specs: [SeatSpec]) {
         self.host = host
@@ -147,7 +163,7 @@ final class DiceGameController {
     /// a `Roll` request; the table's SceneKit layer throws real dice and
     /// calls `completeRoll(id:faces:)` with what physics settled on.
     func roll(from seat: Int, intensity rawIntensity: Double) {
-        guard !gameOver, !rollInFlight, seat == turnSeat,
+        guard !gameOver, !rollInFlight, pendingTransfers.isEmpty, seat == turnSeat,
               seats.indices.contains(seat) else { return }
         let count = min(chips[seat], 3)
         guard count > 0 else { return } // turn skipping should prevent this
@@ -196,41 +212,96 @@ final class DiceGameController {
         guard let roll = currentRoll, roll.id == rollID, rollInFlight else { return }
         rollInFlight = false
 
-        var transfers: [ChipTransfer] = []
+        // Work out where each owed coin goes WITHOUT touching chip counts
+        // yet — bots apply immediately, humans move theirs by hand.
         let n = seats.count
+        var owed: [Int?] = [] // destination seat, nil = pot
         for face in faces {
-            guard chips[roll.seat] > 0 else { break } // defensive; can't overdraw
+            guard owed.count < chips[roll.seat] else { break } // can't overdraw
             switch face {
-            case .dot:
-                continue
-            case .left:
-                chips[roll.seat] -= 1
-                let to = (roll.seat + 1) % n
-                chips[to] += 1
-                transferCounter += 1
-                transfers.append(ChipTransfer(id: transferCounter, from: roll.seat, to: to))
-            case .right:
-                chips[roll.seat] -= 1
-                let to = (roll.seat - 1 + n) % n
-                chips[to] += 1
-                transferCounter += 1
-                transfers.append(ChipTransfer(id: transferCounter, from: roll.seat, to: to))
-            case .center:
-                chips[roll.seat] -= 1
-                centerPot += 1
-                transferCounter += 1
-                transfers.append(ChipTransfer(id: transferCounter, from: roll.seat, to: nil))
-            }
-        }
-        lastTransfers = transfers
-        if !transfers.isEmpty {
-            TableSFX.shared.play(.chipPass)
-            if transfers.contains(where: { $0.to == nil }) {
-                TableSFX.shared.play(.chipPlace)
+            case .dot: continue
+            case .left: owed.append((roll.seat + 1) % n)
+            case .right: owed.append((roll.seat - 1 + n) % n)
+            case .center: owed.append(nil)
             }
         }
 
-        checkGameOver(roller: roll.seat)
+        if seats[roll.seat].isBot || owed.isEmpty {
+            // Bot (or a clean roll): instant transfers, animated flights.
+            var transfers: [ChipTransfer] = []
+            for to in owed {
+                transferCounter += 1
+                transfers.append(ChipTransfer(id: transferCounter, from: roll.seat, to: to))
+                applyTransfer(from: roll.seat, to: to)
+            }
+            lastTransfers = transfers
+            if !transfers.isEmpty {
+                TableSFX.shared.play(.chipPass)
+                if transfers.contains(where: { $0.to == nil }) {
+                    TableSFX.shared.play(.chipPlace)
+                }
+            }
+            finishTurn(roller: roll.seat)
+        } else {
+            // Human: the owed coins rise off the plate and wait to be
+            // dragged. Turn (and broadcast) block until all land.
+            pendingTransfers = owed.map { to in
+                transferCounter += 1
+                return PendingTransfer(id: transferCounter, from: roll.seat, to: to)
+            }
+            pendingGeneration += 1
+            stateVersion += 1
+            startPendingWatchdog(roller: roll.seat)
+        }
+    }
+
+    /// Move one chip now (chips/pot mutation only — no turn advance).
+    private func applyTransfer(from seat: Int, to: Int?) {
+        guard chips[seat] > 0 else { return }
+        chips[seat] -= 1
+        if let to { chips[to] += 1 } else { centerPot += 1 }
+    }
+
+    /// The human dragged one owed coin home. Applies it; when the last
+    /// one lands, the turn finally advances and the table broadcasts.
+    func completePendingTransfer(id: Int) {
+        guard let index = pendingTransfers.firstIndex(where: { $0.id == id }) else { return }
+        let transfer = pendingTransfers.remove(at: index)
+        applyTransfer(from: transfer.from, to: transfer.to)
+        TableSFX.shared.play(transfer.to == nil ? .chipPlace : .chipPass)
+        stateVersion += 1
+        if pendingTransfers.isEmpty {
+            pendingGeneration += 1
+            finishTurn(roller: transfer.from)
+        }
+    }
+
+    /// Someone walked away: after 25s the table sighs, chimes softly, and
+    /// slides the remaining owed coins home itself (animated flights, like
+    /// a bot's) so the game never hangs.
+    private func startPendingWatchdog(roller: Int) {
+        let generation = pendingGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25) { [weak self] in
+            guard let self, self.pendingGeneration == generation,
+                  !self.pendingTransfers.isEmpty else { return }
+            var transfers: [ChipTransfer] = []
+            for pending in self.pendingTransfers {
+                self.applyTransfer(from: pending.from, to: pending.to)
+                transfers.append(ChipTransfer(id: pending.id, from: pending.from,
+                                              to: pending.to))
+            }
+            self.pendingTransfers = []
+            self.pendingGeneration += 1
+            self.lastTransfers = transfers
+            TableSFX.shared.play(.softChime)
+            self.finishTurn(roller: roller)
+        }
+    }
+
+    /// Shared tail of every resolved roll: end-check, next seat, tell the
+    /// phones, wake the next bot.
+    private func finishTurn(roller: Int) {
+        checkGameOver(roller: roller)
         if !gameOver { advanceTurn() }
         stateVersion += 1
         broadcast()
@@ -268,7 +339,8 @@ final class DiceGameController {
 
     /// Bots shake an imaginary cup for a moment, then pour.
     private func scheduleBotIfNeeded() {
-        guard !gameOver, !rollInFlight, seats[turnSeat].isBot else { return }
+        guard !gameOver, !rollInFlight, pendingTransfers.isEmpty,
+              seats[turnSeat].isBot else { return }
         let expectedTurn = turnSeat
         let expectedVersion = stateVersion
         let delay = Double.random(in: 1.2...2.0)
@@ -291,6 +363,8 @@ final class DiceGameController {
         winnerSeat = nil
         currentRoll = nil
         lastTransfers = []
+        pendingTransfers = []
+        pendingGeneration += 1
         stateVersion += 1
         TableSFX.shared.play(.shuffle)
         broadcast()

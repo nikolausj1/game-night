@@ -5,6 +5,9 @@ import SwiftUI
 struct SeatPlateView: View {
     let seat: Seat
     let state: GameState
+    /// The parent rotates the whole plate to face its edge; inside the
+    /// plate, local "down" is therefore always the table's rim.
+    var edgeAngle: Angle = .degrees(0)
 
     private var isTheirTurn: Bool {
         guard let round = state.round else { return false }
@@ -54,14 +57,28 @@ struct SeatPlateView: View {
             .frame(minHeight: 14)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.top, 9)
+        .padding(.bottom, 11)
         .background(
-            Capsule()
-                .fill(.black.opacity(0.38))
+            // A rim tab, not a floating pill: rounded toward the felt,
+            // squared where it meets the rail, with a brass seam along
+            // the table edge — reads as fixed to the side of the table.
+            UnevenRoundedRectangle(topLeadingRadius: 15, bottomLeadingRadius: 4,
+                                   bottomTrailingRadius: 4, topTrailingRadius: 15,
+                                   style: .continuous)
+                .fill(.black.opacity(0.42))
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(CardStyle.gold.opacity(0.55))
+                        .frame(height: 2)
+                        .padding(.horizontal, 3)
+                }
                 .overlay(
-                    Capsule().strokeBorder(
-                        isTheirTurn ? color : .white.opacity(0.08),
-                        lineWidth: isTheirTurn ? 2.5 : 1)
+                    UnevenRoundedRectangle(topLeadingRadius: 15, bottomLeadingRadius: 4,
+                                           bottomTrailingRadius: 4, topTrailingRadius: 15,
+                                           style: .continuous)
+                        .strokeBorder(isTheirTurn ? color : .white.opacity(0.08),
+                                      lineWidth: isTheirTurn ? 2.5 : 1)
                 )
                 .shadow(color: isTheirTurn ? color.opacity(0.65) : .clear, radius: 10)
         )

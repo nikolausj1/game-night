@@ -73,7 +73,16 @@ struct HandRootView: View {
             LobbyWaitView(playerName: client.playerName)
         case .bidding, .choosingTrump:
             if client.snapshot?.phase == .choosingTrump(seat: client.mySeat ?? -1) {
-                TrumpChooserView(client: client)
+                if client.snapshot?.gameKind == .uno {
+                    // UNO keeps your hand on screen for the color choice —
+                    // full-screen replacement would hide the cards you're
+                    // about to keep playing with. See HandView's compact
+                    // color-choice overlay. Trick-game trump choice and
+                    // Crazy Eights still get the full-screen chooser below.
+                    HandView(client: client)
+                } else {
+                    TrumpChooserView(client: client)
+                }
             } else if client.snapshot?.gameKind == .uno {
                 // UNO has no bids — someone else is naming a color after a
                 // wild. The bid wheel would be nonsense here.
@@ -166,22 +175,8 @@ struct TrumpChooserView: View {
 
     /// UNO's four colors, drawn as rounded swatches rather than suit glyphs.
     private var unoColorRow: some View {
-        HStack(spacing: 18) {
-            ForEach(UnoColor.allCases, id: \.self) { color in
-                Button {
-                    Haptics.play()
-                    client.declareSuit(color.suit)
-                } label: {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(UnoStyle.field(for: color))
-                        .frame(width: 74, height: 74)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .strokeBorder(.white.opacity(0.9), lineWidth: 3)
-                        )
-                }
-                .buttonStyle(.plain)
-            }
+        UnoColorSwatchRow(swatchSize: 74) { color in
+            client.declareSuit(color.suit)
         }
     }
 
@@ -202,6 +197,38 @@ struct TrumpChooserView: View {
                         .frame(width: 74, height: 74)
                         .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .fill(CardStyle.stockTop))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
+/// UNO's four color swatches — sized for either the full-screen
+/// TrumpChooserView or HandView's compact in-hand strip. Shared so the two
+/// pickers stay visually consistent.
+struct UnoColorSwatchRow: View {
+    let swatchSize: CGFloat
+    let onPick: (UnoColor) -> Void
+
+    private var spacing: CGFloat { swatchSize > 50 ? 18 : 10 }
+    private var cornerRadius: CGFloat { swatchSize * 0.22 }
+    private var borderWidth: CGFloat { swatchSize > 50 ? 3 : 2 }
+
+    var body: some View {
+        HStack(spacing: spacing) {
+            ForEach(UnoColor.allCases, id: \.self) { color in
+                Button {
+                    Haptics.play()
+                    onPick(color)
+                } label: {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(UnoStyle.field(for: color))
+                        .frame(width: swatchSize, height: swatchSize)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                                .strokeBorder(.white.opacity(0.9), lineWidth: borderWidth)
+                        )
                 }
                 .buttonStyle(.plain)
             }

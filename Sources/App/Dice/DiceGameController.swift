@@ -150,6 +150,12 @@ final class DiceGameController {
         host.onDicePour = { [weak self] seat, intensity in
             self?.roll(from: seat, intensity: intensity)
         }
+        // A phone that reconnects (or re-identifies) mid-game gets its
+        // dice state back immediately — without this it sits on a stale
+        // lobby screen until the next turn-end broadcast.
+        host.onDiceHello = { [weak self] deviceID in
+            self?.resendState(toDevice: deviceID)
+        }
 
         Announcer.shared.announceGameStart(playerNames: built.map(\.name))
         broadcast()
@@ -164,7 +170,12 @@ final class DiceGameController {
     /// calls `completeRoll(id:faces:)` with what physics settled on.
     func roll(from seat: Int, intensity rawIntensity: Double) {
         guard !gameOver, !rollInFlight, pendingTransfers.isEmpty, seat == turnSeat,
-              seats.indices.contains(seat) else { return }
+              seats.indices.contains(seat) else {
+            NSLog("Dice: roll(from: %d) REFUSED — gameOver=%d inFlight=%d pending=%d turnSeat=%d",
+                  seat, gameOver ? 1 : 0, rollInFlight ? 1 : 0,
+                  pendingTransfers.count, turnSeat)
+            return
+        }
         let count = min(chips[seat], 3)
         guard count > 0 else { return } // turn skipping should prevent this
 
@@ -375,16 +386,26 @@ final class DiceGameController {
 
     /// Every phone gets its own personalized state after every mutation.
     private func broadcast() {
-        let names = seats.map(\.name)
         for seat in seats {
             guard let deviceID = seat.deviceID else { continue }
-            let state = DiceClientState(
-                kind: kind, mySeat: seat.id, seatNames: names,
-                chips: chips, centerPot: centerPot, turnSeat: turnSeat,
-                isMyTurn: !gameOver && !rollInFlight && turnSeat == seat.id,
-                gameOver: gameOver, winnerSeat: winnerSeat)
-            host.sendDiceState(state, toDevice: deviceID)
+            host.sendDiceState(state(for: seat.id), toDevice: deviceID)
         }
+    }
+
+    /// One seat's personalized view of the game, as of right now.
+    private func state(for seatID: Int) -> DiceClientState {
+        DiceClientState(
+            kind: kind, mySeat: seatID, seatNames: seats.map(\.name),
+            chips: chips, centerPot: centerPot, turnSeat: turnSeat,
+            isMyTurn: !gameOver && !rollInFlight && pendingTransfers.isEmpty
+                && turnSeat == seatID,
+            gameOver: gameOver, winnerSeat: winnerSeat)
+    }
+
+    /// Re-push the current state to one device (reconnect / re-hello).
+    private func resendState(toDevice deviceID: String) {
+        guard let seat = seats.first(where: { $0.deviceID == deviceID }) else { return }
+        host.sendDiceState(state(for: seat.id), toDevice: deviceID)
     }
 
     /// Tear-down: every phone gets the "dice closed" sentinel (mySeat -1 →
@@ -400,6 +421,7 @@ final class DiceGameController {
         }
         host.diceSeatByDevice = [:]
         host.onDicePour = nil
+        host.onDiceHello = nil
     }
 }
 

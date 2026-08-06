@@ -65,8 +65,14 @@ final class AnnouncerDirector {
             case .cardsDrawn:
                 break // mechanical: no announcer line for a draw-until-playable pull
 
+            case .cardDealt:
+                break // mechanical: the table's own deal gesture carries the feedback
+
             case .illegalAttempt, .undone, .suitDeclared:
                 break // private moments; the table doesn't call them out
+
+            case .topCardFlipped:
+                sfx.play(.cardFlip) // mechanical: same flip sound as a trump reveal; no announcer line
             }
         }
     }

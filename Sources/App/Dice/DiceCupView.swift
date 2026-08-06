@@ -16,6 +16,12 @@ import AVFoundation
 struct DiceCupView: View {
     @Bindable var client: GameClientController
     @State private var model = DiceCupModel()
+    /// Which of the three cup looks this phone uses (see CupConcept).
+    @AppStorage("gn.cupConcept") private var cupConceptRaw = CupConcept.crossSection.rawValue
+
+    private var cupConcept: CupConcept {
+        CupConcept(rawValue: cupConceptRaw) ?? .crossSection
+    }
 
     var body: some View {
         Group {
@@ -30,14 +36,33 @@ struct DiceCupView: View {
             }
         }
         .onAppear {
-            model.onPour = { intensity in
-                _ = client.session.send(.dicePour(intensity: intensity))
+            model.onPour = { [weak client] intensity in
+                guard let client else { return }
+                // Same self-healing contract as card actions: a failed
+                // hand-off means the session is wedged — start rebuilding
+                // immediately so the NEXT pour (or the table's 10s RNG
+                // watchdog) can't strand the game.
+                if !client.session.send(.dicePour(intensity: intensity)) {
+                    client.session.refresh()
+                }
             }
             model.setTurnActive(client.diceState?.isMyTurn == true)
+            scheduleAutoPourIfAsked(client.diceState?.isMyTurn == true)
         }
         .onDisappear { model.setTurnActive(false) }
         .onChange(of: client.diceState?.isMyTurn) { _, isMyTurn in
             model.setTurnActive(isMyTurn == true)
+            scheduleAutoPourIfAsked(isMyTurn == true)
+        }
+    }
+
+    /// Sim-verify hook (-autoPour): no CoreMotion in the simulator, so 8s
+    /// after the cup becomes active the pour fires by itself — exercising
+    /// the exact same path as a real face-down flip.
+    private func scheduleAutoPourIfAsked(_ isMyTurn: Bool) {
+        guard isMyTurn, CommandLine.arguments.contains("-autoPour") else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            model.pourFromSwipe()
         }
     }
 
@@ -49,10 +74,12 @@ struct DiceCupView: View {
                 pouredView
             } else {
                 // The phone IS the cup: the interior fills the screen edge
-                // to edge — near wall sweeping past the bottom, walls
-                // converging up toward the lit mouth at the top. Dice roll
-                // around inside as the phone tilts and shakes.
-                DiceCupSceneView(diceCount: myDiceCount(state), model: model)
+                // to edge, in whichever of the three looks this player
+                // prefers. Dice roll around inside as the phone tilts and
+                // shakes. `.id` rebuilds the scene instantly on toggle.
+                DiceCupSceneView(diceCount: myDiceCount(state), model: model,
+                                 concept: cupConcept)
+                    .id(cupConcept)
                     .ignoresSafeArea()
                     .gesture(
                         DragGesture(minimumDistance: 30)
@@ -87,6 +114,20 @@ struct DiceCupView: View {
                     .padding(.bottom, 14)
                 }
                 .allowsHitTesting(false)
+
+                // The cup-look toggle: small, labeled, top-right. Cycles
+                // Cross-section → Look-in → Glass bottom, persisted.
+                VStack {
+                    HStack {
+                        Spacer()
+                        CupConceptToggle(concept: cupConcept) {
+                            cupConceptRaw = cupConcept.next.rawValue
+                        }
+                    }
+                    Spacer()
+                }
+                .padding(.top, 10)
+                .padding(.trailing, 14)
             }
         }
     }
@@ -227,6 +268,36 @@ struct DiceCupView: View {
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.5))
         }
+    }
+}
+
+/// The small labeled pill that cycles the three cup looks. Kept dim so it
+/// reads as a setting, not part of the game.
+struct CupConceptToggle: View {
+    let concept: CupConcept
+    let onCycle: () -> Void
+
+    var body: some View {
+        Button {
+            Haptics.tick()
+            onCycle()
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "cup.and.saucer.fill")
+                    .font(.system(size: 10))
+                Text(concept.label)
+                    .font(.caption2.weight(.semibold))
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 9, weight: .bold))
+            }
+            .foregroundStyle(CardStyle.gold.opacity(0.9))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(.black.opacity(0.45))
+                .overlay(Capsule().strokeBorder(CardStyle.gold.opacity(0.35),
+                                                lineWidth: 1)))
+        }
+        .buttonStyle(.plain)
     }
 }
 

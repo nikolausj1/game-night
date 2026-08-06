@@ -30,6 +30,29 @@ final class GameClientController {
         session.start()
     }
 
+    /// The ONE live client for this phone. SwiftUI re-initializes view
+    /// structs freely, and `@State(initialValue:)` evaluates its argument
+    /// on EVERY init — so constructing a controller inline used to spin up
+    /// a real, connecting second ClientSession each time HandRootView was
+    /// rebuilt. Each stray session's `hello` ghost-purged the visible
+    /// session's peer from the host's `deviceByPeer`, silently stealing
+    /// the routing for snapshots, dice state, and pours (field symptom:
+    /// "the cup pours but the table never rolls"). Reusing one instance
+    /// makes re-inits free; a new controller is only built when the player
+    /// name actually changes.
+    static func obtain(playerName: String) -> GameClientController {
+        if let live = liveInstance, live.playerName == playerName {
+            live.session.ensureAlive()
+            return live
+        }
+        liveInstance?.session.stop()
+        let fresh = GameClientController(playerName: playerName)
+        liveInstance = fresh
+        return fresh
+    }
+
+    private static var liveInstance: GameClientController?
+
     /// Screenshot-verification hook: adopt a snapshot without a session.
     func adoptDemoSnapshot(_ snap: ClientSnapshot) {
         snapshot = snap
@@ -95,6 +118,13 @@ final class GameClientController {
             snapshot = snap
             diceState = nil // a card game superseded dice mode
             runAutoPlayIfAsked(snap)
+        case .tableReset:
+            // The table's game is gone — drop everything from it. A fresh
+            // welcome + snapshot follow if we're seated in the next one.
+            snapshot = nil
+            diceState = nil
+            pendingIllegal = nil
+            mySeat = nil
         case .diceState(let state):
             // mySeat < 0 is the "dice game closed" sentinel from the table
             // — clears dice mode and drops the phone back to the lobby.

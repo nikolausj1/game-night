@@ -25,6 +25,15 @@ public enum TableAction: Codable, Sendable, Equatable {
     case nextTrick
     case approveUndo
     case newDeal
+    /// Manual dealing (rules.autoDeal off): pop the top draw-pile card into
+    /// this seat's hand. Only valid in `.dealing`, only for seats below the
+    /// round's target count; the deal auto-completes when every hand is full.
+    case dealCardTo(seat: Int)
+    /// Free Play, trump-style peek: pop the top of the draw pile face-up
+    /// beside the deck (onto the discard pile). Free play only; a silent
+    /// no-op everywhere else and when the draw pile is empty, same as every
+    /// other TableAction guard failure.
+    case flipTopCard
 }
 
 /// Emitted by the reducer for UI updates and the announcer.
@@ -47,4 +56,10 @@ public enum GameEvent: Codable, Sendable, Equatable {
     /// unplayable). The turn does not pass — the drawer must play next,
     /// unless the deck ran dry first.
     case cardsDrawn(seat: Int, count: Int)
+    /// Manual dealing: one card just moved from the draw pile into this
+    /// seat's hand via `TableAction.dealCardTo`.
+    case cardDealt(seat: Int)
+    /// Free Play: `TableAction.flipTopCard` popped this card face-up beside
+    /// the deck (it's already on the discard pile by the time this fires).
+    case topCardFlipped(Card)
 }

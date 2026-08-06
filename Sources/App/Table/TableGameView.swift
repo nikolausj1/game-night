@@ -156,7 +156,22 @@ struct TableGameView: View {
                                                        y: deckAnchor.y * geo.size.height),
                                          to: card.to, delay: card.delay)
                     }
+                    // Manual dealing: with auto-deal off, the dealing phase
+                    // gets the same drag-the-deck affordance as free play.
+                    if state.phase == .dealing, !state.rules.autoDeal,
+                       state.gameKind != .freePlay {
+                        dealHotspot(state: state, size: geo.size)
+                        dealVisuals(state: state, size: geo.size)
+                    }
                     phaseOverlay(state: state)
+                    if !isSpectator {
+                        GameHUD(title: state.gameKind.displayName,
+                                onExit: { onClose?() },
+                                toggles: [])
+                            .padding(16)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity,
+                                   alignment: .topTrailing)
+                    }
                     if showCloseButton, !isSpectator {
                         HoldToCloseButton(progress: $closeRingProgress) {
                             onClose?()
@@ -178,8 +193,10 @@ struct TableGameView: View {
                     rotationByCard = rotationByCard.filter { current.contains($0.key) }
                 }
                 .onChange(of: state.round?.roundNumber) { _, newRound in
+                    // Auto-deal only: manual dealing IS its own animation.
                     guard let newRound, newRound != lastDealtRound,
-                          state.gameKind != .freePlay else { return }
+                          state.gameKind != .freePlay,
+                          state.rules.autoDeal else { return }
                     lastDealtRound = newRound
                     runDealStream(state: state, size: geo.size)
                 }
@@ -294,6 +311,13 @@ struct TableGameView: View {
             .frame(width: 150, height: 190)
             .contentShape(Rectangle())
             .position(x: deckAnchor.x * size.width, y: deckAnchor.y * size.height)
+            // Free play: TAP the deck to flip its top card face-up onto
+            // the felt — the trump-reveal gesture, sandbox-style.
+            .onTapGesture {
+                guard state.gameKind == .freePlay else { return }
+                Haptics.tick()
+                host.tableAction(.flipTopCard)
+            }
             .gesture(
                 DragGesture(minimumDistance: 4)
                     .onChanged { value in dealDragLocation = value.location }
@@ -309,7 +333,14 @@ struct TableGameView: View {
                                                 y: anchors[target].y * size.height)
                             let flight = (id: UUID(), from: value.location, to: plate)
                             dealFlight = flight
-                            host.drawCard(for: target)
+                            if state.phase == .dealing, !state.rules.autoDeal,
+                               state.gameKind != .freePlay {
+                                // Manual dealing: the dealer distributes the
+                                // round by hand, one card per drag.
+                                host.tableAction(.dealCardTo(seat: target))
+                            } else {
+                                host.drawCard(for: target)
+                            }
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
                                 if dealFlight?.id == flight.id { dealFlight = nil }
                             }
@@ -396,8 +427,14 @@ struct TableGameView: View {
         let anchors = effectiveAnchors(state)
         return ForEach(state.seats) { seat in
             let anchor = anchors[seat.id]
-            SeatPlateView(seat: seat, state: state,
-                          edgeAngle: outwardAngle(anchor))
+            VStack(spacing: 6) {
+                SeatPlateView(seat: seat, state: state,
+                              edgeAngle: outwardAngle(anchor))
+                // The player's hand, ON the table: overlapping card backs
+                // between the plate and the rim — the count mirror of what
+                // their remote holds, and the landing spot for deals/draws.
+                RailHandFan(count: state.hands[seat.id]?.count ?? 0)
+            }
                 .rotationEffect(outwardAngle(anchor))
                 .scaleEffect(draggingPlateSeat == seat.id ? 1.08 : 1)
                 .shadow(color: .black.opacity(draggingPlateSeat == seat.id ? 0.5 : 0),

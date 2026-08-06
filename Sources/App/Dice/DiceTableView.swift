@@ -36,6 +36,7 @@ struct DiceTableView: View {
                 potView
                     .position(x: geo.size.width * 0.5, y: geo.size.height * 0.45)
                 platesLayer(size: geo.size)
+                feltCoinLayer(size: geo.size)
                 diceScene
                     .onAppear {
                         // The table feels being touched: slams re-tumble a
@@ -151,29 +152,23 @@ struct DiceTableView: View {
             ZStack {
                 Circle()
                     .fill(.black.opacity(0.25))
-                    .frame(width: 118, height: 118)
+                    .frame(width: 150, height: 150)
                     .overlay(Circle().strokeBorder(
                         potGlows ? CardStyle.gold : CardStyle.gold.opacity(0.4),
                         lineWidth: potGlows ? 3 : 1.5))
                     .shadow(color: potGlows ? CardStyle.gold.opacity(0.7) : .clear,
                             radius: 14)
-                // Real money on the felt: the pot builds up as short coin
-                // stacks clustered in the well, stable positions per stack
-                // so the pile grows instead of twitching.
-                HStack(alignment: .bottom, spacing: 6) {
-                    ForEach(Array(potStacks.enumerated()), id: \.offset) { index, stackCount in
-                        CoinStack(count: stackCount, diameter: 20, maxVisible: 5,
-                                  seed: "pot\(index)")
-                            .offset(y: CGFloat(TableGeometry.jitterDegrees(
-                                cardID: "potdrop\(index)")) * 0.8)
-                    }
-                }
+                // Real money in the well: a big loose pile of full-size
+                // coins, one landing spot per coin (stable spiral seeded by
+                // index) so the pile GROWS instead of twitching.
+                CoinCluster(count: controller.centerPot, diameter: 44,
+                            maxVisible: 12, seedKey: "pot", spreadScale: 0.36)
                 if controller.centerPot > 0 {
                     Text("\(controller.centerPot)")
                         .font(.system(.title2, design: .serif).weight(.black))
                         .foregroundStyle(CardStyle.stockTop)
                         .shadow(color: .black.opacity(0.75), radius: 3, y: 1)
-                        .offset(y: 36)
+                        .offset(y: 52)
                 }
             }
             Text("POT")
@@ -185,17 +180,48 @@ struct DiceTableView: View {
         .animation(.easeInOut(duration: 0.4), value: potGlows)
     }
 
-    /// Pot chips split into believable stacks of up to 5 (max 3 stacks
-    /// drawn; the count label carries the rest).
-    private var potStacks: [Int] {
-        var remaining = min(controller.centerPot, 15)
-        var stacks: [Int] = []
-        while remaining > 0 && stacks.count < 3 {
-            let take = min(5, remaining)
-            stacks.append(take)
-            remaining -= take
+    // MARK: - Coins on the felt
+
+    /// Where a seat's coin cluster lives: just inside the rail from the
+    /// plate, pulled toward the pot — the same "in front of your spot"
+    /// band the pending coins use.
+    private func clusterCenter(seat: Int, size: CGSize) -> CGPoint {
+        let anchors = TableGeometry.seatAnchors(count: controller.seats.count)
+        guard anchors.indices.contains(seat) else {
+            return CGPoint(x: size.width / 2, y: size.height / 2)
         }
-        return stacks
+        let plate = platePosition(anchor: anchors[seat], size: size)
+        let pot = CGPoint(x: size.width * 0.5, y: size.height * 0.45)
+        let toward = CGVector(dx: pot.x - plate.x, dy: pot.y - plate.y)
+        let length = max(1, hypot(toward.dx, toward.dy))
+        return CGPoint(x: plate.x + toward.dx / length * 108,
+                       y: plate.y + toward.dy / length * 108)
+    }
+
+    /// Every player's chips live ON the felt as a loose cluster of big
+    /// coins — always visible, always draggable (they tidy themselves
+    /// gently after a fidget). During a penalty phase the destination
+    /// cluster gets a gold call-out ring.
+    private func feltCoinLayer(size: CGSize) -> some View {
+        ForEach(controller.seats) { seat in
+            let center = clusterCenter(seat: seat.id, size: size)
+            let isDestination = controller.pendingTransfers.contains { $0.to == seat.id }
+            ZStack {
+                if isDestination {
+                    Circle()
+                        .strokeBorder(CardStyle.gold.opacity(0.85),
+                                      style: StrokeStyle(lineWidth: 2.5, dash: [7, 6]))
+                        .frame(width: 120, height: 120)
+                        .shadow(color: CardStyle.gold.opacity(0.6), radius: 10)
+                        .transition(.scale(scale: 0.7).combined(with: .opacity))
+                }
+                DraggableCoinCluster(count: controller.chips[seat.id],
+                                     diameter: 50,
+                                     seedKey: "seat\(seat.id)")
+            }
+            .position(center)
+            .animation(.easeInOut(duration: 0.35), value: isDestination)
+        }
     }
 
     // MARK: - Chip flights
@@ -210,12 +236,11 @@ struct DiceTableView: View {
     private func spawnChipFlights(_ transfers: [DiceGameController.ChipTransfer],
                                   size: CGSize) {
         guard !transfers.isEmpty else { return }
-        let anchors = TableGeometry.seatAnchors(count: controller.seats.count)
         let pot = CGPoint(x: size.width * 0.5, y: size.height * 0.45)
         let flights = transfers.enumerated().map { index, transfer in
             ChipFlight(id: transfer.id,
-                       from: platePosition(anchor: anchors[transfer.from], size: size),
-                       to: transfer.to.map { platePosition(anchor: anchors[$0], size: size) } ?? pot,
+                       from: clusterCenter(seat: transfer.from, size: size),
+                       to: transfer.to.map { clusterCenter(seat: $0, size: size) } ?? pot,
                        delay: Double(index) * 0.14)
         }
         chipFlights.append(contentsOf: flights)
@@ -236,30 +261,30 @@ struct DiceTableView: View {
 
     // MARK: - Pending coins (humans pay their own debts)
 
-    /// A human's owed coins after their roll: each floats up off the plate
-    /// and pulses until DRAGGED home. Within ~110pt of the right target it
-    /// snaps in and the transfer applies; anywhere else it shakes back.
+    /// A human's owed coins after their roll: each rises out of the
+    /// roller's felt cluster and pulses until DRAGGED home. Within ~110pt
+    /// of the right target (the neighbor's coin cluster or the pot pile)
+    /// it snaps in and the transfer applies; anywhere else it shakes back.
     /// The turn is blocked until the queue is empty (25s watchdog in the
     /// controller catches walk-aways).
     private func pendingCoinLayer(size: CGSize) -> some View {
-        let anchors = TableGeometry.seatAnchors(count: controller.seats.count)
         let pot = CGPoint(x: size.width * 0.5, y: size.height * 0.45)
         return ForEach(Array(controller.pendingTransfers.enumerated()),
                        id: \.element.id) { index, pending in
-            let plate = platePosition(anchor: anchors[pending.from], size: size)
-            let toward = CGVector(dx: pot.x - plate.x, dy: pot.y - plate.y)
+            let cluster = clusterCenter(seat: pending.from, size: size)
+            let toward = CGVector(dx: pot.x - cluster.x, dy: pot.y - cluster.y)
             let length = max(1, hypot(toward.dx, toward.dy))
             let unit = CGVector(dx: toward.dx / length, dy: toward.dy / length)
-            // Home: floated up off the plate toward the felt, siblings
+            // Home: floated off the cluster toward the pot, siblings
             // spread perpendicular so three owed coins sit in a neat rank.
             let spread = CGFloat(index) - CGFloat(controller.pendingTransfers.count - 1) / 2
             let home = CGPoint(
-                x: plate.x + unit.dx * 84 + -unit.dy * spread * 46,
-                y: plate.y + unit.dy * 84 + unit.dx * spread * 46)
+                x: cluster.x + unit.dx * 70 + -unit.dy * spread * 54,
+                y: cluster.y + unit.dy * 70 + unit.dx * spread * 54)
             let destination = pending.to.map {
-                platePosition(anchor: anchors[$0], size: size)
+                clusterCenter(seat: $0, size: size)
             } ?? pot
-            PendingCoinView(plate: plate, home: home, destination: destination) {
+            PendingCoinView(plate: cluster, home: home, destination: destination) {
                 controller.completePendingTransfer(id: pending.id)
             }
         }
@@ -372,18 +397,23 @@ struct DicePlate: View {
         .animation(.easeInOut(duration: 0.4), value: isDestination)
     }
 
+    /// The coins themselves live ON the felt now (DraggableCoinCluster in
+    /// DiceTableView) — the plate keeps only a whisper of status: the
+    /// count as a number, or the empty-handed lament.
     @ViewBuilder
     private var chipRow: some View {
-        HStack(spacing: 4) {
+        Group {
             if chips == 0 {
                 Text("empty-handed")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(CardStyle.stockTop.opacity(0.45))
             } else {
-                CoinStack(count: chips, diameter: 13, maxVisible: 6, seed: name)
+                Text("\(chips) coin\(chips == 1 ? "" : "s")")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(CardStyle.gold.opacity(0.75))
             }
         }
-        .frame(minHeight: 22, alignment: .bottom)
+        .frame(minHeight: 14)
         .animation(.spring(response: 0.35, dampingFraction: 0.7), value: chips)
     }
 }
@@ -491,45 +521,130 @@ struct ChipToken: View {
     }
 }
 
-/// A believable STACK of coins: each coin rides the one below with a hair
-/// of sideways wobble (real stacks are never laser-straight), the shared
-/// edge thickness makes the pile read tall, and a contact shadow pools
-/// under the bottom coin. Overflow shows as "×N".
-struct CoinStack: View {
+/// A loose CLUSTER of full-size coins lying on the felt — how real chips
+/// actually sit in front of a player. Coins take stable seeded spots on a
+/// golden-angle spiral (the pile grows outward instead of twitching), each
+/// with its own resting rotation and a shared contact shadow. Overflow
+/// past `maxVisible` shows as a small "×N" tag.
+struct CoinCluster: View {
     let count: Int
-    var diameter: CGFloat = 18
+    var diameter: CGFloat = 50
     var maxVisible: Int = 8
-    /// Stable per-stack wobble seed so piles don't twitch on redraw.
-    var seed: String = "stack"
+    /// Stable per-cluster seed so layouts differ per seat but never twitch.
+    var seedKey: String = "cluster"
+    /// Spiral pitch as a fraction of the coin diameter.
+    var spreadScale: CGFloat = 0.40
 
-    private var step: CGFloat { diameter * 0.22 }
+    static func slot(index: Int, seedKey: String, diameter: CGFloat,
+                     spreadScale: CGFloat) -> CGSize {
+        let seed = Double(TableGeometry.jitterDegrees(cardID: seedKey)) // ±4°-ish
+        let angle = Double(index) * 2.39996 + seed * 1.3
+        let radius = diameter * spreadScale * sqrt(CGFloat(index))
+        return CGSize(width: CGFloat(cos(angle)) * radius,
+                      height: CGFloat(sin(angle)) * radius * 0.86) // felt-flat oval
+    }
 
     var body: some View {
         let visible = min(count, maxVisible)
-        HStack(spacing: 5) {
-            ZStack {
-                // Contact shadow under the pile.
+        ZStack {
+            if visible > 0 {
+                // One soft pooled shadow under the whole cluster.
                 Ellipse()
-                    .fill(.black.opacity(0.38))
-                    .frame(width: diameter * 1.15, height: diameter * 0.42)
-                    .blur(radius: 1.6)
-                    .offset(y: diameter * 0.42)
-                ForEach(0..<visible, id: \.self) { level in
-                    ChipToken(diameter: diameter, animatesSheen: false)
-                        .offset(x: TableGeometry.jitterDegrees(cardID: "\(seed)x\(level)")
-                                    * diameter * 0.012,
-                                y: -CGFloat(level) * step)
-                }
+                    .fill(.black.opacity(0.30))
+                    .frame(width: diameter * (1.1 + spreadScale * CGFloat(visible) * 0.5),
+                           height: diameter * (0.8 + spreadScale * CGFloat(visible) * 0.35))
+                    .blur(radius: 5)
+                    .offset(y: diameter * 0.10)
             }
-            .frame(width: diameter * 1.3,
-                   height: diameter + CGFloat(max(0, visible - 1)) * step,
-                   alignment: .bottom)
+            ForEach(0..<visible, id: \.self) { index in
+                let slot = Self.slot(index: index, seedKey: seedKey,
+                                     diameter: diameter, spreadScale: spreadScale)
+                ChipToken(diameter: diameter, animatesSheen: index < 3)
+                    .rotationEffect(.degrees(
+                        TableGeometry.jitterDegrees(cardID: "\(seedKey)r\(index)") * 4))
+                    .offset(slot)
+                    .transition(.scale(scale: 0.4).combined(with: .opacity))
+            }
             if count > maxVisible {
                 Text("×\(count)")
-                    .font(.caption2.weight(.bold))
+                    .font(.caption.weight(.bold))
                     .foregroundStyle(CardStyle.gold)
+                    .shadow(color: .black.opacity(0.7), radius: 2)
+                    .offset(x: diameter * 1.1, y: diameter * 0.55)
             }
         }
+        .animation(.spring(response: 0.4, dampingFraction: 0.75), value: count)
+    }
+}
+
+/// A CoinCluster whose coins the players can fidget with: every coin is
+/// draggable on its own, rides the finger, and when released drifts
+/// gently back to its spot in the cluster (auto-tidy — the felt stays
+/// composed without ever fighting the hand).
+struct DraggableCoinCluster: View {
+    let count: Int
+    var diameter: CGFloat = 50
+    var seedKey: String = "cluster"
+    var maxVisible: Int = 8
+    var spreadScale: CGFloat = 0.40
+
+    /// Live drag offsets per coin index (cleared by the tidy spring).
+    @State private var dragOffsets: [Int: CGSize] = [:]
+    @State private var draggingIndex: Int?
+
+    var body: some View {
+        let visible = min(count, maxVisible)
+        ZStack {
+            if visible > 0 {
+                Ellipse()
+                    .fill(.black.opacity(0.30))
+                    .frame(width: diameter * (1.1 + spreadScale * CGFloat(visible) * 0.5),
+                           height: diameter * (0.8 + spreadScale * CGFloat(visible) * 0.35))
+                    .blur(radius: 5)
+                    .offset(y: diameter * 0.10)
+            }
+            ForEach(0..<visible, id: \.self) { index in
+                let slot = CoinCluster.slot(index: index, seedKey: seedKey,
+                                            diameter: diameter, spreadScale: spreadScale)
+                let drag = dragOffsets[index] ?? .zero
+                ChipToken(diameter: diameter, animatesSheen: index < 3)
+                    .rotationEffect(.degrees(
+                        TableGeometry.jitterDegrees(cardID: "\(seedKey)r\(index)") * 4))
+                    .scaleEffect(draggingIndex == index ? 1.18 : 1)
+                    .shadow(color: .black.opacity(draggingIndex == index ? 0.45 : 0),
+                            radius: 8, y: 5)
+                    .offset(x: slot.width + drag.width, y: slot.height + drag.height)
+                    .zIndex(draggingIndex == index ? 10 : 0)
+                    .transition(.scale(scale: 0.4).combined(with: .opacity))
+                    .gesture(
+                        DragGesture()
+                            .onChanged { value in
+                                if draggingIndex != index {
+                                    draggingIndex = index
+                                    Haptics.tick()
+                                }
+                                dragOffsets[index] = value.translation
+                            }
+                            .onEnded { _ in
+                                draggingIndex = nil
+                                // Auto-tidy: a lazy, unhurried settle back
+                                // into the cluster.
+                                withAnimation(.spring(response: 0.9,
+                                                      dampingFraction: 0.82)) {
+                                    dragOffsets[index] = .zero
+                                }
+                            }
+                    )
+            }
+            if count > maxVisible {
+                Text("×\(count)")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(CardStyle.gold)
+                    .shadow(color: .black.opacity(0.7), radius: 2)
+                    .offset(x: diameter * 1.1, y: diameter * 0.55)
+            }
+        }
+        .animation(.spring(response: 0.4, dampingFraction: 0.75), value: count)
     }
 }
 
@@ -564,7 +679,7 @@ struct PendingCoinView: View {
     }
 
     var body: some View {
-        ChipToken(diameter: 36)
+        ChipToken(diameter: 50)
             .scaleEffect(dragging ? 1.3 : (pulsing ? 1.12 : 0.96))
             .shadow(color: CardStyle.gold.opacity(dragging ? 0.8 : 0.5),
                     radius: dragging ? 16 : 9)
@@ -632,7 +747,7 @@ struct ChipFlightView: View {
     @State private var arrived = false
 
     var body: some View {
-        ChipToken()
+        ChipToken(diameter: 46)
             .position(arrived ? flight.to : flight.from)
             .opacity(arrived ? 0.9 : 1)
             .onAppear {

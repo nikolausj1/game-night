@@ -46,13 +46,22 @@ public struct RulesConfig: Codable, Sendable, Equatable {
     /// standard 52 — the tray lets the player switch live once seated.
     public var freePlayDeck: FreePlayDeck
 
+    /// When on (default), the engine populates every hand at round start.
+    /// When off (UNO / Wizard / Oh Hell / Crazy Eights), the deal phase
+    /// builds and shuffles the pile but leaves hands empty — the round's
+    /// dealer distributes cards one at a time via `TableAction.dealCardTo`,
+    /// and the engine auto-completes (starter/trump flip, phase transition)
+    /// the moment every hand reaches the round's target count.
+    public var autoDeal: Bool
+
     public init(
         screwTheDealer: Bool = false,
         missScoresTricks: Bool = true,
         softEnforcement: Bool = true,
         stackDrawCards: Bool = true,
         drawUntilPlayable: Bool = true,
-        freePlayDeck: FreePlayDeck = .standard52
+        freePlayDeck: FreePlayDeck = .standard52,
+        autoDeal: Bool = true
     ) {
         self.screwTheDealer = screwTheDealer
         self.missScoresTricks = missScoresTricks
@@ -60,12 +69,13 @@ public struct RulesConfig: Codable, Sendable, Equatable {
         self.stackDrawCards = stackDrawCards
         self.drawUntilPlayable = drawUntilPlayable
         self.freePlayDeck = freePlayDeck
+        self.autoDeal = autoDeal
     }
 
     /// Older encodes predate the UNO flags and the free-play deck picker;
     /// default them on decode so saved games and old peers still parse.
     private enum CodingKeys: String, CodingKey {
-        case screwTheDealer, missScoresTricks, softEnforcement, stackDrawCards, drawUntilPlayable, freePlayDeck
+        case screwTheDealer, missScoresTricks, softEnforcement, stackDrawCards, drawUntilPlayable, freePlayDeck, autoDeal
     }
 
     public init(from decoder: Decoder) throws {
@@ -76,6 +86,7 @@ public struct RulesConfig: Codable, Sendable, Equatable {
         stackDrawCards = try container.decodeIfPresent(Bool.self, forKey: .stackDrawCards) ?? true
         drawUntilPlayable = try container.decodeIfPresent(Bool.self, forKey: .drawUntilPlayable) ?? true
         freePlayDeck = try container.decodeIfPresent(FreePlayDeck.self, forKey: .freePlayDeck) ?? .standard52
+        autoDeal = try container.decodeIfPresent(Bool.self, forKey: .autoDeal) ?? true
     }
 }
 

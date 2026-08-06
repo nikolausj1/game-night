@@ -42,6 +42,12 @@ public enum NetMessage: Codable, Sendable, Equatable {
     /// Dice mode, table → each phone: that seat's personalized view of the
     /// dice game (see DiceClientState).
     case diceState(DiceClientState)
+    /// Table → everyone: the game that was running is GONE (closed, or a
+    /// new one is starting). Remotes drop all game state immediately —
+    /// without this, a remote can keep flicking cards from a dead deck
+    /// into a new engine that rightly rejects them (observed in the field
+    /// as the silent-bounce deadend).
+    case tableReset
 }
 
 public enum NetCodec {

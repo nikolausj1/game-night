@@ -104,6 +104,14 @@ public final class HostEngine {
             return [.undone]
 
         case .newDeal:
+            // Free play never has a `round` (setUpFreePlay leaves it nil),
+            // so the round-based dealerSeat lookup below doesn't apply to
+            // it — branch on gameKind FIRST so "gather and shuffle" (the
+            // free-play reset) actually reaches setUpFreePlay() instead of
+            // silently no-oping on the `guard let round` below.
+            if state.gameKind == .freePlay {
+                return setUpFreePlay()
+            }
             guard let round = state.round else { return [] }
             switch state.gameKind {
             case .wizard, .ohHell:
@@ -113,8 +121,14 @@ public final class HostEngine {
             case .uno:
                 return dealUno(dealerSeat: round.dealerSeat)
             case .freePlay:
-                return setUpFreePlay()
+                return setUpFreePlay() // unreachable: handled above
             }
+
+        case .dealCardTo(let seat):
+            return handleDealCard(to: seat)
+
+        case .flipTopCard:
+            return handleFlipTopCard()
         }
     }
 
@@ -486,6 +500,22 @@ public final class HostEngine {
         return []
     }
 
+    /// Free play's trump-style peek: `TableAction.flipTopCard` pops the top
+    /// of the draw pile face-up beside the deck. Mechanically this is just
+    /// "top of draw pile → discard pile" — the table decides where "beside
+    /// the deck" actually renders. A table action, not tied to any one seat,
+    /// so a guard failure is a silent no-op (same convention as `.newDeal`),
+    /// not an `illegalAttempt`.
+    private func handleFlipTopCard() -> [GameEvent] {
+        guard state.gameKind == .freePlay, state.phase == .playing, !state.drawPile.isEmpty else {
+            return []
+        }
+        pushUndo()
+        let card = state.drawPile.removeFirst()
+        state.discardPile.append(card)
+        return [.topCardFlipped(card)]
+    }
+
     // MARK: - Dealing
 
     private func dealTrickRound(roundNumber: Int, dealerSeat: Int) -> [GameEvent] {
@@ -498,6 +528,11 @@ public final class HostEngine {
         let baseDeck = state.gameKind.usesWizardDeck ? DeckBuilder.wizard60() : DeckBuilder.standard52()
         var deck = DeckBuilder.shuffled(baseDeck, seed: state.seed &+ dealSerial)
         dealSerial &+= 1
+
+        if !state.rules.autoDeal {
+            return setUpManualDeal(deck: deck, roundNumber: roundNumber,
+                                   dealerSeat: dealerSeat, cardsEach: cardsEach)
+        }
 
         state.hands = [:]
         for offset in 0..<playerCount {
@@ -554,6 +589,11 @@ public final class HostEngine {
         var deck = DeckBuilder.shuffled(DeckBuilder.standard52(), seed: state.seed &+ dealSerial)
         dealSerial &+= 1
 
+        if !state.rules.autoDeal {
+            return setUpManualDeal(deck: deck, roundNumber: 1,
+                                   dealerSeat: dealerSeat, cardsEach: cardsEach)
+        }
+
         state.hands = [:]
         for offset in 0..<playerCount {
             let seat = (dealerSeat + 1 + offset) % playerCount
@@ -589,6 +629,11 @@ public final class HostEngine {
         state.phase = .dealing
         var deck = DeckBuilder.shuffled(DeckBuilder.uno108(), seed: state.seed &+ dealSerial)
         dealSerial &+= 1
+
+        if !state.rules.autoDeal {
+            return setUpManualDeal(deck: deck, roundNumber: 1,
+                                   dealerSeat: dealerSeat, cardsEach: cardsEach)
+        }
 
         state.hands = [:]
         for offset in 0..<playerCount {
@@ -640,6 +685,138 @@ public final class HostEngine {
         state.round = nil
         state.phase = .playing
         return [.dealt]
+    }
+
+    // MARK: - Manual dealing (rules.autoDeal off)
+
+    /// Shared manual-deal setup: the whole shuffled deck becomes the draw
+    /// pile, every hand starts empty, and the engine parks in `.dealing`
+    /// until `dealCardTo` fills every hand to `cardsEach`. No events yet —
+    /// `.dealt` (and the starter/trump flip) fires at completion, exactly
+    /// where the auto path would have fired it.
+    private func setUpManualDeal(deck: [Card], roundNumber: Int,
+                                 dealerSeat: Int, cardsEach: Int) -> [GameEvent] {
+        state.hands = Dictionary(uniqueKeysWithValues: state.seats.map { ($0.id, [Card]()) })
+        state.drawPile = deck
+        state.discardPile = []
+        let firstSeat = nextSeat(after: dealerSeat)
+        state.round = RoundState(
+            roundNumber: roundNumber,
+            cardsPerPlayer: cardsEach,
+            dealerSeat: dealerSeat,
+            trumpCard: nil,
+            trumpSuit: nil,
+            bids: [:],
+            tricksWon: [:],
+            currentTrick: [],
+            completedTricks: [],
+            leadSeat: firstSeat,
+            turnSeat: firstSeat
+        )
+        state.phase = .dealing
+        return []
+    }
+
+    /// One card, dealer's choice of seat, any order. Rejects outside
+    /// `.dealing`, for unknown seats, and for hands already at the round's
+    /// target — over-dealing is impossible. The final card that brings every
+    /// hand to the target auto-completes the deal (starter/trump flip and
+    /// phase transition, exactly as the auto path).
+    private func handleDealCard(to seat: Int) -> [GameEvent] {
+        guard state.phase == .dealing, !state.rules.autoDeal,
+              state.gameKind != .freePlay, let round = state.round else {
+            return reject(seat, "Dealing isn't open right now")
+        }
+        guard state.seats.contains(where: { $0.id == seat }) else {
+            return reject(seat, "Unknown seat")
+        }
+        guard (state.hands[seat]?.count ?? 0) < round.cardsPerPlayer else {
+            return reject(seat, "\(state.seats[seat].playerName) already has a full hand")
+        }
+        guard !state.drawPile.isEmpty else {
+            return reject(seat, "The draw pile is empty")
+        }
+        let card = state.drawPile.removeFirst()
+        state.hands[seat, default: []].append(card)
+        var events: [GameEvent] = [.cardDealt(seat: seat)]
+        let target = round.cardsPerPlayer
+        if state.seats.allSatisfy({ (state.hands[$0.id]?.count ?? 0) >= target }) {
+            events += completeManualDeal()
+        }
+        return events
+    }
+
+    /// Every hand is full: finish exactly as the auto path would — flip the
+    /// trump (trick games) or the starter (shedding games) from what's left
+    /// of the pile, seat the turn, and open bidding/play.
+    private func completeManualDeal() -> [GameEvent] {
+        guard var round = state.round else { return [] }
+        switch state.gameKind {
+        case .wizard, .ohHell:
+            var deck = state.drawPile
+            var events: [GameEvent] = [.dealt]
+            var trumpCard: Card?
+            var trumpSuit: Suit?
+            var phase = Phase.bidding
+            if !deck.isEmpty {
+                let flipped = deck.removeFirst()
+                trumpCard = flipped
+                switch flipped.kind {
+                case .standard(let suit, _):
+                    trumpSuit = suit
+                case .wizard:
+                    phase = .choosingTrump(seat: round.dealerSeat) // dealer picks trump
+                case .jester:
+                    trumpSuit = nil // no trump this round
+                case .uno:
+                    trumpSuit = nil // unreachable: trick decks contain no UNO cards
+                }
+                events.append(.trumpRevealed(flipped, trumpSuit))
+            }
+            state.drawPile = deck
+            let firstBidder = nextSeat(after: round.dealerSeat)
+            round.trumpCard = trumpCard
+            round.trumpSuit = trumpSuit
+            round.leadSeat = firstBidder
+            round.turnSeat = phase == .bidding ? firstBidder : round.dealerSeat
+            state.round = round
+            state.phase = phase
+            return events
+
+        case .crazyEights:
+            let starter = state.drawPile.removeFirst()
+            state.discardPile = [starter]
+            let firstPlayer = nextSeat(after: round.dealerSeat)
+            round.leadSeat = firstPlayer
+            round.turnSeat = firstPlayer
+            state.round = round
+            state.phase = .playing
+            return [.dealt]
+
+        case .uno:
+            // Same starter rule as the auto path: a wild can't open the
+            // discard pile — put it back and reshuffle until a colored
+            // card comes up.
+            var deck = state.drawPile
+            var starter = deck.removeFirst()
+            while isWildKind(starter) {
+                deck.append(starter)
+                deck = DeckBuilder.shuffled(deck, seed: state.seed &+ dealSerial)
+                dealSerial &+= 1
+                starter = deck.removeFirst()
+            }
+            state.discardPile = [starter]
+            state.drawPile = deck
+            let firstPlayer = nextSeat(after: round.dealerSeat)
+            round.leadSeat = firstPlayer
+            round.turnSeat = firstPlayer
+            state.round = round
+            state.phase = .playing
+            return [.dealt]
+
+        case .freePlay:
+            return [] // unreachable: free play never enters manual dealing
+        }
     }
 
     // MARK: - Round completion

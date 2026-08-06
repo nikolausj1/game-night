@@ -57,6 +57,11 @@ final class GameHostController {
     var diceSeatByDevice: [String: Int] = [:]
     /// A phone poured its dice cup: (dice seat, intensity 0.3…1.5).
     var onDicePour: ((Int, Double) -> Void)?
+    /// A device said hello while a dice game is running. The dice
+    /// controller re-sends that device its current DiceClientState so a
+    /// reconnecting (or freshly re-identified) phone lands straight back
+    /// in the cup instead of a stale lobby screen.
+    var onDiceHello: ((String) -> Void)?
 
     /// Dice mode outbound: the per-seat dice state to whichever peer
     /// currently holds `deviceID` (same deviceID-keyed routing as
@@ -112,6 +117,7 @@ final class GameHostController {
     /// Hold-to-close: park the game (autosave has it) and return to the
     /// menu. Connected phones stay in the lobby for the next deal.
     func closeTable() {
+        session.broadcast(.tableReset)
         engine = nil
         botSeats = []
         seatByDevice = [:]
@@ -168,9 +174,20 @@ final class GameHostController {
 
         seatByDevice = deviceMap
         botSeats = bots
+        // Every remote sheds the previous game FIRST (a phone not seated
+        // in this game must not keep flicking dead cards), then seated
+        // remotes get their fresh seat number — welcome is what updates
+        // mySeat, and a stale mySeat mislabels rejection events, which is
+        // exactly how the silent-bounce deadend happened.
+        session.broadcast(.tableReset)
         let engine = HostEngine(seats: seats, gameKind: kind, rules: rules,
                                 seed: UInt64.random(in: UInt64.min...UInt64.max))
         self.engine = engine
+        for (deviceID, seat) in deviceMap {
+            for (peer, device) in deviceByPeer where device == deviceID {
+                session.send(.welcome(seat: seat), to: [peer])
+            }
+        }
         emit(engine.apply(.startGame(kind, rules, seed: engine.state.seed)))
     }
 
@@ -234,6 +251,9 @@ final class GameHostController {
                     lobbyPlayers.append((deviceID, name))
                 }
                 session.send(.welcome(seat: lobbyPlayers.count - 1), to: [peer])
+                // Dice mode runs with engine == nil: hand a returning (or
+                // re-identified) phone its dice seat state immediately.
+                onDiceHello?(deviceID)
             } else {
                 session.send(.rejected(reason: "Game in progress — no open seat for this device."), to: [peer])
             }
@@ -241,8 +261,25 @@ final class GameHostController {
         case .action(let action):
             guard let engine,
                   let deviceID = deviceByPeer[peer],
-                  let seat = seatByDevice[deviceID] else { return }
-            emit(engine.apply(action, from: seat))
+                  let seat = seatByDevice[deviceID] else {
+                // A remote we can't seat is playing a game it isn't in —
+                // tell it so instead of ignoring it into a deadend.
+                session.send(.tableReset, to: [peer])
+                return
+            }
+            let events = engine.apply(action, from: seat)
+            emit(events)
+            // Self-healing: a "card isn't in your hand" rejection means the
+            // remote's picture of the world is stale — refresh it on the
+            // spot so no desync can ever strand a player.
+            if events.contains(where: {
+                if case .illegalAttempt(let s, let reason) = $0 {
+                    return s == seat && reason.contains("isn't in your hand")
+                }
+                return false
+            }) {
+                session.send(.snapshot(engine.state.snapshot(for: seat)), to: [peer])
+            }
 
         case .throwInfo(let cardID, let vx, let vy):
             throwVelocityByCard[cardID] = CGSize(width: vx, height: vy)
@@ -260,13 +297,22 @@ final class GameHostController {
             // Same deviceID-keyed routing as .action, against the dice
             // seat table (the card-game seatByDevice is empty in dice mode).
             guard let deviceID = deviceByPeer[peer],
-                  let seat = diceSeatByDevice[deviceID] else { return }
+                  let seat = diceSeatByDevice[deviceID] else {
+                // A pour we can't route means a phone's session identity
+                // desynced from the dice seat table — loud log, because
+                // this exact silence was once a shipped bug (the stray-
+                // session ghost purge; see GameClientController.obtain).
+                NSLog("Host: dicePour DROPPED — device=%@ diceSeats=%@",
+                      deviceByPeer[peer] ?? "<unknown peer>",
+                      diceSeatByDevice.description)
+                return
+            }
             onDicePour?(seat, intensity)
 
         case .seatClaim, .heartbeat:
             break // lobby order is claim order in v1; heartbeats unused (MCSession states suffice)
 
-        case .welcome, .snapshot, .events, .rejected, .diceState:
+        case .welcome, .snapshot, .events, .rejected, .diceState, .tableReset:
             break // host-outbound only
         }
     }
@@ -274,6 +320,10 @@ final class GameHostController {
     private func peerChanged(_ peer: MCPeerID, connected: Bool) {
         guard !connected else { return }
         guard let deviceID = deviceByPeer[peer] else { return }
+        // A disconnected peer never comes back (reconnects always carry a
+        // fresh identity) — drop its routing entry so dead peers can't
+        // shadow the device's live one.
+        deviceByPeer.removeValue(forKey: peer)
         if let engine, let seat = seatByDevice[deviceID] {
             engine.setConnected(seat: seat, connected: false)
             emit([])

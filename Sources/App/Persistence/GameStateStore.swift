@@ -88,6 +88,33 @@ enum GameStateStore {
         )
         guard let data = try? JSONEncoder().encode(saved) else { return }
         try? data.write(to: fileURL(for: id), options: .atomic)
+        pruneOldSaves()
+    }
+
+    /// The resume strip only ever shows the last `maxSavedGames` games, so
+    /// anything older is deleted outright rather than left to accumulate on
+    /// disk forever.
+    private static let maxSavedGames = 3
+
+    /// Keeps only the `maxSavedGames` most recently saved games on disk,
+    /// deleting the rest. Called after every write so a save slot count
+    /// never has to wait for `list()` to be asked before it gets tidied up.
+    private static func pruneOldSaves() {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil
+        ) else { return }
+        let decoder = JSONDecoder()
+        let dated: [(url: URL, savedAt: Date)] = files
+            .filter { $0.pathExtension == "json" }
+            .compactMap { url in
+                guard let data = try? Data(contentsOf: url),
+                      let saved = try? decoder.decode(SavedGame.self, from: data) else { return nil }
+                return (url, saved.savedAt)
+            }
+        let stale = dated.sorted { $0.savedAt > $1.savedAt }.dropFirst(maxSavedGames)
+        for entry in stale {
+            try? FileManager.default.removeItem(at: entry.url)
+        }
     }
 
     /// Deletes whatever save slot this host's current engine owns (the
@@ -101,19 +128,22 @@ enum GameStateStore {
         activeGameIDs.removeValue(forKey: key)
     }
 
-    /// All suspended games, newest first.
+    /// The last `maxSavedGames` suspended games, newest first. Capped here
+    /// too (not just in `pruneOldSaves`) so the resume strip never shows
+    /// more than 3 even if stray files somehow outlive a prune pass.
     static func list() -> [SavedGame] {
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: nil
         ) else { return [] }
         let decoder = JSONDecoder()
-        return files
+        let all = files
             .filter { $0.pathExtension == "json" }
             .compactMap { url -> SavedGame? in
                 guard let data = try? Data(contentsOf: url) else { return nil }
                 return try? decoder.decode(SavedGame.self, from: data)
             }
             .sorted { $0.savedAt > $1.savedAt }
+        return Array(all.prefix(maxSavedGames))
     }
 
     static func delete(_ saved: SavedGame) {

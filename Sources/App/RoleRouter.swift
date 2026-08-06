@@ -44,7 +44,8 @@ struct RoleRouter: View {
         case .table:
             TableRootView()
         case .hand:
-            HandRootView(playerName: playerName.isEmpty ? UIDevice.current.name : playerName)
+            HandRootView(playerName: playerName.isEmpty ? UIDevice.current.name : playerName,
+                         onLeave: { role = .undecided })
         }
     }
 }

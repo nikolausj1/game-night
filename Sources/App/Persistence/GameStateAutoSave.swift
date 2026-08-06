@@ -24,14 +24,16 @@ final class GameStateAutoSaveHolder {
                     self.pendingSave?.cancel()
                     GameStateStore.deleteActiveSave(for: host)
                     return
-                case .dealt, .cardPlayed, .roundScored, .trickWon, .suitDeclared, .unoCalled, .cardsDrawn:
+                case .dealt, .cardPlayed, .roundScored, .trickWon, .suitDeclared, .unoCalled, .cardsDrawn,
+                     .cardDealt, .topCardFlipped:
                     // The debounce coalesces a burst (e.g. a whole trick's
                     // worth of cardPlayed) into one write, so it's safe to
                     // treat every game-progress event as save-worthy — UNO
                     // and Crazy Eights have no "round" events to key off of.
                     // A drawUntilPlayable pull can move several cards into a
                     // hand with no other event firing, so it's a save
-                    // trigger too.
+                    // trigger too. topCardFlipped moves a card out of the
+                    // draw pile in free play — same felt-state-changed logic.
                     self.scheduleSave(for: host)
                 default:
                     break

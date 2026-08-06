@@ -12,9 +12,14 @@ enum DiceScenePhysics {
     /// like a thrown die instead of a drifting balloon.
     static let gravity = SCNVector3(0, -9.8 * 5.6, 0)
 
-    /// The cup runs softer gravity: it's a tiny closed world driven by
-    /// hand motion, and heavier gravity there just glues dice to the wall.
-    static let cupGravityStrength: CGFloat = 9.8 * 2.6
+    /// The cup runs the SAME scaled-up gravity as the table (5.6×). It
+    /// used to run 2.6× "so dice don't glue to the wall", but the field
+    /// verdict was floaty — dice drifted like balloons instead of
+    /// THUDDING. Real weight comes from full gravity plus heavier per-die
+    /// damping in the cup (see DiceCupSceneCoordinator.setDiceCount);
+    /// shake impulses are scaled up to match so a rattle still fills the
+    /// cup.
+    static let cupGravityStrength: CGFloat = 9.8 * 5.6
 
     /// An invisible static collider box. No geometry is attached to the
     /// node at all — the physics shape alone does the work, so there is

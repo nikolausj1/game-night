@@ -1,12 +1,40 @@
 import SwiftUI
 
+extension Notification.Name {
+    /// Fallback exit path for "Leave table" when HandRootView's `onLeave`
+    /// hasn't been wired up by whoever owns navigation (see HandRootView's
+    /// doc comment). Posted so anything — RoleRouter or otherwise — can
+    /// observe it and reset navigation; the session is already stopped by
+    /// the time this fires either way.
+    static let gameNightLeaveTable = Notification.Name("gameNightLeaveTable")
+}
+
 /// Phase router for a phone: connect → wait in lobby → bid → play → recap.
 struct HandRootView: View {
     @State private var client: GameClientController
+    /// Set by whoever owns role/navigation state (RoleRouter) so "Leave
+    /// table" (in HandView's Menu sheet) can pop back to the role picker.
+    /// RoleRouter lives outside Sources/App/Hand, so it isn't edited here —
+    /// the one-line wiring is:
+    ///
+    ///     HandRootView(playerName: ..., onLeave: { role = .undecided })
+    ///
+    /// in RoleRouter.roleSwitch's `.hand` case. If that line is never
+    /// added, leaving still stops the Multipeer session (via
+    /// client.session.stop()); the phone just won't navigate anywhere on
+    /// its own, and a NotificationCenter post named `.gameNightLeaveTable`
+    /// fires instead as a fallback for anything that wants to observe it.
+    var onLeave: (() -> Void)? = nil
     @Environment(\.scenePhase) private var scenePhase
 
-    init(playerName: String) {
-        _client = State(initialValue: GameClientController(playerName: playerName))
+    init(playerName: String, onLeave: (() -> Void)? = nil) {
+        // `State(initialValue:)` evaluates on EVERY struct init, so this
+        // must never construct a fresh controller inline: each stray
+        // controller opened a real second Multipeer session whose hello
+        // stole this device's routing on the host (the "table ignores my
+        // pour" bug). `obtain` reuses the one live client per phone.
+        _client = State(initialValue: GameClientController.obtain(playerName: playerName))
+        self.onLeave = onLeave
     }
 
     var body: some View {
@@ -79,7 +107,7 @@ struct HandRootView: View {
                     // about to keep playing with. See HandView's compact
                     // color-choice overlay. Trick-game trump choice and
                     // Crazy Eights still get the full-screen chooser below.
-                    HandView(client: client)
+                    HandView(client: client, onLeave: onLeave)
                 } else {
                     TrumpChooserView(client: client)
                 }
@@ -91,7 +119,7 @@ struct HandRootView: View {
                 BidEntryView(client: client)
             }
         case .dealing, .playing, .trickComplete:
-            HandView(client: client)
+            HandView(client: client, onLeave: onLeave)
         case .roundComplete, .gameOver:
             HandRecapView(client: client)
         }

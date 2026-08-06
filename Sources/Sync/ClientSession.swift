@@ -101,6 +101,17 @@ final class ClientSession: NSObject {
         setState(.disconnected)
     }
 
+    /// Revive a session that was fully STOPPED (leave table). Anything
+    /// else — searching, connecting, connected — is already alive and
+    /// making progress; touching it here would tear down handshakes
+    /// mid-flight every time SwiftUI re-inits the owning view. The
+    /// watchdog covers wedges.
+    func ensureAlive() {
+        guard case .disconnected = connectionState else { return }
+        startWatchdog() // re-arms after stop() (refresh alone never does)
+        refresh()
+    }
+
     /// Tear down and rediscover with a completely fresh identity. Called
     /// after drops, on foregrounding, and by the watchdog. A fresh browser
     /// re-fires foundPeer for tables the old one had already seen.

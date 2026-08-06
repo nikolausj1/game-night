@@ -48,10 +48,12 @@ struct RulesPanelView: View {
             RuleToggleRow(title: "Ask Before Blocking",
                           subtitle: "Illegal plays get a warning instead of a hard block.",
                           isOn: $rules.softEnforcement)
+            autoDealRow
         case .crazyEights:
             RuleToggleRow(title: "Ask Before Blocking",
                           subtitle: "Illegal plays get a warning instead of a hard block.",
                           isOn: $rules.softEnforcement)
+            autoDealRow
         case .uno:
             RuleToggleRow(title: "Stack Draw Cards",
                           subtitle: "Draw 2s and Wild Draw 4s pile up until someone plays one or draws the lot.",
@@ -59,9 +61,16 @@ struct RulesPanelView: View {
             RuleToggleRow(title: "Draw Until Playable",
                           subtitle: "Can't play? Keep drawing until you can.",
                           isOn: $rules.drawUntilPlayable)
+            autoDealRow
         case .freePlay:
             EmptyView()
         }
+    }
+
+    private var autoDealRow: some View {
+        RuleToggleRow(title: "Auto-Deal",
+                      subtitle: "The table deals for you. Off: the dealer hands out every card.",
+                      isOn: $rules.autoDeal)
     }
 }
 

@@ -500,6 +500,134 @@ let fpUnoPlayEvents = fpUnoCards.apply(.playCard(cardID: fpUnoTop.id, force: fal
 check(playedCard(fpUnoPlayEvents)?.card.id == fpUnoTop.id, "uno card plays via playCard in free play")
 check(fpUnoCards.state.discardPile.contains { $0.id == fpUnoTop.id }, "played uno card lands on the discard pile")
 
+// MARK: - Free Play: total freedom regression (field report: "only one card
+// would play from the remote"). `handlePlayCard`'s `.freePlay` branch itself
+// tests clean in isolation — these lock in the exact repro shapes described
+// (a single seat's multi-card sequence, and multi-seat play interleaved with
+// draw/freeMove) so any future regression here fails loudly. No defect was
+// found in the reducer; see the session report for where the real-world
+// symptom more likely originates (network/session layer, not the engine).
+
+// One seat, draw 3, play all 3 in sequence — every play must succeed, none
+// may reject or no-op, and the seat's turn must never come into it.
+let fpSeq = freshEngine(.freePlay, players: 1, seed: 21)
+for _ in 0..<3 { _ = fpSeq.apply(.drawCard, from: 0) }
+check(fpSeq.state.hands[0]?.count == 3, "free play multi-card seq: drew 3 cards into the one seat")
+let fpSeqIDs = fpSeq.state.hands[0]!.map(\.id)
+var fpSeqAllPlayed = true
+for (i, cardID) in fpSeqIDs.enumerated() {
+    let evs = fpSeq.apply(.playCard(cardID: cardID, force: false), from: 0)
+    if isIllegal(evs) || playedCard(evs)?.card.id != cardID { fpSeqAllPlayed = false }
+    check(fpSeq.state.phase == .playing, "free play multi-card seq: phase stays .playing after play #\(i + 1)")
+}
+check(fpSeqAllPlayed, "free play multi-card seq: all 3 sequential plays succeeded (no reject/no-op)")
+check(fpSeq.state.hands[0]?.isEmpty == true, "free play multi-card seq: hand empty after playing every card")
+check(Set(fpSeq.state.discardPile.map(\.id)) == Set(fpSeqIDs), "free play multi-card seq: all 3 cards landed on the discard pile")
+
+// Two seats, actions interleaved (draw/draw/play/play/freeMove/play/play) —
+// free play has zero turn logic, so ANY seat may act ANY time in .playing.
+let fpInter = freshEngine(.freePlay, players: 2, seed: 22)
+_ = fpInter.apply(.drawCard, from: 0)
+_ = fpInter.apply(.drawCard, from: 0)
+_ = fpInter.apply(.drawCard, from: 1)
+_ = fpInter.apply(.drawCard, from: 1)
+let fpInterH0 = fpInter.state.hands[0]!.map(\.id)
+let fpInterH1 = fpInter.state.hands[1]!.map(\.id)
+let fpInterPlay1 = fpInter.apply(.playCard(cardID: fpInterH0[0], force: false), from: 0)
+check(!isIllegal(fpInterPlay1), "free play interleaved: seat 0's first play accepted")
+let fpInterPlay2 = fpInter.apply(.playCard(cardID: fpInterH1[0], force: false), from: 1)
+check(!isIllegal(fpInterPlay2), "free play interleaved: seat 1's play right after seat 0 accepted (no turn gate)")
+let fpInterTopDiscard = fpInter.state.discardPile.first!
+let fpInterMove = fpInter.apply(.freeMoveCard(cardID: fpInterTopDiscard.id, to: .hand, x: 0, y: 0, rotation: 0), from: 1)
+check(!isIllegal(fpInterMove), "free play interleaved: freeMove between the two plays accepted")
+let fpInterPlay3 = fpInter.apply(.playCard(cardID: fpInterH0[1], force: false), from: 0)
+check(!isIllegal(fpInterPlay3), "free play interleaved: seat 0's SECOND card plays fine — this is the exact field-report shape")
+let fpInterPlay4 = fpInter.apply(.playCard(cardID: fpInterH1[1], force: false), from: 1)
+check(!isIllegal(fpInterPlay4), "free play interleaved: seat 1's second card plays fine too")
+// Seat 0 played both its cards clean, so its hand is empty. Seat 1's hand
+// still holds fpInterH1[0] — the freeMove pulled its own just-played card
+// back OUT of the discard pile and INTO its hand mid-sequence, which is
+// exactly the "any seat, any zone, any time" freedom free play promises,
+// not a leftover bug.
+check(fpInter.state.hands[0]?.isEmpty == true, "free play interleaved: seat 0's hand empty after playing both cards")
+check(fpInter.state.hands[1] == [fpInterTopDiscard], "free play interleaved: seat 1 still holds the card it freeMoved back from the discard pile")
+
+// freeMoveCard(to: .hand) is seat-agnostic: any seat can pull any table card
+// into ITS hand regardless of who last touched the table or drew anything.
+let fpFreeMoveAgnostic = freshEngine(.freePlay, players: 3, seed: 23)
+_ = fpFreeMoveAgnostic.apply(.drawCard, from: 0) // only seat 0 has ever acted
+let fpFMTop = fpFreeMoveAgnostic.state.drawPile.first!
+let fpFMEvents = fpFreeMoveAgnostic.apply(
+    .freeMoveCard(cardID: fpFMTop.id, to: .hand, x: 0, y: 0, rotation: 0), from: 2)
+check(!isIllegal(fpFMEvents), "free play freeMove(to: .hand) accepted from a seat that never acted before")
+check(fpFreeMoveAgnostic.state.hands[2]?.contains(fpFMTop) == true,
+      "free play freeMove(to: .hand) lands in the REQUESTING seat's hand, not seat 0's")
+
+// drawCard is seat-agnostic too: order of seats drawing doesn't matter, and
+// there's no "wrong seat" to reject.
+let fpDrawAgnostic = freshEngine(.freePlay, players: 4, seed: 24)
+var fpDrawAllOK = true
+for seat in [3, 1, 3, 0, 2, 1] {
+    if isIllegal(fpDrawAgnostic.apply(.drawCard, from: seat)) { fpDrawAllOK = false }
+}
+check(fpDrawAllOK, "free play drawCard: any seat, any order, every draw accepted")
+check(fpDrawAgnostic.state.hands[3]?.count == 2 && fpDrawAgnostic.state.hands[1]?.count == 2,
+      "free play drawCard: repeat draws for the same seat accumulate correctly")
+
+// MARK: - Free Play: .newDeal ("gather and shuffle") regression
+//
+// Bug found while chasing the "stops after one card" report: `.newDeal`
+// guarded on `state.round`, but free play's `round` is always nil
+// (setUpFreePlay leaves it that way) — so the table's "gather and shuffle"
+// reset silently did NOTHING to the engine in free play (hands/piles
+// untouched) while the table-side UI (freePlayLayout/faceDownCards) reset
+// as if it had worked, desyncing the felt from the actual game state.
+// Fixed by branching on gameKind before the round-based lookup.
+let fpGather = freshEngine(.freePlay, players: 2, seed: 25)
+_ = fpGather.apply(.drawCard, from: 0)
+_ = fpGather.apply(.drawCard, from: 1)
+check(fpGather.state.hands[0]?.isEmpty == false, "newDeal regression: seat has cards before gather-and-shuffle")
+let fpGatherEvents = fpGather.apply(.newDeal)
+check(fpGatherEvents == [.dealt], "newDeal on free play actually re-deals (.dealt fires), not a silent no-op")
+check(fpGather.state.hands.values.allSatisfy(\.isEmpty), "newDeal regression: every hand empty after gather-and-shuffle")
+check(fpGather.state.drawPile.count == 52, "newDeal regression: full deck back in the draw pile")
+check(fpGather.state.phase == .playing, "newDeal regression: back in .playing, ready to deal again")
+
+// MARK: - Free Play deck affordances: flipTopCard
+
+// Free play: pops the top of the draw pile face-up onto the discard pile
+// and emits `.topCardFlipped`.
+let ftc = freshEngine(.freePlay, players: 2, seed: 26)
+let ftcTop = ftc.state.drawPile.first!
+let ftcDrawCountBefore = ftc.state.drawPile.count
+let ftcEvents = ftc.apply(.flipTopCard)
+check(ftcEvents == [.topCardFlipped(ftcTop)], "flipTopCard emits topCardFlipped with the popped card")
+check(ftc.state.drawPile.count == ftcDrawCountBefore - 1, "flipTopCard: draw pile shrinks by one")
+check(ftc.state.discardPile.last == ftcTop, "flipTopCard: the popped card lands on top of the discard pile")
+
+// Repeatable: flipping again pops the NEW top card.
+let ftcTop2 = ftc.state.drawPile.first!
+let ftcEvents2 = ftc.apply(.flipTopCard)
+check(ftcEvents2 == [.topCardFlipped(ftcTop2)] && ftcTop2.id != ftcTop.id,
+      "flipTopCard is repeatable and always pops the current top")
+
+// Rejected (silently, like every other TableAction) outside free play.
+let ftcWizard = freshEngine(.wizard, players: 3, seed: 27)
+let ftcWizardStateBefore = ftcWizard.state
+check(ftcWizard.apply(.flipTopCard).isEmpty, "flipTopCard is a no-op outside free play")
+check(ftcWizard.state == ftcWizardStateBefore, "flipTopCard changed nothing outside free play")
+
+// Rejected when the draw pile is empty (no crash, no phantom event).
+let ftcEmpty = freshEngine(.freePlay, players: 1, seed: 28)
+while !ftcEmpty.state.drawPile.isEmpty { _ = ftcEmpty.apply(.drawCard, from: 0) }
+check(ftcEmpty.state.drawPile.isEmpty, "flipTopCard-empty setup: draw pile fully drained")
+check(ftcEmpty.apply(.flipTopCard).isEmpty, "flipTopCard is a no-op when the draw pile is empty")
+
+// topCardFlipped event round-trips through JSON.
+let topCardFlippedEvents: [GameEvent] = [.topCardFlipped(card("h9"))]
+check((try! JSONDecoder().decode([GameEvent].self, from: try! JSONEncoder().encode(topCardFlippedEvents))) == topCardFlippedEvents,
+      "topCardFlipped round-trips through JSON")
+
 // MARK: - NetCodec round-trips (every message case)
 
 let sampleSnapshot = midGame.state.snapshot(for: 1)
@@ -536,6 +664,7 @@ let actionsBack = try! JSONDecoder().decode([PlayerAction].self, from: actionsDa
 check(actionsBack == sampleActions, "PlayerAction round-trips through JSON")
 let tableActions: [TableAction] = [
     .startGame(.wizard, RulesConfig(screwTheDealer: true), seed: 99), .nextRound, .nextTrick, .approveUndo, .newDeal,
+    .dealCardTo(seat: 2), .flipTopCard,
 ]
 let tableData = try! JSONEncoder().encode(tableActions)
 check((try! JSONDecoder().decode([TableAction].self, from: tableData)) == tableActions,
@@ -964,6 +1093,150 @@ for seed in 100..<140 {
 check(drawUntilFinishedCount == 40, "every seeded 4-player draw-until-playable game reaches gameOver (no stalls)")
 check(drawUntilSawMultiDraw, "at least one seeded game exercised a multi-card draw-until-playable pull")
 check(drawUntilConserved, "all 108 cards accounted for at gameOver under draw-until-playable")
+
+// MARK: - Manual dealing (autoDeal off)
+
+func cardDealtSeat(_ events: [GameEvent]) -> Int? {
+    for event in events { if case .cardDealt(let seat) = event { return seat } }
+    return nil
+}
+
+let manualRules = RulesConfig(autoDeal: false)
+
+// UNO: startGame parks in .dealing with a full shuffled pile, hands empty.
+let mUno = HostEngine(seats: makeSeats(3), gameKind: .uno, rules: manualRules, seed: 9)
+let mUnoStart = mUno.apply(.startGame(.uno, manualRules, seed: 9))
+check(mUno.state.phase == .dealing, "manual uno: startGame parks in .dealing")
+check(mUnoStart.isEmpty, "manual uno: no events until the deal completes")
+check(mUno.state.drawPile.count == 108 && mUno.state.discardPile.isEmpty,
+      "manual uno: whole shuffled deck in the draw pile, no starter yet")
+check(mUno.state.hands.values.allSatisfy(\.isEmpty), "manual uno: hands start empty")
+check(isIllegal(mUno.apply(.placeBid(0), from: 1)), "manual uno: no player actions while dealing")
+
+// Guards: unknown seat rejected; playCard rejected mid-deal.
+check(isIllegal(mUno.apply(.dealCardTo(seat: 9))), "manual uno: dealCardTo unknown seat rejected")
+check(mUno.state.drawPile.count == 108, "manual uno: rejected deal changed nothing")
+
+// Deal 7 each in an arbitrary (non-round-robin) order; each pop emits cardDealt.
+var mUnoEventsOK = true
+for seat in [2, 0, 1] {
+    for _ in 0..<7 {
+        let evs = mUno.apply(.dealCardTo(seat: seat))
+        if cardDealtSeat(evs) != seat { mUnoEventsOK = false }
+    }
+}
+check(mUnoEventsOK, "manual uno: every dealCardTo emits cardDealt for its seat")
+check((0..<3).allSatisfy { mUno.state.hands[$0]?.count == 7 }, "manual uno: all hands reach 7")
+check(mUno.state.phase == .playing, "manual uno: deal auto-completes into .playing")
+check(mUno.state.discardPile.count == 1 && mUno.state.discardPile.first?.unoColor != nil,
+      "manual uno: completion flips a colored starter (wild reshuffle rule)")
+check(mUno.state.drawPile.count + 21 + mUno.state.discardPile.count == 108,
+      "manual uno: all 108 cards conserved after completion")
+check(mUno.state.round?.turnSeat == 1 && mUno.state.round?.leadSeat == 1,
+      "manual uno: play opens left of the dealer")
+
+// Over-deal impossible: full hands and post-completion deals both rejected.
+check(isIllegal(mUno.apply(.dealCardTo(seat: 0))), "manual uno: dealCardTo after completion rejected")
+
+// Partial-deal guards: a full hand mid-deal rejects further cards, and the
+// deal does NOT complete until EVERY hand is at target.
+let mPart = HostEngine(seats: makeSeats(3), gameKind: .uno, rules: manualRules, seed: 10)
+_ = mPart.apply(.startGame(.uno, manualRules, seed: 10))
+for _ in 0..<7 { _ = mPart.apply(.dealCardTo(seat: 2)) }
+check(mPart.state.phase == .dealing, "manual partial: one full hand doesn't complete the deal")
+check(isIllegal(mPart.apply(.dealCardTo(seat: 2))), "manual partial: over-dealing a full hand rejected")
+check(mPart.state.hands[2]?.count == 7 && mPart.state.drawPile.count == 101,
+      "manual partial: rejected over-deal changed nothing")
+let mCompletionEvents: [GameEvent] = {
+    var last: [GameEvent] = []
+    for seat in [0, 1] { for _ in 0..<7 { last = mPart.apply(.dealCardTo(seat: seat)) } }
+    return last
+}()
+check(mPart.state.phase == .playing, "manual partial: completes once the last hand fills")
+check(mCompletionEvents.contains(.dealt), "manual completion: .dealt fires with the final card")
+
+// Trick game (Oh Hell round 1): manual deal, trump flip on completion.
+let mOh = HostEngine(seats: makeSeats(3), gameKind: .ohHell, rules: manualRules, seed: 11)
+_ = mOh.apply(.startGame(.ohHell, manualRules, seed: 11))
+check(mOh.state.phase == .dealing && mOh.state.drawPile.count == 52,
+      "manual ohHell: parks in .dealing with the full deck")
+for seat in 0..<3 { _ = mOh.apply(.dealCardTo(seat: seat)) }
+check(mOh.state.phase == .bidding, "manual ohHell: completion opens bidding")
+check(mOh.state.round?.trumpCard != nil && mOh.state.round?.trumpSuit == mOh.state.round?.trumpCard?.suit,
+      "manual ohHell: completion flips trump from the remaining pile")
+check(mOh.state.drawPile.count == 48, "manual ohHell: 52 - 3 dealt - 1 flipped = 48")
+check(mOh.state.round?.turnSeat == 1, "manual ohHell: bidding starts left of dealer")
+
+// Wizard: a wizard trump flip on manual completion → dealer chooses trump.
+var mSawWizardFlip = false
+var mSawStandardFlip = false
+for seed in 0..<4000 where !(mSawWizardFlip && mSawStandardFlip) {
+    let e = HostEngine(seats: makeSeats(3), gameKind: .wizard, rules: manualRules, seed: UInt64(seed))
+    _ = e.apply(.startGame(.wizard, manualRules, seed: UInt64(seed)))
+    for seat in 0..<3 { _ = e.apply(.dealCardTo(seat: seat)) }
+    guard let flipped = e.state.round?.trumpCard else { continue }
+    if flipped.isWizard && !mSawWizardFlip {
+        mSawWizardFlip = true
+        check(e.state.phase == .choosingTrump(seat: 0), "manual wizard: wizard flip → dealer chooses trump")
+        check(e.apply(.chooseTrump(.hearts), from: 0).contains(.trumpRevealed(flipped, .hearts)),
+              "manual wizard: trump choice proceeds normally after a manual deal")
+    } else if flipped.suit != nil && !mSawStandardFlip {
+        mSawStandardFlip = true
+        check(e.state.round?.trumpSuit == flipped.suit && e.state.phase == .bidding,
+              "manual wizard: standard flip → its suit is trump, straight to bidding")
+    }
+}
+check(mSawWizardFlip && mSawStandardFlip, "manual wizard: found wizard and standard flips")
+
+// Crazy Eights: 5 each, starter flip on completion.
+let mCE = HostEngine(seats: makeSeats(2), gameKind: .crazyEights, rules: manualRules, seed: 3)
+_ = mCE.apply(.startGame(.crazyEights, manualRules, seed: 3))
+check(mCE.state.phase == .dealing && mCE.state.drawPile.count == 52,
+      "manual crazyEights: parks in .dealing with the full deck")
+for _ in 0..<5 { for seat in 0..<2 { _ = mCE.apply(.dealCardTo(seat: seat)) } }
+check(mCE.state.phase == .playing && mCE.state.round?.turnSeat == 1,
+      "manual crazyEights: completion starts play left of dealer")
+check(mCE.state.discardPile.count == 1 && mCE.state.drawPile.count == 41,
+      "manual crazyEights: starter flipped, 52 - 10 - 1 = 41 left")
+
+// Manual dealing survives a full playable game: play the manual UNO to a move.
+let mSeat = mUno.state.round!.turnSeat
+var mActed = false
+for candidate in mUno.state.hands[mSeat] ?? [] {
+    if playedCard(mUno.apply(.playCard(cardID: candidate.id, force: false), from: mSeat)) != nil {
+        mActed = true; break
+    }
+}
+if !mActed { mActed = !isIllegal(mUno.apply(.drawCard, from: mSeat)) }
+check(mActed, "manual uno: play proceeds normally after a manual deal")
+
+// dealCardTo is a no-op path when autoDeal is on.
+let mAutoGuard = freshEngine(.uno, players: 3, seed: 9)
+let mAutoGuardState = mAutoGuard.state
+check(isIllegal(mAutoGuard.apply(.dealCardTo(seat: 0))), "dealCardTo rejected when autoDeal is on")
+check(mAutoGuard.state == mAutoGuardState, "rejected dealCardTo under autoDeal changed nothing")
+
+// Back-compat: RulesConfig encoded before autoDeal existed decodes to true.
+check(RulesConfig().autoDeal == true, "autoDeal defaults on")
+var legacyAutoDealDict = try! JSONSerialization.jsonObject(
+    with: try! JSONEncoder().encode(RulesConfig(autoDeal: false))) as! [String: Any]
+legacyAutoDealDict.removeValue(forKey: "autoDeal")
+let legacyAutoDealRules = try! JSONDecoder().decode(
+    RulesConfig.self, from: try! JSONSerialization.data(withJSONObject: legacyAutoDealDict))
+check(legacyAutoDealRules.autoDeal == true, "pre-autoDeal RulesConfig decodes with autoDeal on")
+
+// autoDeal=true regression: explicit true is byte-identical to the default path.
+let regDefault = freshEngine(.uno, players: 3, seed: 9)
+let regExplicit = freshEngine(.uno, players: 3, rules: RulesConfig(autoDeal: true), seed: 9)
+check(regDefault.state == regExplicit.state, "autoDeal=true path identical to the default path (uno)")
+let regWizard = driveWizard(seed: 2026, stopAtPlayingRound: 5).engine
+check(regWizard.state.round?.roundNumber == 5 && regWizard.state.roundHistory.count == 4,
+      "autoDeal=true wizard progression unchanged (seeded drive)")
+
+// cardDealt event round-trips through JSON.
+let cardDealtEvents: [GameEvent] = [.cardDealt(seat: 2)]
+check((try! JSONDecoder().decode([GameEvent].self, from: try! JSONEncoder().encode(cardDealtEvents))) == cardDealtEvents,
+      "cardDealt round-trips through JSON")
 
 // MARK: - Summary
 

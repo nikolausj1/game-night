@@ -53,6 +53,8 @@ struct MenuView: View {
                     }
 
                     dealButton
+
+                    quickActionsRow
                         .padding(.bottom, 24)
                 }
                 .padding(.top, 24)
@@ -80,6 +82,21 @@ struct MenuView: View {
                 SeatSpec(id: $0.offset, name: $0.element.name, isBot: false)
             }
             host.startGame(kind: .freePlay, rules: rules, seats: seats)
+        }
+        .onChange(of: host.lobbyPlayers.count) { _, count in
+            // Sim-verify hook: -autoStartLcrRemote waits for the first
+            // PHONE to join, then starts L·R·C with that phone as the
+            // human seat 0 (+2 bots) — exercises the remote pour → table
+            // roll pipeline end to end.
+            guard CommandLine.arguments.contains("-autoStartLcrRemote"),
+                  DiceLauncher.shared.controller == nil, count >= 1 else { return }
+            var seats = host.lobbyPlayers.enumerated().map {
+                SeatSpec(id: $0.offset, name: $0.element.name, isBot: false)
+            }
+            for bot in BotRoster.random(count: 2) {
+                seats.append(SeatSpec(id: seats.count, name: bot.name, isBot: true))
+            }
+            DiceLauncher.shared.start(host: host, seats: seats)
         }
         .onAppear {
             // Sim-verify hook: an all-bot UNO game that plays itself.
@@ -212,6 +229,61 @@ struct MenuView: View {
         botDrafts = []
     }
 
+    // MARK: quick actions
+
+    /// Compact convenience row under the deal button: jump back into the
+    /// last game, hop straight to Settings, or one-tap start one of the two
+    /// game kinds played most recently — no picker, no seat builder.
+    private var quickActionsRow: some View {
+        HStack(spacing: 10) {
+            if let mostRecent = savedGames.first {
+                QuickActionChip(title: "Resume Last", systemImage: "arrow.uturn.backward") {
+                    Haptics.tick()
+                    resume(mostRecent)
+                }
+            }
+            ForEach(quickStartCandidates) { saved in
+                QuickActionChip(title: saved.gameKind.displayName, systemImage: "bolt.fill") {
+                    quickStart(saved)
+                }
+            }
+            QuickActionChip(title: "Settings", systemImage: "gearshape") {
+                Haptics.tick()
+                showSettings = true
+            }
+        }
+    }
+
+    /// The two most recently played DISTINCT game kinds, drawn from the same
+    /// save history the resume strip already shows (already capped at the
+    /// last 3 by `GameStateStore.list()`) — no extra bookkeeping needed.
+    private var quickStartCandidates: [SavedGame] {
+        var seenKinds = Set<GameKind>()
+        var result: [SavedGame] = []
+        for saved in savedGames {
+            guard seenKinds.insert(saved.gameKind).inserted else { continue }
+            result.append(saved)
+            if result.count == 2 { break }
+        }
+        return result
+    }
+
+    /// Starts a fresh game of `saved`'s kind using its last-used seat setup:
+    /// human slots filled from whoever's connected in the lobby right now
+    /// (in lobby order, same as the normal deal path), and the exact bots it
+    /// had, re-drafted by name so their color/identity match again.
+    private func quickStart(_ saved: SavedGame) {
+        Haptics.arm()
+        let humanSlots = saved.seats.filter { !$0.isBot }.count
+        let humans = host.lobbyPlayers.prefix(humanSlots).enumerated().map { index, player in
+            SeatSpec(id: index, name: player.name, isBot: false)
+        }
+        let bots = saved.seats.filter(\.isBot).enumerated().map { index, spec in
+            SeatSpec(id: humans.count + index, name: spec.name, isBot: true)
+        }
+        host.startGame(kind: saved.gameKind, rules: RulesConfig(), seats: Array(humans) + bots)
+    }
+
     // MARK: resume strip plumbing
 
     private func refreshSavedGames() {
@@ -226,6 +298,32 @@ struct MenuView: View {
     private func delete(_ saved: SavedGame) {
         GameStateStore.delete(saved)
         refreshSavedGames()
+    }
+}
+
+/// One pill in the quick-actions row: felt/serif/gold, matching the game
+/// chips above — a compact affordance, not a redesign.
+private struct QuickActionChip: View {
+    let title: String
+    let systemImage: String
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            Label(title, systemImage: systemImage)
+                .font(.system(.subheadline, design: .serif).weight(.semibold))
+                .foregroundStyle(CardStyle.stockTop)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(
+                    Capsule()
+                        .fill(.white.opacity(0.10))
+                        .overlay(
+                            Capsule().strokeBorder(CardStyle.gold.opacity(0.35), lineWidth: 1)
+                        )
+                )
+        }
+        .buttonStyle(.plain)
     }
 }
 

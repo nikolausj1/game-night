@@ -139,7 +139,7 @@ struct ScorecardPanel<Rows: View, Action: View>: View {
     var body: some View {
         VStack(spacing: 22) {
             Text(title)
-                .font(.system(size: 34, weight: .bold, design: .serif))
+                .font(.system(.largeTitle, design: .serif).weight(.bold))
                 .foregroundStyle(CardStyle.stockTop)
             VStack(spacing: 14) { rows }
                 .padding(.horizontal, 8)

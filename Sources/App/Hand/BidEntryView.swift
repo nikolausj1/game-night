@@ -52,7 +52,7 @@ struct BidEntryView: View {
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { bid = value }
                     } label: {
                         Text("\(value)")
-                            .font(.system(size: 34, weight: .bold, design: .serif).monospacedDigit())
+                            .font(.system(.title, design: .serif).weight(.bold).monospacedDigit())
                             .foregroundStyle(bid == value ? CardStyle.ink : .white.opacity(0.75))
                             .frame(width: 64, height: 64)
                             .background(
@@ -61,6 +61,8 @@ struct BidEntryView: View {
                             .scaleEffect(bid == value ? 1.15 : 1)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Bid \(value)")
+                    .accessibilityAddTraits(bid == value ? .isSelected : [])
                 }
             }
             .padding(.horizontal, 40)

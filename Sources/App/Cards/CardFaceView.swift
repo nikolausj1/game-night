@@ -23,6 +23,11 @@ struct CardFaceView: View {
             }
         }
         .aspectRatio(CardStyle.aspectRatio, contentMode: .fit)
+        // The printed pips/corner indices are a pile of individually
+        // swipeable Text glyphs with nothing useful to say on their own —
+        // CardView (the shared wrapper) supplies one real accessibility
+        // label for the whole card instead.
+        .accessibilityHidden(true)
     }
 
     // MARK: stock
@@ -282,6 +287,48 @@ struct StarburstShape: Shape {
         }
         path.closeSubpath()
         return path
+    }
+}
+
+/// VoiceOver-friendly spoken name for a card — "Ace of Spades", "Red 7",
+/// "Wild Draw Four", "Wizard" — used wherever a card needs an accessibility
+/// label instead of relying on its printed pips/glyphs. Mirrors the same
+/// rank/suit vocabulary `CardFaceView.indexLabel` and `Suit.symbol` draw on,
+/// just spelled out in full words instead of single letters.
+extension Card {
+    var accessibleName: String {
+        switch kind {
+        case .standard(let suit, let rank):
+            return "\(Card.rankWord(rank)) of \(suit.rawValue.capitalized)"
+        case .wizard:
+            return "Wizard"
+        case .jester:
+            return "Jester"
+        case .uno(let color, let symbol):
+            return Card.unoAccessibleName(color: color, symbol: symbol)
+        }
+    }
+
+    private static func rankWord(_ rank: Int) -> String {
+        switch rank {
+        case 14: return "Ace"
+        case 13: return "King"
+        case 12: return "Queen"
+        case 11: return "Jack"
+        default: return String(rank)
+        }
+    }
+
+    private static func unoAccessibleName(color: UnoColor?, symbol: UnoSymbol) -> String {
+        let colorWord = color?.rawValue.capitalized
+        switch symbol {
+        case .number(let n): return [colorWord, "\(n)"].compactMap { $0 }.joined(separator: " ")
+        case .skip: return [colorWord, "Skip"].compactMap { $0 }.joined(separator: " ")
+        case .reverse: return [colorWord, "Reverse"].compactMap { $0 }.joined(separator: " ")
+        case .drawTwo: return [colorWord, "Draw Two"].compactMap { $0 }.joined(separator: " ")
+        case .wild: return "Wild"
+        case .wildDrawFour: return "Wild Draw Four"
+        }
     }
 }
 

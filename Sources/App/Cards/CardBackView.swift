@@ -123,6 +123,12 @@ struct CardView: View {
                 radius: 4 + 18 * elevation,
                 y: 2 + 10 * elevation)
         .scaleEffect(1 + 0.06 * elevation)
+        // A sensible floor everywhere a card renders — hand fan, felt
+        // piles, the deck — without every call site needing its own
+        // accessibility wiring. Callers with something more specific to
+        // say (a playable hand card, a labeled deck stack) layer their
+        // own accessibilityLabel/hint on top of this one.
+        .accessibilityLabel(faceUp ? card.accessibleName : "Face-down card")
     }
 }
 

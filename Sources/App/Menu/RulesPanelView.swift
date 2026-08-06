@@ -91,5 +91,7 @@ private struct RuleToggleRow: View {
             }
         }
         .toggleStyle(SwitchToggleStyle(tint: CardStyle.gold))
+        .accessibilityLabel(title)
+        .accessibilityHint(subtitle)
     }
 }

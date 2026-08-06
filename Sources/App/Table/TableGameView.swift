@@ -4,6 +4,7 @@ import SwiftUI
 /// the current trick landing in the middle.
 struct TableGameView: View {
     @Bindable var host: GameHostController
+    @Environment(\.accessibilityReduceMotion) private var motionReduced
 
     /// TV/external-display mode: pure rendering — no gestures, no buttons,
     /// and crucially no auto-advance (the real table owns the game clock).
@@ -238,6 +239,13 @@ struct TableGameView: View {
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                         .zIndex(10)
                     }
+                    if !isSpectator {
+                        // First game with table motion enabled: a one-shot
+                        // TipKit nudge toward bumping the table.
+                        GhostHintTipView(tip: TableNudgeTip())
+                            .position(x: geo.size.width * 0.5, y: geo.size.height - 40)
+                            .zIndex(10)
+                    }
                 }
                 .allowsHitTesting(!isSpectator)
                 .onChange(of: state.phase) { _, newPhase in
@@ -272,6 +280,7 @@ struct TableGameView: View {
                     guard !isSpectator else { return }
                     wireTableMotion(size: geo.size)
                     TableMotion.shared.start()
+                    TableNudgeTip.isEligible = TableMotion.isEnabled
                 }
                 .onDisappear {
                     guard !isSpectator else { return }
@@ -288,6 +297,9 @@ struct TableGameView: View {
     /// move (committed); neat piles only shiver (decays to zero).
     private func wireTableMotion(size: CGSize) {
         TableMotion.shared.onNudge = { direction, strength in
+            // Reduce Motion: the nudge drift is pure vestibular flourish —
+            // damp it to zero rather than sliding cards on their own.
+            guard !motionReduced else { return }
             guard host.state?.gameKind == .freePlay else { return }
             let step = 0.0012 * strength
             withAnimation(.easeOut(duration: 0.25)) {
@@ -302,6 +314,9 @@ struct TableGameView: View {
         }
         TableMotion.shared.onBump = { intensity in
             TableSFX.shared.play(.tableKnock, intensity: 0.7 + intensity * 0.3)
+            // Reduce Motion: the thump still sounds, but the hop/shiver
+            // that follows it is damped to zero.
+            guard !motionReduced else { return }
             if host.state?.gameKind == .freePlay {
                 // The hop: everything lifts with the thump, scatters a
                 // touch, and settles back down.
@@ -563,6 +578,10 @@ struct TableGameView: View {
                 width: ((anchors[play.seat].x - 0.5) * 1.22 + 0.5 - pose.position.x) * size.width,
                 height: ((anchors[play.seat].y - 0.47) * 1.22 + 0.47 - pose.position.y) * size.height)
 
+            // Reduce Motion: the same short/no-op treatment as everywhere
+            // else on the felt — a quick slide instead of the long,
+            // decelerating throw.
+            let playDuration = motionReduced ? 0.15 : 0.45
             CardView(card: play.card, faceUp: true, elevation: sweeping ? 0.3 : 0)
                 .frame(width: cardWidth)
                 .rotationEffect(pose.rotation)
@@ -570,10 +589,11 @@ struct TableGameView: View {
                 .opacity(sweeping ? 0 : 1)
                 .transition(.asymmetric(
                     insertion: .offset(entryOffset)
-                        .animation(FeltPhysics.slide(duration: 0.45)),
+                        .animation(FeltPhysics.slide(duration: playDuration)),
                     removal: .identity))
-                .animation(.spring(response: 0.5, dampingFraction: 0.8), value: sweeping)
-                .animation(FeltPhysics.slide(duration: 0.45), value: trick.count)
+                .animation(motionReduced ? .easeOut(duration: playDuration)
+                                         : .spring(response: 0.5, dampingFraction: 0.8), value: sweeping)
+                .animation(FeltPhysics.slide(duration: playDuration), value: trick.count)
                 // Real cards slide in LOW: stay under the rail (seat
                 // plates + hand fans, zIndex 1) the whole time, so a play
                 // emerges from under the thrower's edge onto the felt
@@ -848,6 +868,24 @@ struct TableGameView: View {
         let restPt = toPoints(arc.rest)
         let settleTwist = TableGeometry.jitterDegrees(cardID: card.id) >= 0 ? 2.4 : -2.4
 
+        if motionReduced {
+            // Reduce Motion: no rising/falling arc — a quick, short, flat
+            // slide straight onto the pile instead.
+            shedPoses[card.id] = entryPt
+            shedRotations[card.id] = restRotation
+            shedLifts[card.id] = 0
+            DispatchQueue.main.async {
+                if !isSpectator {
+                    TableSFX.shared.play(.cardSlide, intensity: 0.6)
+                }
+                withAnimation(.easeOut(duration: 0.15)) {
+                    shedPoses[card.id] = restPt
+                    shedRotations[card.id] = restRotation
+                }
+            }
+            return
+        }
+
         // Leave the hand already airborne at the table's edge.
         shedPoses[card.id] = entryPt
         shedRotations[card.id] = restRotation - TableGeometry.jitterDegrees(cardID: card.id) * 3.0
@@ -1097,6 +1135,9 @@ struct HoldToCloseButton: View {
             }
         }
         .animation(.spring(response: 0.25, dampingFraction: 0.7), value: holding)
+        .accessibilityLabel("Close table")
+        .accessibilityHint("Press and hold to close")
+        .accessibilityAddTraits(.isButton)
     }
 }
 
@@ -1217,7 +1258,7 @@ struct TrickWonBanner: View {
 
     var body: some View {
         Text("\(name) takes the trick!")
-            .font(.system(size: 40, weight: .bold, design: .serif))
+            .font(.system(.largeTitle, design: .serif).weight(.bold))
             .foregroundStyle(CardStyle.stockTop)
             .padding(.horizontal, 36)
             .padding(.vertical, 18)

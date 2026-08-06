@@ -178,6 +178,8 @@ struct TableCalloutView: View {
 struct DirectionOfPlayArc: View {
     var clockwise: Bool
 
+    @Environment(\.accessibilityReduceMotion) private var motionReduced
+
     /// Interpolates -1...1; the sign (not the raw boolean) drives the
     /// spin, so a direction change reads as a deceleration and reversal.
     @State private var directionSign: Double = 1
@@ -188,32 +190,49 @@ struct DirectionOfPlayArc: View {
     private let sweepDegrees: Double = 56
 
     var body: some View {
-        TimelineView(.animation) { timeline in
-            let elapsed = timeline.date.timeIntervalSinceReferenceDate
-            let fraction = (elapsed.truncatingRemainder(dividingBy: lapDuration)) / lapDuration
-            let baseAngle = fraction * 360
-
-            // The arrowhead sits at whichever end is actually leading for
-            // the CURRENT target direction — swapped on the (rare) direction
-            // change, not animated, since it's imperceptible while the eased
-            // spin is passing through ~zero speed anyway.
-            let headAtHighEnd = clockwise
-            DirectionArcShape(startAngle: headAtHighEnd ? 0 : sweepDegrees,
-                              endAngle: headAtHighEnd ? sweepDegrees : 0,
-                              thicknessRatio: 0.16)
-                .fill(
-                    LinearGradient(colors: [CardStyle.gold.opacity(0.12), CardStyle.gold.opacity(0.62)],
-                                   startPoint: .leading, endPoint: .trailing)
-                )
-                .rotationEffect(.degrees(baseAngle * directionSign))
+        Group {
+            if motionReduced {
+                // Reduce Motion: no orbit — a fixed arrow reads the same
+                // "which way we're going" information at a glance.
+                staticArc
+            } else {
+                TimelineView(.animation) { timeline in
+                    let elapsed = timeline.date.timeIntervalSinceReferenceDate
+                    let fraction = (elapsed.truncatingRemainder(dividingBy: lapDuration)) / lapDuration
+                    let baseAngle = fraction * 360
+                    arcShape.rotationEffect(.degrees(baseAngle * directionSign))
+                }
+            }
         }
         .allowsHitTesting(false)
+        .accessibilityHidden(true)
         .onAppear { directionSign = clockwise ? 1 : -1 }
         .onChange(of: clockwise) { _, newValue in
+            guard !motionReduced else {
+                directionSign = newValue ? 1 : -1
+                return
+            }
             withAnimation(.easeInOut(duration: 0.7)) {
                 directionSign = newValue ? 1 : -1
             }
         }
+    }
+
+    private var staticArc: some View { arcShape }
+
+    // The arrowhead sits at whichever end is actually leading for the
+    // CURRENT target direction — swapped on the (rare) direction change,
+    // not animated, since it's imperceptible while the eased spin is
+    // passing through ~zero speed anyway.
+    private var arcShape: some View {
+        let headAtHighEnd = clockwise
+        return DirectionArcShape(startAngle: headAtHighEnd ? 0 : sweepDegrees,
+                                 endAngle: headAtHighEnd ? sweepDegrees : 0,
+                                 thicknessRatio: 0.16)
+            .fill(
+                LinearGradient(colors: [CardStyle.gold.opacity(0.12), CardStyle.gold.opacity(0.62)],
+                               startPoint: .leading, endPoint: .trailing)
+            )
     }
 }
 

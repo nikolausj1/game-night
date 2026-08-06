@@ -129,6 +129,9 @@ struct DeckAndTrumpView: View {
             }
         }
         .opacity(deckCount == 0 ? 0.25 : 1)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(isFreePlay ? "Draw pile, \(deckCount) cards, drag to a player to deal"
+                                       : "Draw pile, \(deckCount) cards")
     }
 
     /// The top-of-deck back, split into two angled half-stacks for the
@@ -171,6 +174,8 @@ struct DeckAndTrumpView: View {
                 .padding(.vertical, 4)
                 .background(Capsule().fill(.black.opacity(0.4)))
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(trumpLabel)
     }
 
     private var trumpLabel: String {

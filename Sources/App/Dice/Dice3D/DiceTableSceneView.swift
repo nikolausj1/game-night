@@ -90,6 +90,12 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
 
     private var contactThrottle: DiceContactThrottle?
 
+    /// Reduce Motion: captured per-roll (non-View code, so we read the
+    /// system flag directly rather than threading an environment value
+    /// through UIViewRepresentable). Physics still fully decides the
+    /// result — only the visible tumble is hidden and the reveal shortened.
+    private var rollMotionReduced = false
+
     // MARK: setup
 
     /// The one live table scene, reachable by TableMotion wiring.
@@ -256,6 +262,13 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         shadows.forEach { $0.removeFromParentNode() }
         shadows = []
 
+        // Reduce Motion: physics still runs the tumble (it's what decides
+        // the result), but nobody has to watch it — dice stay invisible
+        // until settled, and the simulation clock runs fast so the wait is
+        // short. finishRoll() below fades them straight in on the result.
+        rollMotionReduced = UIAccessibility.isReduceMotionEnabled
+        scene.physicsWorld.speed = rollMotionReduced ? 3.0 : 1.0
+
         // Entry point: ABOVE the roller's edge of the felt, clamped inside
         // the rails. Real dice arrive from a cup held over the table: they
         // spawn high near the roller, travel toward the middle AND down,
@@ -289,6 +302,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
             die.eulerAngles = SCNVector3(CGFloat.random(in: 0..<(2 * .pi)),
                                          CGFloat.random(in: 0..<(2 * .pi)),
                                          CGFloat.random(in: 0..<(2 * .pi)))
+            if rollMotionReduced { die.opacity = 0 }
             scene.rootNode.addChildNode(die)
 
             let aim = heading + CGFloat.random(in: -0.16...0.16)
@@ -309,6 +323,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
             dice.append(die)
 
             let shadow = DieShadowNode()
+            if rollMotionReduced { shadow.opacity = 0 }
             scene.rootNode.addChildNode(shadow)
             shadows.append(shadow)
         }
@@ -463,10 +478,18 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         #endif
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            for die in self.dice {
+            for (index, die) in self.dice.enumerated() {
                 die.physicsBody?.velocity = SCNVector3(0, 0, 0)
                 die.physicsBody?.angularVelocity = SCNVector4(0, 0, 0, 0)
                 die.physicsBody?.clearAllForces()
+                // Reduce Motion: the tumble was never shown — reveal the
+                // already-settled result with a quick fade instead.
+                if self.rollMotionReduced {
+                    die.runAction(.fadeIn(duration: 0.2))
+                    if index < self.shadows.count {
+                        self.shadows[index].runAction(.fadeIn(duration: 0.2))
+                    }
+                }
             }
             self.activeRollID = nil
             self.view?.rendersContinuously = false

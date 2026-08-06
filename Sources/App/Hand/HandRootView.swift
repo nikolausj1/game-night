@@ -157,12 +157,14 @@ struct SearchingView: View {
 /// Seated, waiting for the host to deal.
 struct LobbyWaitView: View {
     let playerName: String
+    @ScaledMetric(relativeTo: .largeTitle) private var sealSize: CGFloat = 52
 
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 52))
+                .font(.system(size: sealSize))
                 .foregroundStyle(CardStyle.gold)
+                .accessibilityHidden(true)
             Text("You're at the table, \(playerName)!")
                 .font(.system(.title2, design: .serif).weight(.semibold))
                 .foregroundStyle(.white)
@@ -177,6 +179,7 @@ struct LobbyWaitView: View {
 /// landed: choose the new suit/color, privately, on your phone.
 struct TrumpChooserView: View {
     @Bindable var client: GameClientController
+    @ScaledMetric(relativeTo: .largeTitle) private var suitGlyphSize: CGFloat = 44
 
     private var isUno: Bool { client.snapshot?.gameKind == .uno }
     private var isCrazyEights: Bool { client.snapshot?.gameKind == .crazyEights }
@@ -220,13 +223,14 @@ struct TrumpChooserView: View {
                     }
                 } label: {
                     Text(suit.symbol)
-                        .font(.system(size: 44))
+                        .font(.system(size: suitGlyphSize))
                         .foregroundStyle(suit.isRed ? CardStyle.crimson : CardStyle.ink)
                         .frame(width: 74, height: 74)
                         .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .fill(CardStyle.stockTop))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(suit.rawValue.capitalized)
             }
         }
     }
@@ -259,6 +263,7 @@ struct UnoColorSwatchRow: View {
                         )
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(color.rawValue.capitalized)
             }
         }
     }

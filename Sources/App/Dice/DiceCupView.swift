@@ -20,9 +20,6 @@ struct DiceCupView: View {
     /// tool now — moved to Settings' Developer section so real players
     /// never see the toggle; cross-section is the shipped default.
     @AppStorage("gn.cupConcept") private var cupConceptRaw = CupConcept.crossSection.rawValue
-    /// First-use hint: shown until this player's first successful pour,
-    /// ever (persists across turns and app launches).
-    @AppStorage("gn.cupHasEverPoured") private var hasEverPoured = false
 
     private var cupConcept: CupConcept {
         CupConcept(rawValue: cupConceptRaw) ?? .crossSection
@@ -49,9 +46,6 @@ struct DiceCupView: View {
         }
         .onAppear {
             model.onPour = { [weak client] intensity in
-                // A successful pour — shake, then tip forward — retires
-                // the first-use hint for good.
-                hasEverPoured = true
                 guard let client else { return }
                 // Same self-healing contract as card actions: a failed
                 // hand-off means the session is wedged — start rebuilding
@@ -63,11 +57,13 @@ struct DiceCupView: View {
             }
             model.setTurnActive(client.diceState?.isMyTurn == true)
             scheduleAutoPourIfAsked(client.diceState?.isMyTurn == true)
+            DiceCupPourTip.isEligible = client.diceState?.isMyTurn == true
         }
         .onDisappear { model.setTurnActive(false) }
         .onChange(of: client.diceState?.isMyTurn) { _, isMyTurn in
             model.setTurnActive(isMyTurn == true)
             scheduleAutoPourIfAsked(isMyTurn == true)
+            DiceCupPourTip.isEligible = isMyTurn == true
         }
     }
 
@@ -136,20 +132,9 @@ struct DiceCupView: View {
                         Text(rollingDiceLabel(state))
                             .font(.subheadline)
                             .foregroundStyle(.white.opacity(0.75))
-                        // First-use hint, in the app's established italic
-                        // ghost-hint voice — retired for good after this
-                        // player's first successful pour.
-                        if !hasEverPoured {
-                            Text("Shake, then tip forward to pour")
-                                .font(.system(.subheadline, design: .serif).italic())
-                                .foregroundStyle(CardStyle.gold.opacity(0.9))
-                                .padding(.top, 2)
-                                .transition(.opacity)
-                        }
                     }
                     .padding(.top, 8)
                     .shadow(color: .black.opacity(0.8), radius: 6)
-                    .animation(.easeOut(duration: 0.25), value: hasEverPoured)
                     Spacer()
                     VStack(spacing: 10) {
                         energyMeter
@@ -162,6 +147,15 @@ struct DiceCupView: View {
                     .padding(.bottom, 14)
                 }
                 .allowsHitTesting(false)
+
+                // First-use tip (TipKit, one-shot) — outside the block
+                // above so its own close button stays tappable.
+                VStack {
+                    Spacer()
+                    GhostHintTipView(tip: DiceCupPourTip())
+                        .padding(.horizontal, 24)
+                    Spacer().frame(height: 120)
+                }
             }
         }
     }

@@ -9,6 +9,7 @@ import SwiftUI
 struct DiceTableView: View {
     @Bindable var controller: DiceGameController
     var onClose: (() -> Void)?
+    @Environment(\.accessibilityReduceMotion) private var motionReduced
 
     @State private var chipFlights: [ChipFlight] = []
     /// Manual cup loading, default ON (manual): the roller must drag every
@@ -51,16 +52,25 @@ struct DiceTableView: View {
                         // handling slides them a touch.
                         TableMotion.shared.onBump = { intensity in
                             TableSFX.shared.play(.tableKnock, intensity: 0.7 + intensity * 0.3)
+                            // Reduce Motion: the knock still sounds, but the
+                            // re-tumble/hop it would trigger is damped to zero.
+                            guard !motionReduced else { return }
                             DiceTableSceneCoordinator.activeCoordinator?.jolt(intensity: intensity)
                         }
                         TableMotion.shared.onNudge = { direction, strength in
+                            guard !motionReduced else { return }
                             DiceTableSceneCoordinator.activeCoordinator?.nudge(
                                 direction: direction, strength: strength)
                         }
                         TableMotion.shared.start()
+                        TableNudgeTip.isEligible = TableMotion.isEnabled
                     }
                     .onDisappear { TableMotion.shared.stop() }
                 chipFlightLayer
+                // First game with table motion enabled: same one-shot
+                // TipKit nudge TableGameView shows for card games.
+                GhostHintTipView(tip: TableNudgeTip())
+                    .position(x: geo.size.width * 0.5, y: geo.size.height - 40)
                 if controller.gameOver {
                     gameOverBanner
                 }
@@ -213,6 +223,11 @@ struct DiceTableView: View {
                         Haptics.arm()
                         controller.roll(from: seat.id, intensity: .random(in: 0.5...1.1))
                     }
+                    .accessibilityLabel("\(seat.name), \(controller.chips[seat.id]) coins")
+                    .accessibilityHint(canTapToRoll(seat: seat, isTurn: isTurn, pendingIdle: pendingIdle)
+                                       ? "Double-tap to roll" : "")
+                    .accessibilityAddTraits(canTapToRoll(seat: seat, isTurn: isTurn, pendingIdle: pendingIdle)
+                                            ? .isButton : [])
                 if isTurn && !seat.isBot && !controller.rollInFlight {
                     if pendingIdle, !controller.canRoll(seat: seat.id) {
                         Text("drag your dice into the cup")
@@ -238,6 +253,13 @@ struct DiceTableView: View {
 
     private func platePosition(anchor: CGPoint, size: CGSize) -> CGPoint {
         CGPoint(x: anchor.x * size.width, y: anchor.y * size.height)
+    }
+
+    /// Mirrors the plate's own tap-gesture guard, for the accessibility
+    /// hint/trait — a VoiceOver user shouldn't be told "double-tap to roll"
+    /// on a plate the tap gesture would silently ignore.
+    private func canTapToRoll(seat: DiceGameController.DiceSeat, isTurn: Bool, pendingIdle: Bool) -> Bool {
+        isTurn && !controller.rollInFlight && pendingIdle && !seat.isBot
     }
 
     // MARK: - Pot
@@ -380,7 +402,7 @@ struct DiceTableView: View {
         VStack(spacing: 14) {
             if let winner = controller.winnerSeat {
                 Text(controller.seats[winner].name)
-                    .font(.system(size: 44, weight: .bold, design: .serif))
+                    .font(.system(.largeTitle, design: .serif).weight(.bold))
                     .foregroundStyle(CardStyle.gold)
                 Text("takes the pot — \(controller.chips[winner]) chips!")
                     .font(.system(.title2, design: .serif))
@@ -686,6 +708,8 @@ struct CoinCluster: View {
             }
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.75), value: count)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(count == 1 ? "1 coin" : "\(count) coins")
     }
 }
 
@@ -820,6 +844,13 @@ struct DraggableCoinCluster: View {
             }
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.75), value: count)
+        // Individual coins are drag targets, not discrete VoiceOver
+        // elements — a labeled floor for the pile as a whole beats a dozen
+        // unlabeled draggable circles.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(count == 1 ? "1 coin" : "\(count) coins")
+        .accessibilityHint(payTargets.isEmpty ? ""
+                           : "You owe a coin — drag any coin to the glowing spot to pay")
     }
 
     /// Nearest owed target within snap radius of where this coin was

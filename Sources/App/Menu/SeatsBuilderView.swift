@@ -46,7 +46,8 @@ struct SeatsBuilderView: View {
             .animation(.spring(response: 0.4, dampingFraction: 0.7), value: totalSeats)
 
             HStack(spacing: 18) {
-                SeatStepperButton(systemImage: "minus", enabled: canRemoveBot) {
+                SeatStepperButton(systemImage: "minus", enabled: canRemoveBot,
+                                  accessibilityLabel: "Remove a bot") {
                     Haptics.tick()
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                         botDrafts.removeLast()
@@ -55,7 +56,8 @@ struct SeatsBuilderView: View {
                 Text("Add a Bot")
                     .font(.system(.subheadline, design: .serif))
                     .foregroundStyle(CardStyle.stockTop.opacity(0.7))
-                SeatStepperButton(systemImage: "plus", enabled: canAddBot) {
+                SeatStepperButton(systemImage: "plus", enabled: canAddBot,
+                                  accessibilityLabel: "Add a bot") {
                     addBot()
                 }
             }
@@ -100,6 +102,7 @@ private struct SeatChip: View {
     let colorIndex: Int
     let isBot: Bool
     let onTap: () -> Void
+    @ScaledMetric(relativeTo: .caption) private var botBadgeSize: CGFloat = 18
 
     var body: some View {
         VStack(spacing: 8) {
@@ -113,7 +116,7 @@ private struct SeatChip: View {
                     .foregroundStyle(.white)
                 if isBot {
                     Text("🤖")
-                        .font(.system(size: 18))
+                        .font(.system(size: botBadgeSize))
                         .padding(3)
                         .background(Circle().fill(CardStyle.ink))
                         .overlay(Circle().strokeBorder(CardStyle.gold.opacity(0.6), lineWidth: 1))
@@ -128,6 +131,10 @@ private struct SeatChip: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { if isBot { onTap() } }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(isBot ? "\(name), bot" : name)
+        .accessibilityHint(isBot ? "Double-tap to rename" : "")
+        .accessibilityAddTraits(isBot ? .isButton : [])
     }
 }
 
@@ -148,6 +155,7 @@ private struct EmptySeatChip: View {
 private struct SeatStepperButton: View {
     let systemImage: String
     let enabled: Bool
+    let accessibilityLabel: String
     let action: () -> Void
 
     var body: some View {
@@ -160,5 +168,6 @@ private struct SeatStepperButton: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
+        .accessibilityLabel(accessibilityLabel)
     }
 }

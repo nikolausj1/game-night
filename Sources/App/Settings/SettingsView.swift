@@ -6,6 +6,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var theme = ThemeStore.shared
+    @ScaledMetric(relativeTo: .title2) private var closeIconSize: CGFloat = 26
 
     var body: some View {
         ZStack {
@@ -47,7 +48,7 @@ struct SettingsView: View {
     private var header: some View {
         VStack(spacing: 4) {
             Text("Table Settings")
-                .font(.system(size: 32, weight: .bold, design: .serif))
+                .font(.system(.title, design: .serif).weight(.bold))
                 .foregroundStyle(CardStyle.stockTop)
                 .shadow(color: .black.opacity(0.4), radius: 6, y: 3)
             Text("Choose a card back and a table")
@@ -62,11 +63,12 @@ struct SettingsView: View {
                 dismiss()
             } label: {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 26))
+                    .font(.system(size: closeIconSize))
                     .foregroundStyle(CardStyle.stockTop.opacity(0.7), .black.opacity(0.25))
             }
             .padding(.top, 20)
             .padding(.trailing, 20)
+            .accessibilityLabel("Close settings")
         }
     }
 
@@ -136,21 +138,28 @@ struct SettingsView: View {
                     }
                 }
                 .tint(CardStyle.gold)
+                .accessibilityLabel("The table feels bumps")
+                .accessibilityHint("Knock the table and loose cards and dice react.")
 
                 if tableMotionOn {
                     HStack(spacing: 12) {
                         Image(systemName: "tortoise.fill")
                             .font(.caption)
                             .foregroundStyle(CardStyle.stockTop.opacity(0.5))
+                            .accessibilityHidden(true)
                         Slider(value: $tableMotionSens, in: 0.5...2.0)
                             .tint(CardStyle.gold)
+                            .accessibilityLabel("Table motion sensitivity")
+                            .accessibilityValue(sensitivityLabel)
                         Image(systemName: "hare.fill")
                             .font(.caption)
                             .foregroundStyle(CardStyle.stockTop.opacity(0.5))
+                            .accessibilityHidden(true)
                     }
                     Text(sensitivityLabel)
                         .font(.system(.caption, design: .serif).italic())
                         .foregroundStyle(CardStyle.gold.opacity(0.85))
+                        .accessibilityHidden(true)
                 }
             }
             .padding(18)
@@ -261,6 +270,9 @@ private struct CardBackSwatch: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(option.displayName)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 }
 
@@ -301,6 +313,9 @@ private struct TableSkinSwatch: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(skin.displayName)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 }
 

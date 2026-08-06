@@ -14,6 +14,7 @@ struct HandView: View {
     /// "Leave table" (via HandStatusStrip) can pop navigation. See
     /// HandRootView's doc comment for the RoleRouter wiring.
     var onLeave: (() -> Void)? = nil
+    @Environment(\.accessibilityReduceMotion) private var motionReduced
 
     @State private var selectedCardID: String?
     @State private var dragState = CardDragState()
@@ -112,6 +113,10 @@ struct HandView: View {
                     }
                     playZoneHint
                     Spacer()
+                    // First time it's your turn with cards to play — a
+                    // one-shot TipKit nudge toward the flick gesture.
+                    GhostHintTipView(tip: HandFlickTip())
+                        .padding(.bottom, 4)
                     fan(in: geo.size)
                         .frame(height: geo.size.height * 0.42)
                 }
@@ -161,8 +166,14 @@ struct HandView: View {
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: client.pendingIllegal?.cardID)
             .animation(.spring(response: 0.4, dampingFraction: 0.8), value: showYourTurnBanner)
             .animation(.spring(response: 0.4, dampingFraction: 0.8), value: showDrawPenaltyBanner)
-            .onAppear { motion.start() }
+            .onAppear {
+                motion.start()
+                HandFlickTip.isEligible = showYourTurnBanner && !hand.isEmpty
+            }
             .onDisappear { motion.stop() }
+            .onChange(of: showYourTurnBanner) { _, newValue in
+                HandFlickTip.isEligible = newValue && !hand.isEmpty
+            }
             .onChange(of: client.pendingIllegal?.cardID) { _, newID in
                 // A play was rejected while a draw is owed: no illegal-play
                 // banner/sheet (suppressed above) — pulse the draw banner
@@ -302,7 +313,11 @@ struct HandView: View {
                 // top edge and lands into its slot once its stagger delay
                 // elapses (see handleHandArrivals).
                 let isArriving = arrivingCardIDs.contains(card.id)
-                let arrivalOffset: CGFloat = isArriving ? -(size.height * 0.7) : 0
+                // Reduce Motion: a short slide from just above the slot
+                // instead of a long flight in from off the top edge.
+                let arrivalOffset: CGFloat = isArriving
+                    ? (motionReduced ? -(size.height * 0.06) : -(size.height * 0.7))
+                    : 0
 
                 CardView(card: card, faceUp: true, elevation: elevation)
                     .frame(width: cardWidth)
@@ -318,6 +333,10 @@ struct HandView: View {
                                value: selectedCardID)
                     .animation(.spring(response: 0.22, dampingFraction: 0.7),
                                value: browseFingerX)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(card.accessibleName)
+                    .accessibilityHint(isMyTurn ? "Flick up to play" : "")
+                    .accessibilityAddTraits(.isButton)
             }
         }
         .frame(maxWidth: .infinity)
@@ -426,11 +445,15 @@ struct HandView: View {
         let addedIDs = newIDs.filter { !oldSet.contains($0) }
         guard !addedIDs.isEmpty else { return }
         for id in addedIDs { arrivingCardIDs.insert(id) }
+        // Reduce Motion: the same stagger (still useful — a deal reads as
+        // discrete cards, not a pop), but each lands with a quick short
+        // slide instead of the springy flight-in.
         for (i, id) in addedIDs.enumerated() {
             let delay = Double(i) * 0.07
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 Haptics.tick()
-                withAnimation(.spring(response: 0.5, dampingFraction: 0.75)) {
+                withAnimation(motionReduced ? .easeOut(duration: 0.12)
+                                            : .spring(response: 0.5, dampingFraction: 0.75)) {
                     arrivingCardIDs.remove(id)
                 }
             }
@@ -845,6 +868,7 @@ struct IllegalPlayBanner: View {
                     .foregroundStyle(.white.opacity(0.5))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

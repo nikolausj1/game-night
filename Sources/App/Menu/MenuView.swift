@@ -171,6 +171,7 @@ struct MenuView: View {
             }
         }
         .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     private func seatMarkerPosition(index: Int, size: CGSize) -> CGPoint {
@@ -189,7 +190,7 @@ struct MenuView: View {
     private var masthead: some View {
         VStack(spacing: 4) {
             Text("Game Night")
-                .font(.system(size: 54, weight: .bold, design: .serif))
+                .font(.system(.largeTitle, design: .serif).weight(.bold))
                 .foregroundStyle(CardStyle.stockTop)
                 .shadow(color: .black.opacity(0.4), radius: 6, y: 3)
             Text("Open Game Night on your phone to take a seat")
@@ -413,6 +414,12 @@ private struct GameChip: View {
             )
         }
         .buttonStyle(.plain)
+        // The emblem underneath is real miniature card art (nested Text
+        // glyphs for rank/suit) — without this, VoiceOver reads every one
+        // of those instead of one clean "Wizard, selected" chip label.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(kind.displayName)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 }
 
@@ -438,6 +445,9 @@ private struct DiceGameChip: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Left, Right, Center")
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 }
 

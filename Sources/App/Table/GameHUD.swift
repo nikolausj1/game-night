@@ -87,6 +87,7 @@ struct GameHUD: View {
                         .rotationEffect(.degrees(expanded ? 45 : 0))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(expanded ? "Hide game options" : "Game options")
             }
 
             exitButton
@@ -133,6 +134,8 @@ struct GameHUD: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(exitArmed ? "Confirm exit" : "Exit game")
+        .accessibilityHint(exitArmed ? "" : "Double-tap again to confirm")
     }
 
     // MARK: - The disclosure panel

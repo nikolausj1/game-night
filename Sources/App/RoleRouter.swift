@@ -80,7 +80,7 @@ struct RolePickerView: View {
                 Spacer()
                 VStack(spacing: 6) {
                     Text("Game Night")
-                        .font(.system(size: 46, weight: .bold, design: .serif))
+                        .font(.system(.largeTitle, design: .serif).weight(.bold))
                         .foregroundStyle(.white)
                     Text("The cards live here now.")
                         .font(.system(.title3, design: .serif).italic())
@@ -152,7 +152,7 @@ struct FirstLaunchNameView: View {
                 Spacer()
                 VStack(spacing: 6) {
                     Text("Who's playing?")
-                        .font(.system(size: 40, weight: .bold, design: .serif))
+                        .font(.system(.largeTitle, design: .serif).weight(.bold))
                         .foregroundStyle(.white)
                     Text("Pick a name and a color for the table.")
                         .font(.system(.subheadline, design: .serif))
@@ -219,7 +219,15 @@ struct FirstLaunchNameView: View {
         }
         .buttonStyle(.plain)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSelected)
+        .accessibilityLabel(Self.colorNames[index])
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
+
+    /// Spoken names matching `palette`'s order, one-to-one — see the
+    /// tones documented above each swatch.
+    private static let colorNames = [
+        "Deep red", "Gold", "Ivory", "Sky blue", "Plum", "Forest green"
+    ]
 
     private func commitIfReady() {
         guard !trimmedName.isEmpty else { return }

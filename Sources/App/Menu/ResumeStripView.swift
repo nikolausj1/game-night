@@ -11,6 +11,7 @@ struct ResumeStripView: View {
     let onDelete: (SavedGame) -> Void
 
     @State private var isEditing = false
+    @ScaledMetric(relativeTo: .body) private var deleteBadgeSize: CGFloat = 22
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -45,7 +46,7 @@ struct ResumeStripView: View {
                                         onDelete(saved)
                                     } label: {
                                         Image(systemName: "xmark.circle.fill")
-                                            .font(.system(size: 22))
+                                            .font(.system(size: deleteBadgeSize))
                                             .symbolRenderingMode(.palette)
                                             .foregroundStyle(.white, CardStyle.crimson)
                                             .background(Circle().fill(.white).padding(3))
@@ -53,8 +54,16 @@ struct ResumeStripView: View {
                                     .buttonStyle(.plain)
                                     .offset(x: -8, y: -8)
                                     .transition(.scale.combined(with: .opacity))
+                                    .accessibilityLabel("Delete \(saved.label)")
                                 }
                             }
+                            // Editing: keep the delete badge individually
+                            // reachable (children: .contain). Otherwise the
+                            // whole card reads as one resume button.
+                            .accessibilityElement(children: isEditing ? .contain : .ignore)
+                            .accessibilityLabel(isEditing ? "" : saved.label)
+                            .accessibilityHint(isEditing ? "" : "Double-tap to resume")
+                            .accessibilityAddTraits(isEditing ? [] : .isButton)
                     }
                 }
                 .padding(.horizontal, 6)

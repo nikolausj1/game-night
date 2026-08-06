@@ -36,6 +36,14 @@ public struct RulesConfig: Codable, Sendable, Equatable {
     /// next player instead of drawn immediately. Default on.
     public var stackDrawCards: Bool
 
+    /// UNO only: when a draw penalty lands on a seat (stacking exhausted, or
+    /// stacking off), pull every card in one instant `drawCard` call and
+    /// skip the victim's turn — the pre-realism "fast mode" behavior.
+    /// Default off: the victim instead holds a `pendingDraw` count and must
+    /// call `drawCard` once per card (or stack, if `stackDrawCards` allows
+    /// it), same as physically drawing one card at a time off the pile.
+    public var autoDrawPenalty: Bool
+
     /// UNO only: keep drawing until a playable card appears (vs. strict
     /// draw-one-then-pass). Default on — the table's house rule: "you have
     /// to keep drawing until you find a playable card". All drawn cards join
@@ -61,7 +69,8 @@ public struct RulesConfig: Codable, Sendable, Equatable {
         stackDrawCards: Bool = true,
         drawUntilPlayable: Bool = true,
         freePlayDeck: FreePlayDeck = .standard52,
-        autoDeal: Bool = true
+        autoDeal: Bool = true,
+        autoDrawPenalty: Bool = false
     ) {
         self.screwTheDealer = screwTheDealer
         self.missScoresTricks = missScoresTricks
@@ -70,12 +79,13 @@ public struct RulesConfig: Codable, Sendable, Equatable {
         self.drawUntilPlayable = drawUntilPlayable
         self.freePlayDeck = freePlayDeck
         self.autoDeal = autoDeal
+        self.autoDrawPenalty = autoDrawPenalty
     }
 
     /// Older encodes predate the UNO flags and the free-play deck picker;
     /// default them on decode so saved games and old peers still parse.
     private enum CodingKeys: String, CodingKey {
-        case screwTheDealer, missScoresTricks, softEnforcement, stackDrawCards, drawUntilPlayable, freePlayDeck, autoDeal
+        case screwTheDealer, missScoresTricks, softEnforcement, stackDrawCards, drawUntilPlayable, freePlayDeck, autoDeal, autoDrawPenalty
     }
 
     public init(from decoder: Decoder) throws {
@@ -87,6 +97,7 @@ public struct RulesConfig: Codable, Sendable, Equatable {
         drawUntilPlayable = try container.decodeIfPresent(Bool.self, forKey: .drawUntilPlayable) ?? true
         freePlayDeck = try container.decodeIfPresent(FreePlayDeck.self, forKey: .freePlayDeck) ?? .standard52
         autoDeal = try container.decodeIfPresent(Bool.self, forKey: .autoDeal) ?? true
+        autoDrawPenalty = try container.decodeIfPresent(Bool.self, forKey: .autoDrawPenalty) ?? false
     }
 }
 

@@ -65,6 +65,11 @@ final class AnnouncerDirector {
             case .cardsDrawn:
                 break // mechanical: no announcer line for a draw-until-playable pull
 
+            case .penaltyCardDrawn:
+                // Fires once per forced card — a line per card would nag.
+                // The per-card deal SFX + hand arrival carry the moment.
+                sfx.play(.cardDeal)
+
             case .cardDealt:
                 break // mechanical: the table's own deal gesture carries the feedback
 

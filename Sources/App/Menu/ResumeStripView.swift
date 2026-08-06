@@ -95,8 +95,11 @@ private struct ResumeCard: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            Text(saved.gameKind.emblem)
-                .font(.system(size: 32))
+            // The picker's own card-art mark, not the raw emoji `emblem`
+            // string — a suspended UNO game shouldn't wear a rainbow on its
+            // resume card when the picker itself hasn't since the redesign.
+            GameEmblem(kind: saved.gameKind)
+                .frame(height: GameEmblem.height)
             Text(saved.label)
                 .font(.system(.subheadline, design: .serif).weight(.semibold))
                 .foregroundStyle(CardStyle.stockTop)

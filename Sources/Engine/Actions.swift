@@ -59,6 +59,13 @@ public enum GameEvent: Codable, Sendable, Equatable {
     /// Manual dealing: one card just moved from the draw pile into this
     /// seat's hand via `TableAction.dealCardTo`.
     case cardDealt(seat: Int)
+    /// UNO manual draw-penalty mode (`rules.autoDrawPenalty == false`, the
+    /// default): a forced `drawCard` against a pending draw-two / wild-draw-
+    /// four penalty moved exactly one card into this seat's hand. `remaining`
+    /// is what's left on the counter after this card — 0 means the penalty
+    /// is now paid and the turn has passed. One event per card, for the
+    /// table/hand to animate the same way a real draw looks.
+    case penaltyCardDrawn(seat: Int, remaining: Int)
     /// Free Play: `TableAction.flipTopCard` popped this card face-up beside
     /// the deck (it's already on the discard pile by the time this fires).
     case topCardFlipped(Card)

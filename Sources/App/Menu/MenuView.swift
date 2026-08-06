@@ -29,38 +29,40 @@ struct MenuView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack {
+            // The felt behind an empty lobby shouldn't read as a void — a
+            // faint deck-and-seats motif underneath the real UI.
+            attractBackdrop
             ScrollView {
-                VStack(spacing: 26) {
-                    if !savedGames.isEmpty {
-                        ResumeStripView(games: savedGames, onResume: resume, onDelete: delete)
-                            .padding(.horizontal, 30)
-                    }
-
-                    masthead
-
-                    gamePicker
-
-                    // Dice games use the same seats builder; .wizard shares
-                    // LCR's 3–6 seat window, so its limits stand in.
-                    SeatsBuilderView(host: host, game: diceSelected ? .wizard : selectedGame,
-                                     botDrafts: $botDrafts)
-
-                    if !diceSelected && selectedGame.hasHouseRules {
-                        RulesPanelView(game: selectedGame, rules: $rules)
-                            .frame(maxWidth: 480)
-                            .padding(.horizontal, 40)
-                    }
-
-                    dealButton
-
-                    quickActionsRow
-                        .padding(.bottom, 24)
+            VStack(spacing: 26) {
+                if !savedGames.isEmpty {
+                    ResumeStripView(games: savedGames, onResume: resume, onDelete: delete)
+                        .padding(.horizontal, 30)
                 }
-                .padding(.top, 24)
-                .frame(maxWidth: .infinity)
+
+                masthead
+
+                gamePicker
+
+                // Dice games use the same seats builder; .wizard shares
+                // LCR's 3–6 seat window, so its limits stand in.
+                SeatsBuilderView(host: host, game: diceSelected ? .wizard : selectedGame,
+                                 botDrafts: $botDrafts)
+
+                if !diceSelected && selectedGame.hasHouseRules {
+                    RulesPanelView(game: selectedGame, rules: $rules)
+                        .frame(maxWidth: 480)
+                        .padding(.horizontal, 40)
+                }
+
+                dealButton
+
+                quickActionsRow
+                    .padding(.bottom, 24)
             }
-            settingsGear
+            .padding(.top, 24)
+            .frame(maxWidth: .infinity)
+            }
         }
         .onAppear { refreshSavedGames() }
         .onChange(of: selectedGame) { _, newGame in
@@ -128,6 +130,60 @@ struct MenuView: View {
         .sheet(isPresented: $showSettings) { SettingsView() }
     }
 
+    // MARK: attract backdrop
+
+    /// A faint deck-and-seats motif behind the lobby UI, low-opacity enough
+    /// to never compete with the real controls on top — the empty felt
+    /// reads as a table that's already set, not blank cloth. Built from
+    /// `CardBackView` (this module's plain card back, already used above in
+    /// `FannedBacks`) rather than `DeckAndTrumpView`'s draw-pile stack: that
+    /// view is driven by a live `GameState` (draw pile count, game kind,
+    /// round…) the lobby doesn't have one of yet, and standing up a
+    /// throwaway `GameState` purely to paint an idle deck would reach
+    /// further into the engine than a cosmetic backdrop warrants. Its own
+    /// riffle-shuffle flourish only fires on a real draw-pile reshuffle
+    /// anyway, so there's nothing to gain by forcing the dependency.
+    private var attractBackdrop: some View {
+        GeometryReader { geo in
+            ZStack {
+                ZStack {
+                    ForEach(0..<3, id: \.self) { layer in
+                        CardBackView()
+                            .frame(width: 150)
+                            .rotationEffect(.degrees(Double(layer) * 2.2 - 2.2))
+                            .offset(x: CGFloat(layer) * 3, y: CGFloat(layer) * -3)
+                    }
+                }
+                .compositingGroup()
+                .opacity(0.16)
+                .position(x: geo.size.width * 0.5, y: geo.size.height * 0.88)
+
+                // Faint open-seat markers — chairs pulled up to a table
+                // that's ready and waiting, echoing SeatsBuilderView's own
+                // dashed "Open seat" circle language.
+                ForEach(0..<4, id: \.self) { i in
+                    Circle()
+                        .strokeBorder(CardStyle.stockTop.opacity(0.14),
+                                      style: StrokeStyle(lineWidth: 2, dash: [7, 6]))
+                        .frame(width: 46, height: 46)
+                        .position(seatMarkerPosition(index: i, size: geo.size))
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func seatMarkerPosition(index: Int, size: CGSize) -> CGPoint {
+        let points: [CGPoint] = [
+            CGPoint(x: 0.06, y: 0.5),
+            CGPoint(x: 0.94, y: 0.5),
+            CGPoint(x: 0.5, y: 0.05),
+            CGPoint(x: 0.5, y: 0.97)
+        ]
+        let p = points[index % points.count]
+        return CGPoint(x: p.x * size.width, y: p.y * size.height)
+    }
+
     // MARK: masthead
 
     private var masthead: some View {
@@ -140,19 +196,6 @@ struct MenuView: View {
                 .font(.system(.title3, design: .serif).italic())
                 .foregroundStyle(CardStyle.gold)
         }
-    }
-
-    private var settingsGear: some View {
-        Button {
-            Haptics.tick()
-            showSettings = true
-        } label: {
-            Image(systemName: "gearshape.fill")
-                .font(.title3)
-                .foregroundStyle(CardStyle.stockTop.opacity(0.5))
-                .padding(16)
-        }
-        .buttonStyle(.plain)
     }
 
     // MARK: game picker
@@ -179,20 +222,40 @@ struct MenuView: View {
 
     // MARK: deal
 
+    /// Two entirely different looks, not one button toggling `.disabled`:
+    /// a real gold CTA when the table can start, and — while waiting — a
+    /// plain informational pill in the same gold-on-dark serif language as
+    /// the House Rules chip. SwiftUI's stock `.disabled()` styling desaturates
+    /// `.borderedProminent`'s tint to system gray regardless of what tint
+    /// you set, which is exactly the low-contrast look this replaces.
+    @ViewBuilder
     private var dealButton: some View {
-        Button {
-            if diceSelected { rollTheDice() } else { dealTheCards() }
-        } label: {
-            Text(canStart ? (diceSelected ? "Roll the dice" : "Deal the cards") : neededLabel)
-                .font(.title2.weight(.bold))
-                .padding(.horizontal, 44)
-                .padding(.vertical, 16)
+        if canStart {
+            Button {
+                if diceSelected { rollTheDice() } else { dealTheCards() }
+            } label: {
+                Text(diceSelected ? "Roll the dice" : "Deal the cards")
+                    .font(.title2.weight(.bold))
+                    .padding(.horizontal, 44)
+                    .padding(.vertical, 16)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(CardStyle.gold)
+            .foregroundStyle(CardStyle.ink)
+        } else {
+            Text(neededLabel)
+                .font(.system(.title3, design: .serif).weight(.semibold))
+                .foregroundStyle(CardStyle.gold.opacity(0.85))
+                .padding(.horizontal, 32)
+                .padding(.vertical, 14)
+                .background(
+                    Capsule()
+                        .fill(.black.opacity(0.22))
+                        .overlay(
+                            Capsule().strokeBorder(CardStyle.gold.opacity(0.25), lineWidth: 1)
+                        )
+                )
         }
-        .buttonStyle(.borderedProminent)
-        .tint(CardStyle.gold)
-        .foregroundStyle(CardStyle.ink)
-        .disabled(!canStart)
-        .animation(.easeInOut(duration: 0.2), value: canStart)
     }
 
     private var neededLabel: String {
@@ -400,8 +463,10 @@ extension GameKind {
 
 /// Miniature art for each game chip, built from the app's own card views —
 /// tiny, unmistakable, and consistent with the felt everyone actually plays
-/// on, instead of an emoji standing in for it.
-private struct GameEmblem: View {
+/// on, instead of an emoji standing in for it. Not private: `ResumeStripView`
+/// reuses it too, so a suspended game's resume card shows the same brass/
+/// card-art mark as the picker instead of a raw emoji glyph.
+struct GameEmblem: View {
     /// Common target height for every chip's emblem, card or dice.
     static let height: CGFloat = 34
 

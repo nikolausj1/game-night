@@ -717,14 +717,17 @@ check(GameKind.uno.roundsSchedule(playerCount: 4).isEmpty, "uno has no round sch
 
 check(RulesConfig().stackDrawCards == true && RulesConfig().drawUntilPlayable == true,
       "UNO flags default: stacking on, drawUntilPlayable on (the family rule)")
+check(RulesConfig().autoDrawPenalty == false,
+      "autoDrawPenalty defaults off: manual one-card-at-a-time draw penalties are the default")
 var legacyRulesDict = try! JSONSerialization.jsonObject(
     with: try! JSONEncoder().encode(RulesConfig(stackDrawCards: false, drawUntilPlayable: false))) as! [String: Any]
 legacyRulesDict.removeValue(forKey: "stackDrawCards")
 legacyRulesDict.removeValue(forKey: "drawUntilPlayable")
+legacyRulesDict.removeValue(forKey: "autoDrawPenalty")
 let legacyRules = try! JSONDecoder().decode(
     RulesConfig.self, from: try! JSONSerialization.data(withJSONObject: legacyRulesDict))
-check(legacyRules.stackDrawCards == true && legacyRules.drawUntilPlayable == true,
-      "pre-UNO RulesConfig decodes with defaults")
+check(legacyRules.stackDrawCards == true && legacyRules.drawUntilPlayable == true && legacyRules.autoDrawPenalty == false,
+      "pre-UNO / pre-autoDrawPenalty RulesConfig decodes with defaults")
 
 // MARK: - UNO crafted-state helper (also exercises HostEngine(restoring:))
 
@@ -828,7 +831,7 @@ check(eWild.state.round?.trumpSuit == .spades && eWild.state.phase == .playing &
 check(isIllegal(eWild.apply(.playCard(cardID: "u_r2a", force: false), from: 2)), "declared blue blocks a red play")
 check(playedCard(eWild.apply(.playCard(cardID: "u_b9a", force: false), from: 2)) != nil, "declared blue allows a blue play")
 
-// MARK: - UNO draw-two stacking: accumulate → absorb → skip
+// MARK: - UNO draw-two stacking: accumulate → manual absorb, one card at a time → skip
 
 let eChain = unoEngine(
     hands: [0: [ucard("u_rDa"), ucard("u_r1a")],
@@ -842,10 +845,25 @@ _ = eChain.apply(.playCard(cardID: "u_gDa", force: false), from: 1)
 check(eChain.state.round?.pendingDraw == 4 && eChain.state.round?.turnSeat == 2, "stacked drawTwo accumulates to 4")
 check(isIllegal(eChain.apply(.playCard(cardID: "u_b1a", force: false), from: 2)), "a number can't answer a draw chain")
 check(isIllegal(eChain.apply(.playCard(cardID: "u_wild1", force: false), from: 2)), "a plain wild can't answer a draw chain")
+check(isIllegal(eChain.apply(.playCard(cardID: "u_b1a", force: true), from: 2)),
+      "a pending draw penalty is a hard rule: force:true cannot play through it")
+check(eChain.state.hands[2]?.count == 3, "the forced attempt changed nothing — hand size unaffected")
+// Manual mode (default): the penalty is NOT auto-drawn on landing — it's
+// recorded as a counter, paid one drawCard at a time.
+check(eChain.state.round?.pendingDraw == 4, "the 4-card penalty is pending, not auto-drawn")
+let chainDraw1 = eChain.apply(.drawCard, from: 2)
+check(eChain.state.hands[2]?.count == 4 && eChain.state.round?.pendingDraw == 3,
+      "first drawCard moves exactly one card and decrements the counter")
+check(chainDraw1 == [.penaltyCardDrawn(seat: 2, remaining: 3)], "drawCard emits penaltyCardDrawn with the remaining count")
+check(eChain.state.round?.turnSeat == 2, "turn stays with the victim while the counter is still above zero")
 _ = eChain.apply(.drawCard, from: 2)
-check(eChain.state.hands[2]?.count == 3 + 4, "absorbing draws the whole 4-card penalty")
+_ = eChain.apply(.drawCard, from: 2)
+check(eChain.state.hands[2]?.count == 6 && eChain.state.round?.pendingDraw == 1, "third draw leaves one card pending")
+let chainDrawLast = eChain.apply(.drawCard, from: 2)
+check(eChain.state.hands[2]?.count == 3 + 4, "fourth drawCard completes the 4-card penalty")
+check(chainDrawLast == [.penaltyCardDrawn(seat: 2, remaining: 0)], "the final draw reports remaining: 0")
 check(eChain.state.round?.pendingDraw == 0 && eChain.state.round?.turnSeat == 0,
-      "absorbing clears the pending draw and skips the turn")
+      "the counter reaching zero clears pendingDraw and passes the turn")
 
 // MARK: - UNO wild draw four on a draw-two chain
 
@@ -863,10 +881,13 @@ check(eW4.state.phase == .choosingTrump(seat: 1), "a stacked wild draw four stil
 _ = eW4.apply(.declareSuit(.clubs), from: 1)
 check(eW4.state.phase == .playing && eW4.state.round?.turnSeat == 2, "after the color pick the next player faces the stack")
 check(isIllegal(eW4.apply(.playCard(cardID: "u_gDb", force: false), from: 2)), "a drawTwo can't answer a +4 chain")
-_ = eW4.apply(.drawCard, from: 2)
-check(eW4.state.hands[2]?.count == 3 + 6 && eW4.state.round?.pendingDraw == 0, "absorbing a 2+4 chain draws 6")
+for _ in 0..<6 { _ = eW4.apply(.drawCard, from: 2) }
+check(eW4.state.hands[2]?.count == 3 + 6 && eW4.state.round?.pendingDraw == 0,
+      "six manual drawCard calls complete a 2+4 stacked chain")
+check(eW4.state.round?.turnSeat == 0, "turn passes off the victim once the stack is fully paid")
 
-// MARK: - UNO non-stacking: immediate penalty
+// MARK: - UNO non-stacking, manual mode (the default): penalty lands on the
+// victim's turn as a pendingDraw counter, not an instant deal
 
 let noStack = RulesConfig(stackDrawCards: false)
 let eNo = unoEngine(
@@ -874,9 +895,20 @@ let eNo = unoEngine(
     top: ucard("u_r5a"), turn: 0, players: 3, rules: noStack,
     drawPile: [ucard("u_y8a"), ucard("u_y8b"), ucard("u_y9a"), ucard("u_y9b")])
 _ = eNo.apply(.playCard(cardID: "u_rDa", force: false), from: 0)
+check(eNo.state.hands[1]?.count == 1 && eNo.state.round?.pendingDraw == 2,
+      "manual non-stacking drawTwo is NOT auto-drawn: it lands as a pendingDraw counter on the victim")
+check(eNo.state.round?.turnSeat == 1, "manual non-stacking drawTwo makes it the victim's turn (not skipped yet)")
+check(isIllegal(eNo.apply(.playCard(cardID: "u_g1a", force: false), from: 1)),
+      "with stacking off, even a color/symbol match can't answer a pending penalty")
+check(isIllegal(eNo.apply(.playCard(cardID: "u_g1a", force: true), from: 1)),
+      "the hard rule blocks force:true too, since stacking is off here")
+_ = eNo.apply(.drawCard, from: 1)
+check(eNo.state.hands[1]?.count == 2 && eNo.state.round?.pendingDraw == 1 && eNo.state.round?.turnSeat == 1,
+      "first manual draw takes one card, one left pending, still the victim's turn")
+_ = eNo.apply(.drawCard, from: 1)
 check(eNo.state.hands[1]?.count == 3 && eNo.state.round?.pendingDraw == 0,
-      "non-stacking drawTwo deals 2 to the victim immediately")
-check(eNo.state.round?.turnSeat == 2, "non-stacking drawTwo skips the victim")
+      "second manual draw completes the 2-card penalty")
+check(eNo.state.round?.turnSeat == 2, "the penalty paid, the victim's turn is over — next seat is up")
 
 let eNoW = unoEngine(
     hands: [0: [ucard("u_wd42"), ucard("u_r2a")], 1: [ucard("u_g1b")], 2: [ucard("u_b2a")]],
@@ -886,10 +918,56 @@ _ = eNoW.apply(.playCard(cardID: "u_wd42", force: false), from: 0)
 check(eNoW.state.phase == .choosingTrump(seat: 0) && eNoW.state.hands[1]?.count == 1,
       "non-stacking wild draw four picks a color before the penalty lands")
 _ = eNoW.apply(.declareSuit(.hearts), from: 0)
+check(eNoW.state.hands[1]?.count == 1 && eNoW.state.round?.pendingDraw == 4,
+      "manual: penalty is pending after the color pick, not dealt")
+check(eNoW.state.round?.turnSeat == 1 && eNoW.state.round?.trumpSuit == .hearts,
+      "victim's turn now (not skipped), red (hearts) declared")
+for _ in 0..<4 { _ = eNoW.apply(.drawCard, from: 1) }
 check(eNoW.state.hands[1]?.count == 5 && eNoW.state.round?.pendingDraw == 0,
-      "non-stacking wild draw four deals 4 after the color pick")
-check(eNoW.state.round?.turnSeat == 2 && eNoW.state.round?.trumpSuit == .hearts,
-      "victim skipped and red (hearts) declared")
+      "four manual draws complete the wild-draw-four penalty")
+check(eNoW.state.round?.turnSeat == 2, "victim's turn ends once the penalty is paid")
+
+// MARK: - UNO autoDrawPenalty=true: preserves the old instant-deal-and-skip
+// behavior (the "fast mode" toggle)
+
+let fastRules = RulesConfig(stackDrawCards: false, autoDrawPenalty: true)
+let eFast = unoEngine(
+    hands: [0: [ucard("u_rDa"), ucard("u_r2b")], 1: [ucard("u_g1a")], 2: [ucard("u_b1b")]],
+    top: ucard("u_r5a"), turn: 0, players: 3, rules: fastRules,
+    drawPile: [ucard("u_y8a"), ucard("u_y8b"), ucard("u_y9a"), ucard("u_y9b")])
+_ = eFast.apply(.playCard(cardID: "u_rDa", force: false), from: 0)
+check(eFast.state.hands[1]?.count == 3 && eFast.state.round?.pendingDraw == 0,
+      "autoDrawPenalty=true: non-stacking drawTwo deals 2 to the victim immediately, as before")
+check(eFast.state.round?.turnSeat == 2, "autoDrawPenalty=true: the victim is skipped, as before")
+
+let eFastW = unoEngine(
+    hands: [0: [ucard("u_wd42"), ucard("u_r2a")], 1: [ucard("u_g1b")], 2: [ucard("u_b2a")]],
+    top: ucard("u_r5b"), turn: 0, players: 3, rules: fastRules,
+    drawPile: [ucard("u_y0"), ucard("u_g0"), ucard("u_b0"), ucard("u_r0"), ucard("u_y5a")])
+_ = eFastW.apply(.playCard(cardID: "u_wd42", force: false), from: 0)
+check(eFastW.state.phase == .choosingTrump(seat: 0) && eFastW.state.hands[1]?.count == 1,
+      "autoDrawPenalty=true: wild draw four still picks a color before the penalty lands")
+_ = eFastW.apply(.declareSuit(.hearts), from: 0)
+check(eFastW.state.hands[1]?.count == 5 && eFastW.state.round?.pendingDraw == 0,
+      "autoDrawPenalty=true: deals 4 immediately after the color pick, as before")
+check(eFastW.state.round?.turnSeat == 2 && eFastW.state.round?.trumpSuit == .hearts,
+      "autoDrawPenalty=true: victim skipped and red (hearts) declared, as before")
+
+// autoDrawPenalty=true with stacking still ON: a full stacked chain absorbs
+// in one drawCard, exactly like the old (pre-manual) default behavior.
+let eFastStack = unoEngine(
+    hands: [0: [ucard("u_rDa"), ucard("u_r1a")],
+            1: [ucard("u_gDa"), ucard("u_g1a")],
+            2: [ucard("u_b1a"), ucard("u_b2a"), ucard("u_wild1")]],
+    top: ucard("u_r5a"), turn: 0, players: 3, rules: RulesConfig(autoDrawPenalty: true),
+    drawPile: [ucard("u_y1a"), ucard("u_y1b"), ucard("u_y2a"), ucard("u_y2b")])
+_ = eFastStack.apply(.playCard(cardID: "u_rDa", force: false), from: 0)
+_ = eFastStack.apply(.playCard(cardID: "u_gDa", force: false), from: 1)
+check(eFastStack.state.round?.pendingDraw == 4, "autoDrawPenalty=true still stacks while the chain is building")
+_ = eFastStack.apply(.drawCard, from: 2)
+check(eFastStack.state.hands[2]?.count == 3 + 4 && eFastStack.state.round?.pendingDraw == 0,
+      "autoDrawPenalty=true: absorbing a stacked chain still takes it all in one drawCard")
+check(eFastStack.state.round?.turnSeat == 0, "autoDrawPenalty=true: absorbing still skips the victim's turn")
 
 // MARK: - UNO voluntary draw, toggle OFF: exactly one card, turn passes
 
@@ -938,6 +1016,60 @@ check(eDrawDry.state.drawPile.isEmpty && eDrawDry.state.discardPile.count == 1,
       "dry deck: draw pile and recyclable discard are both exhausted")
 check(eDrawDry.state.round?.turnSeat == 2, "dry deck: no playable card found, so the turn passes instead of stalling")
 check(dryEvents.contains(.cardsDrawn(seat: 1, count: 2)), "dry deck: cardsDrawn still reports the two cards drawn")
+
+// MARK: - UNO manual pendingDraw vs. drawUntilPlayable: the two paths don't
+// tangle. A pendingDraw penalty takes exactly one card per drawCard and
+// never keeps pulling in search of a playable card, even with
+// drawUntilPlayable on (the default).
+let eNoTangle = unoEngine(hands: [1: [ucard("u_g9b")]], top: ucard("u_r5a"), turn: 1, players: 3,
+                           pending: 2, drawPile: [ucard("u_y6a"), ucard("u_y6b"), ucard("u_g4a")])
+check(RulesConfig().drawUntilPlayable == true, "sanity: drawUntilPlayable is on by default for this check")
+let tangleEvents = eNoTangle.apply(.drawCard, from: 1)
+check(eNoTangle.state.hands[1]?.count == 2 && eNoTangle.state.round?.pendingDraw == 1,
+      "a pending-draw drawCard takes exactly one card, ignoring drawUntilPlayable")
+check(tangleEvents == [.penaltyCardDrawn(seat: 1, remaining: 1)],
+      "a pending-draw drawCard never emits cardsDrawn, only penaltyCardDrawn")
+check(eNoTangle.state.round?.turnSeat == 1, "turn stays with the victim: one card still pending")
+
+// Dry deck during a manual penalty: can't complete it, so it's dropped and
+// the turn passes rather than stalling forever (mirrors the
+// drawUntilPlayable dry-deck behavior above, but via the penalty path).
+let eNoTangleDry = unoEngine(hands: [1: []], top: ucard("u_r5b"), turn: 1, players: 3,
+                              pending: 3, drawPile: [ucard("u_y7a")])
+let tangleDryEvents = eNoTangleDry.apply(.drawCard, from: 1)
+check(eNoTangleDry.state.hands[1]?.count == 1, "dry penalty draw: the one available card still lands in hand")
+check(tangleDryEvents == [.penaltyCardDrawn(seat: 1, remaining: 2)], "dry penalty draw: still reports remaining after the card it could give")
+let tangleDryEvents2 = eNoTangleDry.apply(.drawCard, from: 1)
+check(eNoTangleDry.state.hands[1]?.count == 1 && tangleDryEvents2.isEmpty,
+      "dry penalty draw: once both piles are exhausted, drawCard silently drops the rest of the penalty")
+check(eNoTangleDry.state.round?.pendingDraw == 0 && eNoTangleDry.state.round?.turnSeat == 2,
+      "dry penalty draw: pendingDraw is cleared and the turn passes instead of stalling")
+
+// MARK: - ClientSnapshot.myPendingDraw
+
+let snapNoPending = eNum.state.snapshot(for: 2) // eNum has no pending draw at all
+check(snapNoPending.myPendingDraw == 0, "myPendingDraw is 0 when there's no penalty pending")
+
+let pendingHost = unoEngine(hands: [1: [ucard("u_g1a")]], top: ucard("u_r5a"), turn: 1, players: 3, pending: 3)
+// (the hand card above is deliberately unused/never played; only the snapshot matters)
+let snapVictim = pendingHost.state.snapshot(for: 1)
+check(snapVictim.myPendingDraw == 3, "myPendingDraw reports the pending count for the seat it's landed on")
+let snapBystander = pendingHost.state.snapshot(for: 0)
+check(snapBystander.myPendingDraw == 0, "myPendingDraw is 0 for a seat the penalty isn't pending against")
+let snapBystander2 = pendingHost.state.snapshot(for: 2)
+check(snapBystander2.myPendingDraw == 0, "myPendingDraw is 0 for every other seat too")
+
+let snapPendingData = try! JSONEncoder().encode(snapVictim)
+let snapPendingBack = try! JSONDecoder().decode(ClientSnapshot.self, from: snapPendingData)
+check(snapPendingBack.myPendingDraw == 3, "myPendingDraw round-trips through JSON")
+
+// Back-compat: a snapshot encoded before myPendingDraw existed decodes to 0.
+var legacySnapshotDict = try! JSONSerialization.jsonObject(with: snapPendingData) as! [String: Any]
+legacySnapshotDict.removeValue(forKey: "myPendingDraw")
+let legacySnapshot = try! JSONDecoder().decode(
+    ClientSnapshot.self, from: try! JSONSerialization.data(withJSONObject: legacySnapshotDict))
+check(legacySnapshot.myPendingDraw == 0, "pre-myPendingDraw ClientSnapshot decodes with myPendingDraw 0")
+check(legacySnapshot.mySeat == snapVictim.mySeat, "the rest of the legacy snapshot still decodes correctly")
 
 // MARK: - UNO soft enforcement
 
@@ -996,6 +1128,18 @@ for candidate in restored.state.hands[restoredSeat]! {
 if !restoredActed { restoredActed = !isIllegal(restored.apply(.drawCard, from: restoredSeat)) }
 check(restoredActed, "restored engine keeps accepting play")
 
+// A full old-format save (predating autoDrawPenalty, nested inside `rules`)
+// still decodes: the pre-manual-draw-penalty flag defaults off.
+var legacyStateDict = try! JSONSerialization.jsonObject(with: savedData) as! [String: Any]
+var legacyStateRules = legacyStateDict["rules"] as! [String: Any]
+legacyStateRules.removeValue(forKey: "autoDrawPenalty")
+legacyStateDict["rules"] = legacyStateRules
+let legacyState = try! JSONDecoder().decode(
+    GameState.self, from: try! JSONSerialization.data(withJSONObject: legacyStateDict))
+check(legacyState.rules.autoDrawPenalty == false, "old saved GameState (no autoDrawPenalty key) decodes with it off")
+check(legacyState.gameKind == .uno && legacyState.hands == saveSource.state.hands,
+      "the rest of the old saved GameState decodes unchanged")
+
 // MARK: - unoCalled event codable
 
 let unoEvents: [GameEvent] = [.unoCalled(seat: 2), .suitDeclared(.hearts)]
@@ -1005,6 +1149,10 @@ check((try! JSONDecoder().decode([GameEvent].self, from: try! JSONEncoder().enco
 let cardsDrawnEvents: [GameEvent] = [.cardsDrawn(seat: 1, count: 3)]
 check((try! JSONDecoder().decode([GameEvent].self, from: try! JSONEncoder().encode(cardsDrawnEvents))) == cardsDrawnEvents,
       "cardsDrawn round-trips through JSON")
+
+let penaltyCardDrawnEvents: [GameEvent] = [.penaltyCardDrawn(seat: 2, remaining: 3), .penaltyCardDrawn(seat: 2, remaining: 0)]
+check((try! JSONDecoder().decode([GameEvent].self, from: try! JSONEncoder().encode(penaltyCardDrawnEvents))) == penaltyCardDrawnEvents,
+      "penaltyCardDrawn round-trips through JSON")
 
 // MARK: - Full seeded 3-player UNO game
 

@@ -9,17 +9,38 @@ struct HandFanLayout {
 
     /// Hands bigger than this spread wider than the screen and become
     /// horizontally scrollable (see HandView's browse gesture) instead of
-    /// crushing every card into a fixed arc width. ~10 is roughly where a
-    /// standard-width phone can no longer show every card at a legible size.
-    static let wideThreshold = 10
+    /// crushing every card into a fixed arc width.
+    ///
+    /// Width-aware rather than a flat constant: a fixed "10" was calibrated
+    /// for portrait phone width and stayed 10 even in landscape, where the
+    /// screen is nearly twice as wide — the fan went scrollable long before
+    /// it needed to, and 12+ cards spread clean off both edges with no cue
+    /// they existed. The available spread width is `containerWidth -
+    /// cardWidth` (matching the same-name clamp in `slot`, below); dividing
+    /// by a legibility floor of a quarter card-width per step says how many
+    /// cards can sit edge-to-edge and still show enough of a corner index to
+    /// read. That floor was picked to land on the old ~10 at portrait phone
+    /// widths, so portrait behavior is unchanged; wider containers (or
+    /// smaller cards, e.g. a big Wizard endgame hand) raise the threshold
+    /// instead of holding it fixed.
+    var wideThreshold: Int {
+        guard cardWidth > 0 else { return 10 }
+        let spreadWidth = max(0, containerWidth - cardWidth)
+        let legibleStep = cardWidth * 0.25
+        return max(6, Int(spreadWidth / legibleStep) + 1)
+    }
 
-    private var isWide: Bool { cardCount > Self.wideThreshold }
+    /// Exposed (not private) so HandView can gate the edge-fade cue and the
+    /// wide→narrow scroll reset on the same notion of "wide" this struct
+    /// uses internally — duplicating the threshold math there would risk
+    /// the two drifting apart.
+    var isWide: Bool { cardCount > wideThreshold }
 
     /// Total angular spread grows with hand size but saturates so a 15-card
-    /// Wizard endgame hand still fits a thumb's reach. Wide (>10-card) hands
-    /// don't saturate — they keep a steady per-card angular step so the fan
-    /// spreads naturally past the screen edge; `fanScroll` (HandView) brings
-    /// the off-screen ends to center instead.
+    /// Wizard endgame hand still fits a thumb's reach. Wide (past
+    /// `wideThreshold`) hands don't saturate — they keep a steady per-card
+    /// angular step so the fan spreads naturally past the screen edge;
+    /// `fanScroll` (HandView) brings the off-screen ends to center instead.
     private var totalSpreadDegrees: CGFloat {
         guard cardCount > 1 else { return 0 }
         if isWide { return CGFloat(cardCount - 1) * 6.5 }

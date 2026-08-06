@@ -46,6 +46,11 @@ struct HandView: View {
     // The illegal-play banner's "play it anyway" link escalates to this —
     // the real confirm dialog, shown on demand instead of automatically.
     @State private var showForceConfirm = false
+    // Draw-penalty banner (UNO stacked draw-two/draw-four): bumped each time
+    // a play is rejected while a draw is owed, so DrawPenaltyBanner's shake
+    // has a fresh trigger value to animate on (see the pendingIllegal
+    // onChange below) instead of the illegal-play sheet escalating.
+    @State private var drawShakeTrigger = 0
 
     private var sortMode: HandSortMode { HandSortMode(rawValue: sortModeRaw) ?? .asDealt }
     private var hand: [Card] { sortMode.sorted(client.snapshot?.myHand ?? []) }
@@ -63,8 +68,29 @@ struct HandView: View {
         return snap.gameKind == .uno && snap.phase == .choosingTrump(seat: seat)
     }
 
+    // UNO's active color after a wild — shown as a swatch integrated into
+    // the turn banner (see TurnBanner below) rather than the unlabeled
+    // upper-right tag nobody noticed (see HandStatusStrip, which no longer
+    // renders it for UNO). `trumpSuit` is UNO's wire format for the
+    // declared color (see Card.swift's Suit↔UnoColor mapping); non-UNO
+    // games never populate this.
+    private var activeUnoColor: UnoColor? {
+        guard client.snapshot?.gameKind == .uno else { return nil }
+        return client.snapshot?.round?.trumpSuit?.unoColor
+    }
+
+    // `ClientSnapshot.myPendingDraw` (0 = no pending draw penalty owed)
+    // lands from a parallel engine change; wrapped in its own helper so if
+    // that ever regresses to not compiling, the fix is a one-line swap to
+    // `0` here instead of hunting every call site.
+    private var pendingDraw: Int {
+        client.snapshot?.myPendingDraw ?? 0
+    }
+
+    private var showDrawPenaltyBanner: Bool { pendingDraw > 0 }
+
     private var showYourTurnBanner: Bool {
-        isMyTurn && client.pendingIllegal == nil
+        isMyTurn && client.pendingIllegal == nil && !showDrawPenaltyBanner
     }
 
     var body: some View {
@@ -75,8 +101,13 @@ struct HandView: View {
                 VStack(spacing: 0) {
                     HandStatusStrip(client: client, onLeave: onLeave)
                     Spacer()
-                    if showYourTurnBanner {
-                        TurnBanner(hint: turnHintText)
+                    if showDrawPenaltyBanner {
+                        DrawPenaltyBanner(count: pendingDraw,
+                                          shakeTrigger: drawShakeTrigger,
+                                          onTapDraw: { client.drawCard() })
+                            .transition(.scale(scale: 0.9).combined(with: .opacity))
+                    } else if showYourTurnBanner {
+                        TurnBanner(hint: turnHintText, unoColor: activeUnoColor)
                             .transition(.scale(scale: 0.9).combined(with: .opacity))
                     }
                     playZoneHint
@@ -95,7 +126,10 @@ struct HandView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
                 }
 
-                if let pending = client.pendingIllegal {
+                // Suppressed while a draw is owed (see the pendingIllegal
+                // onChange below) — the draw instruction IS the feedback
+                // for a rejected play there, via the banner's shake.
+                if pendingDraw == 0, let pending = client.pendingIllegal {
                     VStack {
                         Spacer()
                         IllegalPlayBanner(
@@ -109,7 +143,7 @@ struct HandView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
                 }
 
-                if showForceConfirm, let pending = client.pendingIllegal {
+                if pendingDraw == 0, showForceConfirm, let pending = client.pendingIllegal {
                     IllegalPlaySheet(
                         reason: pending.reason,
                         onPlayAnyway: {
@@ -126,10 +160,26 @@ struct HandView: View {
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isChoosingUnoColor)
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: client.pendingIllegal?.cardID)
             .animation(.spring(response: 0.4, dampingFraction: 0.8), value: showYourTurnBanner)
+            .animation(.spring(response: 0.4, dampingFraction: 0.8), value: showDrawPenaltyBanner)
             .onAppear { motion.start() }
             .onDisappear { motion.stop() }
+            .onChange(of: client.pendingIllegal?.cardID) { _, newID in
+                // A play was rejected while a draw is owed: no illegal-play
+                // banner/sheet (suppressed above) — pulse the draw banner
+                // instead and restore the card immediately, same as
+                // cancelIllegalPlay's second step.
+                guard newID != nil, pendingDraw > 0 else { return }
+                drawShakeTrigger += 1
+                client.cancelPendingPlay()
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.75)) {
+                    departingCardID = nil
+                }
+            }
             .onChange(of: client.snapshot?.myHand.map(\.id) ?? []) { oldIDs, newIDs in
                 handleHandArrivals(oldIDs: oldIDs, newIDs: newIDs)
+            }
+            .onChange(of: hand.count) { oldCount, newCount in
+                handleHandSizeChange(oldCount: oldCount, newCount: newCount, in: geo.size)
             }
         }
     }
@@ -187,8 +237,11 @@ struct HandView: View {
             }
             return "Match the top card, or play an eight"
         case .uno:
-            if let color = snap.round?.trumpSuit?.unoColor {
-                return "Match \(color.rawValue.capitalized), or the symbol"
+            // With an active color, TurnBanner already shows it as a
+            // swatch + "Play <Color>" — restating it in the hint too would
+            // be the same information twice in the same banner.
+            if snap.round?.trumpSuit?.unoColor != nil {
+                return "Or match the symbol"
             }
             return "Match the color or the symbol"
         case .freePlay:
@@ -268,6 +321,13 @@ struct HandView: View {
             }
         }
         .frame(maxWidth: .infinity)
+        // Wide (scrollable) hands: a soft fade at the true screen edges
+        // instead of a hard crop, so the last visible card visibly trails
+        // off rather than looking like an accidental clip — the discoverable
+        // cue that there's more hand to browse to, with no chrome/indicator.
+        // Narrow hands get the identity gradient (opaque throughout), a
+        // no-op mask so nothing changes below the wide threshold.
+        .mask(edgeFadeMask(active: layout.isWide))
         // fan sits slightly into the bottom edge, like held cards, plus
         // the whole-fan parallax shift and a subtle roll from tilting.
         .offset(x: parallaxX, y: 30 + parallaxY)
@@ -276,6 +336,30 @@ struct HandView: View {
         // modes — it shares this @AppStorage key, so this is the local
         // guarantee that reordering animates rather than jumping.
         .animation(.spring(response: 0.4, dampingFraction: 0.78), value: sortModeRaw)
+        // Re-saturates the arc smoothly when the hand crosses the wide
+        // threshold in either direction (a play shrinking it back down, or
+        // a big deal pushing it past) instead of the spread snapping.
+        .animation(.spring(response: 0.45, dampingFraction: 0.8), value: hand.count)
+    }
+
+    /// Fades the fan to ~30% opacity right at the screen edges rather than
+    /// 0% — a hard fade to nothing would hide the very "there's a card
+    /// here" cue we want; dimming instead of erasing reads as "this
+    /// continues," not "this is cropped." `active: false` is fully opaque
+    /// (a no-op mask) for narrow hands, which never overflow the screen.
+    private func edgeFadeMask(active: Bool) -> some View {
+        LinearGradient(
+            stops: active ? [
+                .init(color: .white.opacity(0.3), location: 0),
+                .init(color: .white, location: 0.08),
+                .init(color: .white, location: 0.92),
+                .init(color: .white.opacity(0.3), location: 1)
+            ] : [
+                .init(color: .white, location: 0),
+                .init(color: .white, location: 1)
+            ],
+            startPoint: .leading, endPoint: .trailing
+        )
     }
 
     /// Extra separation + lift for cards near the browsing finger, falling
@@ -306,6 +390,28 @@ struct HandView: View {
     private func tiltWhileDragging(_ restAngle: Angle, handHeight: CGFloat) -> Angle {
         let progress = Double(dragState.playProgress(handHeight: handHeight))
         return .degrees(restAngle.degrees * (1 - progress))
+    }
+
+    /// A hand that shrinks back under `wideThreshold` (cards played down)
+    /// must condense cleanly: without this, `fanScroll` keeps whatever
+    /// value browsing last left it at, and although the render-time clamp
+    /// in `fan(in:)` already pins the DISPLAYED position to 0 once
+    /// `scrollBounds()` collapses to `0...0`, the underlying state var
+    /// stays stale — the next browse or the next time the hand grows wide
+    /// again would anchor against that leftover offset instead of a clean
+    /// slate. Explicitly resetting it here, with animation, is what makes
+    /// the arc's re-saturation (a separate `.animation(value: hand.count)`
+    /// on the fan) read as a smooth condense rather than a silent snap.
+    /// Growing past the threshold is left alone — a freshly dealt hand
+    /// should already start centered.
+    private func handleHandSizeChange(oldCount: Int, newCount: Int, in size: CGSize) {
+        guard newCount < oldCount, fanScroll != 0 else { return }
+        let shrunkLayout = HandFanLayout(cardCount: newCount, containerWidth: size.width, cardWidth: fanCardWidth(in: size))
+        guard !shrunkLayout.isWide else { return }
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) {
+            fanScroll = 0
+        }
+        focusedCardIndex = nil
     }
 
     // MARK: deal-in / draw-in animation
@@ -607,6 +713,11 @@ struct HandView: View {
 /// appears (it's behind an `if`), so the pulse cycle always restarts clean.
 private struct TurnBanner: View {
     let hint: String
+    /// UNO's active color after a wild, integrated right into this banner —
+    /// the one place a player is actually deciding what to play, unlike the
+    /// old unlabeled upper-right tag (see HandStatusStrip). Nil for every
+    /// other game and for UNO before any wild has been played.
+    var unoColor: UnoColor? = nil
 
     @State private var pulse = false
 
@@ -616,6 +727,20 @@ private struct TurnBanner: View {
                 .font(.system(.headline, design: .serif).weight(.heavy))
                 .tracking(3)
                 .foregroundStyle(CardStyle.gold)
+            if let unoColor {
+                HStack(spacing: 6) {
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(UnoStyle.field(for: unoColor))
+                        .frame(width: 15, height: 15)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .strokeBorder(.white.opacity(0.85), lineWidth: 1.5)
+                        )
+                    Text("Play \(unoColor.rawValue.capitalized)")
+                        .font(.system(.subheadline, design: .serif).weight(.semibold))
+                        .foregroundStyle(.white)
+                }
+            }
             if !hint.isEmpty {
                 Text(hint)
                     .font(.system(.footnote, design: .serif))
@@ -634,6 +759,58 @@ private struct TurnBanner: View {
         .onAppear {
             withAnimation(.easeInOut(duration: 1.15).repeatForever(autoreverses: true)) {
                 pulse = true
+            }
+        }
+    }
+}
+
+/// UNO's manual stacked draw (draw-two/draw-four with no card to answer
+/// it): takes over the turn banner's spot as the instruction itself — "DRAW
+/// 4" then a live "3 to go" as each tap lands — and doubles as the draw
+/// affordance. Drawing is normally a table-side (public) interaction (see
+/// HandView.playZoneHint's doc comment), but a personal penalty is the one
+/// case a private per-card tap on the phone makes sense: the table can't
+/// know which of your taps is "for the penalty" vs. an ordinary draw.
+/// Illegal-play feedback is suppressed while this is up (see the
+/// `pendingIllegal` onChange in HandView.body) — `shakeTrigger` pulses this
+/// banner instead so a rejected play still gets an answer.
+private struct DrawPenaltyBanner: View {
+    let count: Int
+    let shakeTrigger: Int
+    let onTapDraw: () -> Void
+
+    @State private var shakeOffset: CGFloat = 0
+
+    var body: some View {
+        Button(action: onTapDraw) {
+            VStack(spacing: 4) {
+                Text(count == 1 ? "DRAW" : "DRAW \(count)")
+                    .font(.system(.headline, design: .serif).weight(.heavy))
+                    .tracking(3)
+                    .foregroundStyle(Color(red: 0.9, green: 0.4, blue: 0.35))
+                Text(count == 1 ? "Tap to draw" : "\(count) to go — tap to draw")
+                    .font(.system(.footnote, design: .serif))
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 12)
+            .background(
+                Capsule()
+                    .fill(.black.opacity(0.3))
+                    .overlay(Capsule().strokeBorder(Color(red: 0.9, green: 0.4, blue: 0.35).opacity(0.55), lineWidth: 1.5))
+            )
+        }
+        .buttonStyle(.plain)
+        .offset(x: shakeOffset)
+        .onChange(of: shakeTrigger) { _, _ in
+            Haptics.tick()
+            withAnimation(.interpolatingSpring(stiffness: 900, damping: 12)) {
+                shakeOffset = -10
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.09) {
+                withAnimation(.interpolatingSpring(stiffness: 900, damping: 10)) {
+                    shakeOffset = 0
+                }
             }
         }
     }
@@ -732,8 +909,12 @@ struct FeltBackground: View {
     var body: some View {
         ZStack {
             CardStyle.feltGreen.ignoresSafeArea()
+            // ONE stretched crop, not `.tile`: FeltTexture.png has its own
+            // baked lighting, so tiling stamps a visible seam at every
+            // repeat boundary (same root cause fixed in TableSurface).
             Image("FeltTexture")
-                .resizable(resizingMode: .tile)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
                 .ignoresSafeArea()
                 .opacity(0.55)
                 .blendMode(.overlay)

@@ -66,6 +66,27 @@ struct DiceCupSceneView: UIViewRepresentable {
     func makeCoordinator() -> DiceCupSceneCoordinator { DiceCupSceneCoordinator() }
 }
 
+/// Just enough SCNVector3 arithmetic for the viewport-containment math
+/// below — the project doesn't define global operators for it elsewhere,
+/// and this is the only place that needs more than a literal. SCNVector3's
+/// components are plain `Float` on iOS (unlike macOS, where they're
+/// CGFloat), so this works in Float throughout rather than fighting that.
+private enum CupVector {
+    static func add(_ a: SCNVector3, _ b: SCNVector3) -> SCNVector3 {
+        SCNVector3(a.x + b.x, a.y + b.y, a.z + b.z)
+    }
+
+    static func scaled(_ a: SCNVector3, _ s: Float) -> SCNVector3 {
+        SCNVector3(a.x * s, a.y * s, a.z * s)
+    }
+
+    static func normalized(_ a: SCNVector3) -> SCNVector3 {
+        let length = sqrt(a.x * a.x + a.y * a.y + a.z * a.z)
+        guard length > 0.0001 else { return a }
+        return SCNVector3(a.x / length, a.y / length, a.z / length)
+    }
+}
+
 final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
     // Cup geometry, scene units (a die is 2). Deep tumbler: the depth is
     // the phone's long axis, the mouth is at +Y.
@@ -109,7 +130,11 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
 
         clackHaptic.prepare()
         contactThrottle = DiceContactThrottle(minInterval: 0.08, minImpulse: 0.010) {
-            [weak self] strength in
+            [weak self] strength, _ in
+            // The cup doesn't (yet) split its rattle SFX by contact
+            // material the way the table's TableSFX does — out of scope
+            // for this pass; just keeping this call site in sync with
+            // DiceContactThrottle's now-two-argument callback.
             guard let self else { return }
             self.audio.playRattle(volume: Float(0.25 + 0.65 * strength))
             if strength > 0.5 {
@@ -163,19 +188,34 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
     // MARK: cup construction
 
     private func buildCup() {
-        // Interior wall: open-top tube, leather inside, stitched near the rim.
+        // Interior wall: open-top tube, lined in deep red felt (real
+        // fiber grain via a normal map — see CupSurfaces — not a flat
+        // gradient), stitched leather rim above.
         let tube = SCNTube(innerRadius: cupInnerRadius,
                            outerRadius: cupInnerRadius + cupWall,
                            height: cupHeight)
         tube.radialSegmentCount = 64
-        let leather = SCNMaterial()
-        leather.diffuse.contents = CupTextures.wallLeather()
-        leather.diffuse.wrapS = .repeat
-        leather.lightingModel = .blinn
-        leather.specular.contents = UIColor(white: 0.25, alpha: 1)
-        leather.shininess = 0.15
-        leather.isDoubleSided = true
-        tube.materials = [leather]
+        let felt = SCNMaterial()
+        felt.diffuse.contents = CupSurfaces.feltWallDiffuse()
+        // Mirror, not repeat: the procedural noise isn't tileable, so a
+        // plain repeat stamped a visible vertical seam at the U=0/1 wrap
+        // (dead center of the cross-section view). Mirroring makes the
+        // boundary self-matching by construction.
+        felt.diffuse.wrapS = .mirror
+        felt.normal.contents = CupSurfaces.feltWallNormal()
+        felt.normal.wrapS = .mirror
+        // The fine grain in these procedural textures aliases into ugly
+        // static/shimmer without mipmapping — this is what actually fixes
+        // it, not texture resolution.
+        CupSurfaces.applyFiltering(felt)
+        felt.lightingModel = .blinn
+        // A whisper of sheen — the normal map's fiber bumps do the real
+        // work of scattering the specular into something that reads as
+        // cloth instead of plastic; this just gives it something to catch.
+        felt.specular.contents = UIColor(white: 0.18, alpha: 1)
+        felt.shininess = 0.08
+        felt.isDoubleSided = true
+        tube.materials = [felt]
         let wallNode = SCNNode(geometry: tube)
         wallNode.position = SCNVector3(0, cupHeight / 2, 0)
         wallNode.physicsBody = {
@@ -208,11 +248,14 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
             glass.isDoubleSided = true
             floor.materials = [glass]
         } else {
-            let floorLeather = SCNMaterial()
-            floorLeather.diffuse.contents = CupTextures.floorLeather()
-            floorLeather.lightingModel = .blinn
-            floorLeather.specular.contents = UIColor(white: 0.18, alpha: 1)
-            floor.materials = [floorLeather]
+            let floorFelt = SCNMaterial()
+            floorFelt.diffuse.contents = CupSurfaces.feltFloorDiffuse()
+            floorFelt.normal.contents = CupSurfaces.feltFloorNormal()
+            CupSurfaces.applyFiltering(floorFelt)
+            floorFelt.lightingModel = .blinn
+            floorFelt.specular.contents = UIColor(white: 0.14, alpha: 1)
+            floorFelt.shininess = 0.06
+            floor.materials = [floorFelt]
         }
         let floorNode = SCNNode(geometry: floor)
         floorNode.position = SCNVector3(0, -0.3, 0) // top surface at y = 0
@@ -261,14 +304,24 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
             scene.rootNode.addChildNode(streakNode)
         }
 
-        // Rolled rim at the mouth.
-        let rim = SCNTorus(ringRadius: cupInnerRadius + cupWall / 2, pipeRadius: 0.45)
+        // Rolled rim at the mouth: this is the one real "exterior" surface
+        // a player sees, since every camera lives inside the cup — grained,
+        // stitched leather with a burnished brass trim band baked into the
+        // same texture (see CupSurfaces.rim).
+        // A bold, chunky roll (nearly double the old 0.45) — the rim sits
+        // far from the eye in the cross-section framing, so it needs real
+        // physical size to read as leather-and-brass rather than a thin
+        // dark line at the top of frame.
+        let rim = SCNTorus(ringRadius: cupInnerRadius + cupWall / 2, pipeRadius: 0.85)
         rim.ringSegmentCount = 64
+        rim.pipeSegmentCount = 32
         let rimLeather = SCNMaterial()
-        rimLeather.diffuse.contents = UIColor(red: 0.30, green: 0.18, blue: 0.10, alpha: 1)
+        rimLeather.diffuse.contents = CupSurfaces.rimLeatherDiffuse()
+        rimLeather.normal.contents = CupSurfaces.rimLeatherNormal()
+        CupSurfaces.applyFiltering(rimLeather)
         rimLeather.lightingModel = .blinn
-        rimLeather.specular.contents = UIColor(white: 0.5, alpha: 1)
-        rimLeather.shininess = 0.3
+        rimLeather.specular.contents = UIColor(white: 0.55, alpha: 1)
+        rimLeather.shininess = 0.4
         rim.materials = [rimLeather]
         let rimNode = SCNNode(geometry: rim)
         rimNode.position = SCNVector3(0, cupHeight, 0)
@@ -324,39 +377,91 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
 
         switch concept {
         case .crossSection:
-            // Key shining DOWN the cup axis so dice faces read and throw
-            // shadows deeper into the cup.
-            let key = SCNNode()
-            key.light = {
+            // The shadow-caster: a spot hung just past the mouth, aimed
+            // down into the cup — light believably falls IN through the
+            // opening, same as the room glow. Soft penumbra (spotInner <
+            // spotOuter, moderate shadowRadius) so a tumbling die's shadow
+            // reads as a real soft-edged shadow, not a hard cutout, while
+            // still being cheap enough to redraw every frame at 60fps
+            // (physics runs at 120Hz but the shadow map only needs to
+            // match the render rate). shadowMapSize is capped at 1024 —
+            // doubling it did not read as sharper on a phone screen at
+            // this distance, only cost more.
+            //
+            // Verification note: in the iOS Simulator (no physical device
+            // available this pass), no shadow is visible from EITHER this
+            // spot OR lookIn's pre-existing, untouched directional
+            // shadow-caster — confirmed by swapping this light to
+            // directional and cranking shadowColor to near-opaque black as
+            // a debug probe; still nothing. That rules out a mistake in
+            // this specific setup and points at a Simulator-side
+            // limitation with SceneKit forward-mode shadows rather than
+            // this configuration. Left in its intended, reasoned form
+            // below — needs a real-device check to confirm shadows
+            // actually paint.
+            let spot = SCNNode()
+            spot.light = {
                 let light = SCNLight()
-                light.type = .directional
-                light.intensity = 620
+                light.type = .spot
+                light.intensity = 980
+                light.color = UIColor(red: 1.0, green: 0.93, blue: 0.80, alpha: 1)
+                light.spotInnerAngle = 28
+                light.spotOuterAngle = 68
                 light.castsShadow = true
                 light.shadowMode = .forward
-                light.shadowColor = UIColor.black.withAlphaComponent(0.55)
-                light.shadowRadius = 7
+                // Not pure black: a dark warm red so shadowed felt still
+                // reads as felt, never a black hole in the cup.
+                light.shadowColor = UIColor(red: 0.10, green: 0.015, blue: 0.02, alpha: 0.62)
+                light.shadowRadius = 5.5
                 light.shadowSampleCount = 8
-                light.orthographicScale = 10
+                light.shadowMapSize = CGSize(width: 1024, height: 1024)
+                light.zNear = 0.5
+                light.zFar = 26
+                light.attenuationStartDistance = 4
+                light.attenuationEndDistance = 30
                 return light
             }()
-            key.eulerAngles = SCNVector3(-Float.pi * 0.42, 0.25, 0)
-            scene.rootNode.addChildNode(key)
+            spot.position = SCNVector3(1.4, cupHeight + 3.2, -1.2)
+            spot.look(at: SCNVector3(0, 1.5, -1.0))
+            scene.rootNode.addChildNode(spot)
 
             // Rim light: a low warm slash across the near rim/wall so the
             // cross-section edge catches the room, killing the flat band
-            // the old build had at the bottom of the frame.
+            // the old build had at the bottom of the frame. Warmed further
+            // (audit: "warmer rim light") and pulled toward the brass band.
             let rimLight = SCNNode()
             rimLight.light = {
                 let light = SCNLight()
                 light.type = .omni
-                light.intensity = 340
-                light.color = UIColor(red: 1.0, green: 0.82, blue: 0.58, alpha: 1)
+                light.intensity = 420
+                light.color = UIColor(red: 1.0, green: 0.78, blue: 0.48, alpha: 1)
                 light.attenuationStartDistance = 3
                 light.attenuationEndDistance = 22
                 return light
             }()
-            rimLight.position = SCNVector3(0, cupHeight * 0.72, cupInnerRadius + 3.5)
+            rimLight.position = SCNVector3(0, cupHeight * 0.95, cupInnerRadius + 3.0)
             scene.rootNode.addChildNode(rimLight)
+
+            // The camera sits low and looks UP at the rim, so what it
+            // actually sees is the rim's inner underside — a face none of
+            // the lights above (aimed down into the cup, or in from
+            // outside the wall) reach well. Without this it crushes to
+            // near-black regardless of how bright the leather texture is.
+            // A small warm fill tucked just inside the mouth, aimed back
+            // down at that underside, keeps the grain/stitch/brass
+            // actually legible from where the player is looking.
+            let rimFill = SCNNode()
+            rimFill.light = {
+                let light = SCNLight()
+                light.type = .omni
+                light.intensity = 360
+                light.color = UIColor(red: 1.0, green: 0.86, blue: 0.62, alpha: 1)
+                light.attenuationStartDistance = 2
+                light.attenuationEndDistance = 14
+                return light
+            }()
+            rimFill.position = SCNVector3(0, cupHeight - 1.6, -2.0)
+            scene.rootNode.addChildNode(rimFill)
 
         case .lookIn:
             // Straight-down key: the floor is the stage, dice pips must
@@ -406,14 +511,27 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
 
         switch concept {
         case .crossSection:
-            // Oblique interior: sitting inside near the closed end, offset
-            // toward the near (+Z) wall, looking up the axis at the far
-            // wall just below the rim. Near wall sweeps past the bottom of
-            // the frame; wide FOV converges the walls toward the mouth.
-            camera.fieldOfView = 82
-            cameraNode.position = SCNVector3(0, 6.2, 4.4)
-            cameraNode.look(at: SCNVector3(0, cupHeight * 0.45, -cupInnerRadius),
+            // Low and inside, near dice height, offset toward the near
+            // (+Z) wall — you're down among the dice, not hovering above
+            // them. The gaze tilts well up toward the mouth (audit: "the
+            // opening must read as an opening") so the rim sits with real
+            // margin near the top of frame, while the wide FOV still dips
+            // low enough to keep the floor — where the dice actually rest
+            // — inside the bottom of the frame.
+            camera.fieldOfView = 92
+            cameraNode.position = SCNVector3(0, 3.8, 3.2)
+            cameraNode.look(at: SCNVector3(0, 7.2, -5.6),
                             up: SCNVector3(0, 0, 1), localFront: SCNVector3(0, 0, -1))
+            scene.rootNode.addChildNode(cameraNode)
+            view?.pointOfView = cameraNode
+            // "The screen edges ARE the cup walls": dice can never tumble
+            // out of frame because their container is literally shaped to
+            // the camera's own view frustum (see below) — the round
+            // leather tube stays as the visual backdrop, this is a second,
+            // tighter invisible boundary nested inside it.
+            buildCrossSectionContainmentWalls(cameraNode: cameraNode,
+                                              verticalFOVDegrees: camera.fieldOfView)
+            return
         case .lookIn:
             // Hovering just inside the mouth, looking straight down: the
             // full floor circle with the wall wrapping every edge — no
@@ -431,6 +549,88 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
         }
         scene.rootNode.addChildNode(cameraNode)
         view?.pointOfView = cameraNode
+    }
+
+    // MARK: viewport containment (cross-section only)
+
+    /// Builds four invisible static planes anchored at the camera's own
+    /// position, each tilted to sit exactly on one edge of its view
+    /// frustum (pulled in ~12% for a hair of buffer). A die physically
+    /// cannot cross one — no matter how hard the shake — because the
+    /// walls fan out from the lens itself at the FOV's own angle: the
+    /// screen edge and the wall are the same plane. The round leather tube
+    /// is still there behind these for the visual "cup" read; this is a
+    /// second, tighter boundary nested inside it that only crossSection
+    /// needs, since it's the only concept whose camera doesn't already sit
+    /// on the cup's own axis of symmetry.
+    private func buildCrossSectionContainmentWalls(cameraNode: SCNNode, verticalFOVDegrees: CGFloat) {
+        let screenBounds = view?.window?.screen.bounds ?? UIScreen.main.bounds
+        let aspect = min(screenBounds.width, screenBounds.height) /
+                     max(screenBounds.width, screenBounds.height)
+        let halfV = verticalFOVDegrees * .pi / 180 / 2
+        let halfH = atan(tan(halfV) * aspect)
+        let margin: CGFloat = 0.88 // sit just inside the true edge
+
+        // Camera basis, read straight off its transform — safer than
+        // reasoning about Euler-angle signs by hand.
+        let t = cameraNode.transform
+        let right = CupVector.normalized(SCNVector3(t.m11, t.m12, t.m13))
+        let up = CupVector.normalized(SCNVector3(t.m21, t.m22, t.m23))
+        let forward = CupVector.normalized(SCNVector3(-t.m31, -t.m32, -t.m33))
+
+        func edgeDirection(right hSign: CGFloat, up vSign: CGFloat) -> SCNVector3 {
+            var dir = forward
+            if hSign != 0 {
+                dir = CupVector.add(dir, CupVector.scaled(right, Float(tan(halfH * margin) * hSign)))
+            }
+            if vSign != 0 {
+                dir = CupVector.add(dir, CupVector.scaled(up, Float(tan(halfV * margin) * vSign)))
+            }
+            return CupVector.normalized(dir)
+        }
+
+        let depth: CGFloat = 22
+        let span: CGFloat = 30
+        let thickness: CGFloat = 0.5
+
+        addContainmentPlane(cameraNode: cameraNode, edgeDirection: edgeDirection(right: 1, up: 0),
+                            spanAxis: up, depth: depth, thickness: thickness, span: span)
+        addContainmentPlane(cameraNode: cameraNode, edgeDirection: edgeDirection(right: -1, up: 0),
+                            spanAxis: up, depth: depth, thickness: thickness, span: span)
+        addContainmentPlane(cameraNode: cameraNode, edgeDirection: edgeDirection(right: 0, up: 1),
+                            spanAxis: right, depth: depth, thickness: thickness, span: span)
+        addContainmentPlane(cameraNode: cameraNode, edgeDirection: edgeDirection(right: 0, up: -1),
+                            spanAxis: right, depth: depth, thickness: thickness, span: span)
+    }
+
+    /// One containment plane: a thin static box whose near face passes
+    /// through the camera position and extends `depth` outward along
+    /// `edgeDirection`, spanning `span` wide along `spanAxis` (the screen
+    /// axis this particular edge runs along — camera-up for the left/right
+    /// walls, camera-right for the top/bottom ones).
+    private func addContainmentPlane(cameraNode: SCNNode, edgeDirection: SCNVector3, spanAxis: SCNVector3,
+                                      depth: CGFloat, thickness: CGFloat, span: CGFloat) {
+        let pivot = SCNNode()
+        pivot.position = cameraNode.position
+        pivot.look(at: CupVector.add(cameraNode.position, edgeDirection),
+                   up: spanAxis, localFront: SCNVector3(0, 0, -1))
+        scene.rootNode.addChildNode(pivot)
+
+        let box = SCNBox(width: thickness, height: span, length: depth, chamferRadius: 0)
+        let boxNode = SCNNode(geometry: box)
+        boxNode.position = SCNVector3(0, 0, -depth / 2)
+        boxNode.physicsBody = {
+            let body = SCNPhysicsBody(type: .static,
+                                      shape: SCNPhysicsShape(geometry: box, options: nil))
+            // Soft, leather-cup-adjacent knock — not a superball bounce —
+            // to match the tube's own wall feel.
+            body.friction = 0.5
+            body.restitution = 0.30
+            body.categoryBitMask = Dice3D.boundsCategory
+            body.collisionBitMask = Dice3D.dieCategory
+            return body
+        }()
+        pivot.addChildNode(boxNode)
     }
 
     // MARK: dice
@@ -512,29 +712,11 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
     }
 }
 
-/// Programmatic leather for the cup interior — warm brown with tonal
-/// mottling and a stitched band near the rim. Generated once, cached.
+/// Programmatic textures that aren't the felt/leather cup lining (see
+/// CupSurfaces for that) — the room glow through the mouth and the glass
+/// base's polish streak. Generated once, cached.
 enum CupTextures {
     private static var cache: [String: UIImage] = [:]
-
-    /// Interior wall texture (wraps around the tube; V runs bottom→top).
-    static func wallLeather() -> UIImage {
-        cached("wall") { context, size in
-            drawLeatherBase(context, size: size,
-                            top: UIColor(red: 0.36, green: 0.22, blue: 0.12, alpha: 1),
-                            bottom: UIColor(red: 0.16, green: 0.09, blue: 0.05, alpha: 1))
-            // Stitch band near the rim: paired dashes in waxed thread gold.
-            let stitchY = size.height * 0.10
-            context.setStrokeColor(UIColor(red: 0.78, green: 0.62, blue: 0.38,
-                                           alpha: 0.85).cgColor)
-            context.setLineWidth(size.height * 0.012)
-            context.setLineCap(.round)
-            context.setLineDash(phase: 0, lengths: [size.width * 0.022, size.width * 0.016])
-            context.move(to: CGPoint(x: 0, y: stitchY))
-            context.addLine(to: CGPoint(x: size.width, y: stitchY))
-            context.strokePath()
-        }
-    }
 
     /// The warm room-light disc visible through the cup's mouth: bright
     /// gold-white core fading to amber at the edges. Emissive — it IS the
@@ -560,29 +742,6 @@ enum CupTextures {
         }
     }
 
-    /// Cup floor texture: darker, center-worn leather.
-    static func floorLeather() -> UIImage {
-        cached("floor") { context, size in
-            drawLeatherBase(context, size: size,
-                            top: UIColor(red: 0.24, green: 0.14, blue: 0.075, alpha: 1),
-                            bottom: UIColor(red: 0.18, green: 0.105, blue: 0.055, alpha: 1))
-            // Worn pale patch in the middle where dice have lived.
-            let space = CGColorSpaceCreateDeviceRGB()
-            let worn = UIColor(red: 0.42, green: 0.28, blue: 0.16, alpha: 0.35)
-            let clear = UIColor(white: 0, alpha: 0)
-            if let gradient = CGGradient(colorsSpace: space,
-                                         colors: [worn.cgColor, clear.cgColor] as CFArray,
-                                         locations: [0, 1]) {
-                context.drawRadialGradient(
-                    gradient,
-                    startCenter: CGPoint(x: size.width / 2, y: size.height / 2), startRadius: 0,
-                    endCenter: CGPoint(x: size.width / 2, y: size.height / 2),
-                    endRadius: size.width * 0.35,
-                    options: [])
-            }
-        }
-    }
-
     /// A soft diagonal polish streak for the glass base (C3): faint white
     /// wash, brightest along the center line, feathering to nothing.
     static func glassStreak() -> UIImage {
@@ -600,30 +759,6 @@ enum CupTextures {
                     end: CGPoint(x: 0, y: size.height),
                     options: [])
             }
-        }
-    }
-
-    private static func drawLeatherBase(_ context: CGContext, size: CGSize,
-                                        top: UIColor, bottom: UIColor) {
-        let space = CGColorSpaceCreateDeviceRGB()
-        if let gradient = CGGradient(colorsSpace: space,
-                                     colors: [top.cgColor, bottom.cgColor] as CFArray,
-                                     locations: [0, 1]) {
-            context.drawLinearGradient(gradient, start: .zero,
-                                       end: CGPoint(x: 0, y: size.height), options: [])
-        }
-        // Mottling: soft random blotches, lighter and darker, seeded so the
-        // texture is stable across runs.
-        var rng = SystemRandomNumberGenerator()
-        for _ in 0..<140 {
-            let radius = CGFloat.random(in: size.width * 0.01...size.width * 0.05, using: &rng)
-            let x = CGFloat.random(in: 0...size.width, using: &rng)
-            let y = CGFloat.random(in: 0...size.height, using: &rng)
-            let lighten = Bool.random(using: &rng)
-            context.setFillColor(UIColor(white: lighten ? 1 : 0,
-                                         alpha: CGFloat.random(in: 0.015...0.05, using: &rng)).cgColor)
-            context.fillEllipse(in: CGRect(x: x - radius, y: y - radius,
-                                           width: radius * 2, height: radius * 1.4))
         }
     }
 

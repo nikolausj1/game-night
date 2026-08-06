@@ -294,6 +294,12 @@ public final class HostEngine {
             if case .illegal(let reason) = ruleset.legality(
                 of: card, hand: hand, trick: [], trump: round.trumpSuit, state: state
             ) {
+                guard round.pendingDraw == 0 else {
+                    // Hard rule: a pending draw penalty can't be played
+                    // through, unlike an ordinary soft-enforced illegal play
+                    // — `force` has no effect here.
+                    return reject(seat, reason)
+                }
                 guard force, state.rules.softEnforcement else {
                     return [.illegalAttempt(seat: seat, reason: reason)]
                 }
@@ -331,15 +337,19 @@ public final class HostEngine {
                 }
             case .drawTwo:
                 round.pendingDraw += 2
-                if state.rules.stackDrawCards {
-                    round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 1)
-                } else {
-                    // No stacking: the penalty lands immediately and the
-                    // victim is skipped.
+                if !state.rules.stackDrawCards, state.rules.autoDrawPenalty {
+                    // Fast mode, no stacking: the penalty lands immediately
+                    // and the victim is skipped.
                     let victim = advanceSeat(from: seat, direction: round.direction, steps: 1)
                     drawCards(round.pendingDraw, to: victim)
                     round.pendingDraw = 0
                     round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 2)
+                } else {
+                    // Stacking on, or manual mode (the default): the penalty
+                    // carries to the victim's turn — they stack it onward
+                    // (if the rules allow) or draw it down one card at a
+                    // time via `drawCard`.
+                    round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 1)
                 }
             case .wild:
                 state.round = round
@@ -382,14 +392,16 @@ public final class HostEngine {
         pushUndo()
         round.trumpSuit = suit
         if state.gameKind == .uno {
-            if round.pendingDraw > 0, !state.rules.stackDrawCards {
-                // Wild draw four without stacking: penalty lands now and the
-                // victim is skipped.
+            if round.pendingDraw > 0, !state.rules.stackDrawCards, state.rules.autoDrawPenalty {
+                // Fast mode, wild draw four without stacking: penalty lands
+                // now and the victim is skipped.
                 let victim = advanceSeat(from: seat, direction: round.direction, steps: 1)
                 drawCards(round.pendingDraw, to: victim)
                 round.pendingDraw = 0
                 round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 2)
             } else {
+                // Stacking on, or manual mode (the default): the penalty
+                // (if any) carries to the victim's turn.
                 round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 1)
             }
         } else {
@@ -412,13 +424,36 @@ public final class HostEngine {
                 return reject(seat, "It's not your turn")
             }
             if round.pendingDraw > 0 {
-                // Absorb the whole stacked penalty; the turn is skipped.
                 pushUndo()
-                drawCards(round.pendingDraw, to: seat)
-                round.pendingDraw = 0
-                round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 1)
+                if state.rules.autoDrawPenalty {
+                    // Fast mode: absorb the whole stacked penalty at once;
+                    // the turn is skipped.
+                    drawCards(round.pendingDraw, to: seat)
+                    round.pendingDraw = 0
+                    round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 1)
+                    state.round = round
+                    return []
+                }
+                // Manual mode (the default): this action is exactly one
+                // card, not "draw until playable" — a separate mechanic
+                // (below) that penalty draws must never fall into. The turn
+                // only passes once the counter reaches zero.
+                guard drawOneCard(to: seat) != nil else {
+                    // Deck and recyclable discard both dry — the penalty
+                    // can't be completed; drop it and pass the turn rather
+                    // than stalling forever.
+                    round.pendingDraw = 0
+                    round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 1)
+                    state.round = round
+                    return []
+                }
+                round.pendingDraw -= 1
+                let remaining = round.pendingDraw
+                if remaining == 0 {
+                    round.turnSeat = advanceSeat(from: seat, direction: round.direction, steps: 1)
+                }
                 state.round = round
-                return []
+                return [.penaltyCardDrawn(seat: seat, remaining: remaining)]
             }
             // Voluntary draw.
             guard !state.drawPile.isEmpty || state.discardPile.count > 1 else {

@@ -18,6 +18,7 @@ struct SettingsView: View {
                         cardBacksSection
                         tableSection
                         motionSection
+                        developerSection
                     }
                     .padding(.horizontal, 28)
                     .padding(.top, 20)
@@ -151,6 +152,45 @@ struct SettingsView: View {
                         .font(.system(.caption, design: .serif).italic())
                         .foregroundStyle(CardStyle.gold.opacity(0.85))
                 }
+            }
+            .padding(18)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.black.opacity(0.25)))
+        }
+    }
+
+    // MARK: developer
+
+    /// Dev-only tools that don't belong in front of real players. Today
+    /// that's just the dice-cup look — it used to be a floating toggle
+    /// inside the cup itself (audit item: move it out of the gameplay
+    /// UI). `gn.cupConcept` stays the storage key so DiceCupView and the
+    /// `-autoCupPreview` harness keep reading the same value.
+    @AppStorage("gn.cupConcept") private var cupConceptRaw = CupConcept.crossSection.rawValue
+
+    private var cupConcept: CupConcept {
+        CupConcept(rawValue: cupConceptRaw) ?? .crossSection
+    }
+
+    private var developerSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionLabel("Developer")
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Dice Cup Look")
+                    .font(.system(.body, design: .serif).weight(.semibold))
+                    .foregroundStyle(CardStyle.stockTop)
+                Picker("Dice Cup Look", selection: Binding(
+                    get: { cupConcept },
+                    set: { cupConceptRaw = $0.rawValue }
+                )) {
+                    ForEach(CupConcept.allCases, id: \.self) { concept in
+                        Text(concept.label).tag(concept)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("Not a player-facing setting — which camera/material look the phone cup uses.")
+                    .font(.caption)
+                    .foregroundStyle(CardStyle.stockTop.opacity(0.55))
             }
             .padding(18)
             .background(RoundedRectangle(cornerRadius: 16, style: .continuous)

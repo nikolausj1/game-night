@@ -21,6 +21,14 @@ struct RoleRouter: View {
         return .undecided
     }()
     @AppStorage("gn.playerName") private var playerName = ""
+    @AppStorage("gn.playerColor") private var playerColorIndex = -1
+
+    // Sim-verify hooks bypass the interactive name+color prompt entirely —
+    // -demoHand and -autoRole both need to land straight in HandRootView
+    // with no touch input for automated screenshots to work.
+    private var skipNamePrompt: Bool {
+        DemoData.wantsHandDemo || CommandLine.arguments.contains("-autoRole")
+    }
 
     var body: some View {
         // Sim-verify hook: -autoCupPreview shows the dice cup interior
@@ -38,23 +46,32 @@ struct RoleRouter: View {
         case .undecided:
             RolePickerView(
                 defaultRole: UIDevice.current.userInterfaceIdiom == .pad ? .table : .hand,
-                playerName: $playerName,
                 onPick: { role = $0 }
             )
         case .table:
             TableRootView()
         case .hand:
-            HandRootView(playerName: playerName.isEmpty ? UIDevice.current.name : playerName,
-                         onLeave: { role = .undecided })
+            // First run (name never chosen): the hand header used to show
+            // the raw device name ("iPhone 16 Pro Max") because this fell
+            // straight through to HandRootView, which starts the Multipeer
+            // session immediately on init — so by the time anyone could
+            // rename themselves, "hello" had already gone out under the
+            // device name. Gating construction of HandRootView behind the
+            // name prompt means the session simply doesn't start until
+            // Done is tapped.
+            if !skipNamePrompt, playerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                FirstLaunchNameView(playerName: $playerName, playerColorIndex: $playerColorIndex)
+            } else {
+                HandRootView(playerName: playerName.isEmpty ? UIDevice.current.name : playerName,
+                             onLeave: { role = .undecided })
+            }
         }
     }
 }
 
 struct RolePickerView: View {
     let defaultRole: RoleRouter.Role
-    @Binding var playerName: String
     let onPick: (RoleRouter.Role) -> Void
-    @FocusState private var nameFocused: Bool
 
     var body: some View {
         ZStack {
@@ -71,14 +88,6 @@ struct RolePickerView: View {
                 }
 
                 VStack(spacing: 14) {
-                    if defaultRole == .hand {
-                        TextField("Your name", text: $playerName)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 280)
-                            .focused($nameFocused)
-                            .submitLabel(.done)
-                    }
-
                     Button {
                         onPick(defaultRole)
                     } label: {
@@ -109,5 +118,115 @@ struct RolePickerView: View {
             }
             .padding()
         }
+    }
+}
+
+/// Shown once, before this phone's very first session ever opens: picks the
+/// name and a felt-friendly color other players will see at the table.
+/// Reached only when `gn.playerName` has never been set (see RoleRouter's
+/// `.hand` case) — every later launch has a name and skips straight to
+/// HandRootView, same as before this existed.
+struct FirstLaunchNameView: View {
+    @Binding var playerName: String
+    @Binding var playerColorIndex: Int
+    @FocusState private var nameFocused: Bool
+
+    /// Six felt-friendly tones: saturated enough to read as "your color"
+    /// against green felt, but none of them fight the felt's own green or
+    /// blend into it (a felt-green swatch would be invisible on the table).
+    static let palette: [Color] = [
+        Color(red: 0.60, green: 0.13, blue: 0.14),  // deep red
+        CardStyle.gold,
+        CardStyle.stockTop,                          // ivory (card stock)
+        Color(red: 0.35, green: 0.62, blue: 0.82),   // sky
+        Color(red: 0.46, green: 0.25, blue: 0.49),   // plum
+        Color(red: 0.13, green: 0.34, blue: 0.22)    // forest
+    ]
+
+    private var trimmedName: String { playerName.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        ZStack {
+            FeltBackground()
+            VStack(spacing: 28) {
+                Spacer()
+                VStack(spacing: 6) {
+                    Text("Who's playing?")
+                        .font(.system(size: 40, weight: .bold, design: .serif))
+                        .foregroundStyle(.white)
+                    Text("Pick a name and a color for the table.")
+                        .font(.system(.subheadline, design: .serif))
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+
+                VStack(spacing: 20) {
+                    TextField("Your name", text: $playerName)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 280)
+                        .multilineTextAlignment(.center)
+                        .focused($nameFocused)
+                        .submitLabel(.done)
+                        .onSubmit(commitIfReady)
+
+                    HStack(spacing: 14) {
+                        ForEach(Self.palette.indices, id: \.self) { index in
+                            colorDot(index)
+                        }
+                    }
+                }
+
+                Button(action: commitIfReady) {
+                    Text("Done")
+                        .font(.title3.weight(.semibold))
+                        .frame(maxWidth: 280)
+                        .padding(.vertical, 14)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(CardStyle.gold)
+                .foregroundStyle(CardStyle.ink)
+                .disabled(trimmedName.isEmpty)
+
+                Spacer()
+                Spacer()
+            }
+            .padding()
+        }
+        .onAppear {
+            // No color chosen yet on a truly fresh install — pre-select the
+            // first swatch so Done is never blocked on an invisible choice.
+            if playerColorIndex < 0 || playerColorIndex >= Self.palette.count {
+                playerColorIndex = 0
+            }
+            nameFocused = true
+        }
+    }
+
+    private func colorDot(_ index: Int) -> some View {
+        let isSelected = playerColorIndex == index
+        return Button {
+            Haptics.tick()
+            playerColorIndex = index
+        } label: {
+            Circle()
+                .fill(Self.palette[index])
+                .frame(width: 40, height: 40)
+                .overlay(
+                    Circle().strokeBorder(.white.opacity(isSelected ? 0.95 : 0.25),
+                                          lineWidth: isSelected ? 3 : 1)
+                )
+                .shadow(color: .black.opacity(0.3), radius: isSelected ? 5 : 2, y: 1)
+                .scaleEffect(isSelected ? 1.12 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSelected)
+    }
+
+    private func commitIfReady() {
+        guard !trimmedName.isEmpty else { return }
+        Haptics.play()
+        nameFocused = false
+        // Trim on commit only (not per-keystroke) so mid-typing whitespace
+        // doesn't fight the text field's cursor.
+        playerName = trimmedName
     }
 }

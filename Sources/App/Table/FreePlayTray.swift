@@ -41,16 +41,20 @@ import SwiftUI
 ///   the Dice button is tapped. FreePlayTray owns no dice state of its
 ///   own; the dice-platform integration (`Sources/App/Dice/`) is left
 ///   entirely to whoever wires this in.
+/// - `onToggleCoins(Bool)` — same contract as `onToggleDice`, for the coin
+///   toy (`FreePlayCoinsLayer` in `Sources/App/Dice/FreePlayCoinToy.swift`).
 ///
-/// Both closures are fire-and-forget. `selectedDeck` and `diceOn` are
+/// All closures are fire-and-forget. `selectedDeck`/`diceOn`/`coinsOn` are
 /// plain values, not bindings — the tray always renders whatever its
 /// owner's source of truth currently says, so it can never drift out of
 /// sync with what actually happened in the engine.
 struct FreePlayTray: View {
     var selectedDeck: FreePlayDeck
     var diceOn: Bool
+    var coinsOn: Bool = false
     var onDeckChange: (FreePlayDeck) -> Void
     var onToggleDice: (Bool) -> Void
+    var onToggleCoins: (Bool) -> Void = { _ in }
 
     var body: some View {
         HStack(spacing: 14) {
@@ -63,6 +67,7 @@ struct FreePlayTray: View {
                 .fill(CardStyle.gold.opacity(0.3))
                 .frame(width: 1, height: 22)
             diceToggle
+            coinsToggle
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -133,12 +138,31 @@ struct FreePlayTray: View {
         }
         .buttonStyle(.plain)
     }
+
+    // MARK: coins toggle
+
+    private var coinsToggle: some View {
+        Button {
+            Haptics.tick()
+            onToggleCoins(!coinsOn)
+        } label: {
+            Label("Coins", systemImage: coinsOn ? "circle.circle.fill" : "circle.circle")
+                .font(.system(.subheadline, design: .serif).weight(.semibold))
+                .foregroundStyle(coinsOn ? CardStyle.ink : CardStyle.gold)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(
+                    Capsule().fill(coinsOn ? CardStyle.gold : .white.opacity(0.08))
+                )
+        }
+        .buttonStyle(.plain)
+    }
 }
 
 #Preview("Free Play tray") {
     VStack(spacing: 20) {
         FreePlayTray(selectedDeck: .standard52, diceOn: false, onDeckChange: { _ in }, onToggleDice: { _ in })
-        FreePlayTray(selectedDeck: .wizard60, diceOn: true, onDeckChange: { _ in }, onToggleDice: { _ in })
+        FreePlayTray(selectedDeck: .wizard60, diceOn: true, coinsOn: true, onDeckChange: { _ in }, onToggleDice: { _ in }, onToggleCoins: { _ in })
         FreePlayTray(selectedDeck: .uno108, diceOn: false, onDeckChange: { _ in }, onToggleDice: { _ in })
     }
     .padding(40)

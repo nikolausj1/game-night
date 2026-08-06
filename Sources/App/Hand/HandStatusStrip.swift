@@ -27,14 +27,13 @@ struct HandStatusStrip: View {
                 }
             }
             Spacer()
-            if let trump = client.snapshot?.round?.trumpSuit {
-                // UNO reuses trumpSuit as the wire format for a declared
-                // color — show it as a color swatch, not a suit glyph.
-                if client.snapshot?.gameKind == .uno {
-                    UnoColorChip(color: trump.unoColor)
-                } else {
-                    TrumpChip(suit: trump)
-                }
+            // UNO's active-color clue used to live here as an unlabeled
+            // swatch nobody noticed (audit finding). It's now integrated
+            // into the turn banner itself (see HandView.TurnBanner) —
+            // right where you're deciding what to play — so this chip is
+            // trick-game trump only now, one clear place for the color cue.
+            if let trump = client.snapshot?.round?.trumpSuit, client.snapshot?.gameKind != .uno {
+                TrumpChip(suit: trump)
             }
             if let bid = myBid {
                 BidProgressChip(bid: bid, taken: myTricksWon ?? 0)
@@ -110,27 +109,6 @@ struct TrumpChip: View {
             Text(suit.symbol)
                 .font(.subheadline)
                 .foregroundStyle(suit.isRed ? Color(red: 1, green: 0.5, blue: 0.45) : .white)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(Capsule().fill(.white.opacity(0.12)))
-    }
-}
-
-/// UNO's equivalent of TrumpChip: the declared color after a wild, shown as
-/// a swatch rather than a suit glyph.
-struct UnoColorChip: View {
-    let color: UnoColor
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Text("Color")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.7))
-            Circle()
-                .fill(UnoStyle.field(for: color))
-                .frame(width: 14, height: 14)
-                .overlay(Circle().strokeBorder(.white.opacity(0.8), lineWidth: 1.5))
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)

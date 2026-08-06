@@ -39,4 +39,16 @@ enum TableGeometry {
         for byte in cardID.utf8 { hash = hash &* 33 &+ UInt64(byte) }
         return Double(hash % 1800) / 100.0 - 9.0
     }
+
+    /// The ONE size every real card on the felt renders at: the draw pile,
+    /// the trump card, the shed/discard pile, trick plays in flight, and
+    /// free-play cards — one object class, one size, so nothing looks like
+    /// a different deck sitting next to itself. Picked as the largest of
+    /// the sizes that used to vary (the old shed-pile formula), so the
+    /// draw pile grows to match rather than everything shrinking to meet
+    /// it. Rail-hand miniatures are a different object class and don't
+    /// use this.
+    static func tableCardWidth(for size: CGSize) -> CGFloat {
+        min(size.width * 0.125, 140)
+    }
 }

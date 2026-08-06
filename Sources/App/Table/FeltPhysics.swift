@@ -76,4 +76,64 @@ enum FeltPhysics {
         return Toss(entry: entry, rest: rest, restRotation: restRotation,
                     spin: spin, duration: duration)
     }
+
+    /// A thrown card landing on a neat pile: "as if you threw the card from
+    /// your hand and it lands perfectly on the discard stack" — ONE smooth
+    /// descending arc, never a fly-in-then-drop. The previous version drove
+    /// the ground track and the lift as separate `withAnimation` calls
+    /// keyed to a hand-rolled bezier (`.timingCurve(0.30, 0.0, 0.18, 1.0,
+    /// …)`) whose control points aren't x-monotonic — SwiftUI's easing
+    /// solver stalls the horizontal motion early and holds near the target
+    /// while the (correctly-timed) vertical fall keeps going, which reads
+    /// exactly as "flies in, hangs above the pile, then drops."
+    ///
+    /// The fix: the ground track uses a plain, guaranteed-monotonic
+    /// deceleration (`.easeOut`) that keeps advancing all the way to the
+    /// full animation duration — it never finishes early — while the lift
+    /// still rises and falls in two C1-continuous halves (easeOut up,
+    /// easeIn down, meeting at zero velocity at the apex, matching the
+    /// shed pile's proven "trick-slide" landing). Because both now span
+    /// the identical `duration`, they touch down on the same frame:
+    /// decelerating horizontally right up to contact, never hovering.
+    struct PileDropArc {
+        let entry: CGPoint        // normalized, just outside the felt
+        let touchdown: CGPoint    // normalized, where the arc actually lands
+        let rest: CGPoint         // normalized, touchdown + the tiny contact settle
+        let restRotation: Double  // degrees, final settle angle
+        let entryRotation: Double // degrees, spin at launch
+        let apex: CGFloat         // peak lift in points
+        let duration: Double      // the arc itself (excludes the settle)
+        /// The settle: a real card doesn't stop dead on contact — it skids
+        /// a couple points and finishes its spin as it grips the felt.
+        static let settleDuration = 0.06
+    }
+
+    /// Solve a pile-drop arc for a card entering from a seat's edge (or the
+    /// table's own edge when the seat is unknown, e.g. a deck-sourced card)
+    /// and landing on the pile at `restPoint`.
+    static func pileDropArc(cardID: String, seatAnchor: CGPoint?,
+                            restPoint: CGPoint, tableSize: CGSize) -> PileDropArc {
+        let hash = TableGeometry.jitterDegrees(cardID: cardID)
+        let anchor = seatAnchor ?? CGPoint(x: 0.5, y: 1.0)
+        let entry = CGPoint(x: 0.5 + (anchor.x - 0.5) * 1.22,
+                            y: 0.47 + (anchor.y - 0.47) * 1.22)
+        let entryPt = CGPoint(x: entry.x * tableSize.width, y: entry.y * tableSize.height)
+        let restPt = CGPoint(x: restPoint.x * tableSize.width, y: restPoint.y * tableSize.height)
+        let travel = hypot(restPt.x - entryPt.x, restPt.y - entryPt.y)
+        let duration = 0.30 + Double(travel / tableSize.width) * 0.24
+        let apex = min(96, 52 + travel * 0.10)
+
+        // The settle: a tiny 2–4pt skid past touchdown, along the same
+        // heading, so contact reads as a landing, not a teleport-stop.
+        let dx = restPt.x - entryPt.x, dy = restPt.y - entryPt.y
+        let dirLen = max(0.0001, hypot(dx, dy))
+        let settleDist: CGFloat = 3
+        let settle = CGPoint(x: dx / dirLen * settleDist / tableSize.width,
+                             y: dy / dirLen * settleDist / tableSize.height)
+        let touchdown = CGPoint(x: restPoint.x - settle.x, y: restPoint.y - settle.y)
+
+        return PileDropArc(entry: entry, touchdown: touchdown, rest: restPoint,
+                           restRotation: hash * 1.8, entryRotation: hash * 1.8 - hash * 3.0,
+                           apex: apex, duration: duration)
+    }
 }

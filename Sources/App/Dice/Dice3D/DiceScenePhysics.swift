@@ -23,10 +23,15 @@ enum DiceScenePhysics {
 
     /// An invisible static collider box. No geometry is attached to the
     /// node at all — the physics shape alone does the work, so there is
-    /// nothing to render, hide, or shadow.
+    /// nothing to render, hide, or shadow. `name` defaults to a generic
+    /// tag; the table scene overrides it to "rail-wall" so
+    /// `DiceContactThrottle` can tell a rail knock from a felt landing by
+    /// node identity alone (the cup scene doesn't care and leaves it
+    /// default).
     static func boundsNode(width: CGFloat, height: CGFloat, length: CGFloat,
-                           position: SCNVector3) -> SCNNode {
+                           position: SCNVector3, name: String = "bounds") -> SCNNode {
         let node = SCNNode()
+        node.name = name
         node.position = position
         let shape = SCNPhysicsShape(
             geometry: SCNBox(width: width, height: height, length: length, chamferRadius: 0))
@@ -46,8 +51,9 @@ enum DiceScenePhysics {
     /// dice shadows come from DieShadowNode planes (SceneKit's shadow-map
     /// recipes all proved unreliable against a transparent SCNView with an
     /// orthographic camera; tracked contact shadows always work).
-    static func physicsFloor() -> SCNNode {
+    static func physicsFloor(name: String = "floor") -> SCNNode {
         let node = SCNNode()
+        node.name = name
         let body = SCNPhysicsBody(
             type: .static,
             shape: SCNPhysicsShape(geometry: SCNBox(width: 600, height: 1, length: 600,
@@ -109,13 +115,15 @@ final class DieShadowNode: SCNNode {
         return UIGraphicsImageRenderer(size: CGSize(width: size, height: size),
                                        format: format).image { ctx in
             let space = CGColorSpaceCreateDeviceRGB()
-            let dark = UIColor(white: 0, alpha: 0.85)
-            let mid = UIColor(white: 0, alpha: 0.32)
+            let dark = UIColor(white: 0, alpha: 0.90)
+            let mid = UIColor(white: 0, alpha: 0.30)
             let clear = UIColor(white: 0, alpha: 0)
             if let gradient = CGGradient(
                 colorsSpace: space,
                 colors: [dark.cgColor, mid.cgColor, clear.cgColor] as CFArray,
-                locations: [0, 0.55, 1]) {
+                // Tighter core (0.42 vs the old 0.55) so the dark part of
+                // the pool hugs the die instead of a wide soft outline.
+                locations: [0, 0.42, 1]) {
                 ctx.cgContext.drawRadialGradient(
                     gradient,
                     startCenter: CGPoint(x: size / 2, y: size / 2), startRadius: 0,
@@ -149,12 +157,16 @@ final class DieShadowNode: SCNNode {
     func track(_ die: DieNode, floorY: Float) {
         let p = die.presentation.simdWorldPosition
         let height = max(0, p.y - floorY)
-        let spread = 1 + CGFloat(height) * 0.10
-        simdPosition = simd_float3(p.x + 0.28 + height * 0.10,
+        // Tighter than before at rest (0.82× the die instead of a full
+        // 1×) so a settled die reads as PRESSED into the felt — a real
+        // contact shadow hugs the object, it doesn't outline it — and
+        // grows/softens as the die lifts off, same as before.
+        let spread = 0.82 + CGFloat(height) * 0.11
+        simdPosition = simd_float3(p.x + 0.20 + height * 0.10,
                                    0.04,
-                                   p.z + 0.24 + height * 0.08)
+                                   p.z + 0.17 + height * 0.08)
         scale = SCNVector3(spread, spread, spread)
-        opacity = CGFloat(max(0.06, 0.60 / Double(1 + height * 0.45)))
+        opacity = CGFloat(max(0.05, 0.74 / Double(1 + height * 0.55)))
     }
 }
 
@@ -166,11 +178,11 @@ final class DiceContactThrottle {
     private var lastFire = Date.distantPast
     private let minInterval: TimeInterval
     private let minImpulse: CGFloat
-    private let onClack: (_ strength: Double) -> Void
+    private let onClack: (_ strength: Double, _ contactClass: DiceContactClass) -> Void
 
     /// `onClack` is always invoked on the main queue; strength is 0…1.
     init(minInterval: TimeInterval = 0.09, minImpulse: CGFloat = 0.012,
-         onClack: @escaping (_ strength: Double) -> Void) {
+         onClack: @escaping (_ strength: Double, _ contactClass: DiceContactClass) -> Void) {
         self.minInterval = minInterval
         self.minImpulse = minImpulse
         self.onClack = onClack
@@ -183,6 +195,23 @@ final class DiceContactThrottle {
         guard now.timeIntervalSince(lastFire) > minInterval else { return }
         lastFire = now
         let strength = min(1.0, Double(contact.collisionImpulse / (minImpulse * 14)))
-        DispatchQueue.main.async { [onClack] in onClack(strength) }
+        let contactClass = Self.classify(contact)
+        DispatchQueue.main.async { [onClack] in onClack(strength, contactClass) }
+    }
+
+    /// Which material actually hit which: both nodes named "die*" → bone-
+    /// on-bone; a die against the node named "rail-wall" → the rail; a die
+    /// against anything else (the felt floor, by construction) → felt.
+    /// Node identity is deliberately the ONLY signal here — cheap, and it
+    /// can't drift out of sync with the physics the way a velocity/height
+    /// heuristic could.
+    private static func classify(_ contact: SCNPhysicsContact) -> DiceContactClass {
+        let nameA = contact.nodeA.name ?? ""
+        let nameB = contact.nodeB.name ?? ""
+        let aIsDie = nameA.hasPrefix("die")
+        let bIsDie = nameB.hasPrefix("die")
+        if aIsDie && bIsDie { return .die }
+        let other = aIsDie ? nameB : nameA
+        return other == "rail-wall" ? .rail : .felt
     }
 }

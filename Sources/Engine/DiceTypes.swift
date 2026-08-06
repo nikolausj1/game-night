@@ -27,10 +27,21 @@ public struct DiceClientState: Codable, Sendable, Equatable {
     public var isMyTurn: Bool
     public var gameOver: Bool
     public var winnerSeat: Int?
+    /// Manual cup loading ("gn.autoCup" off, the default): whether the
+    /// dice for `mySeat` are currently loaded and ready to pour. When
+    /// `isMyTurn && !cupReady`, the phone should show "load your dice on
+    /// the table" instead of the normal shake-to-roll affordance — the
+    /// dice have to be dragged into the table's TableCupView first.
+    /// Always `true` when auto-cup is on, when it isn't `mySeat`'s turn,
+    /// or in free play (no manual-cup gating there). Defaults to `true`
+    /// on decode so an old peer's message without this key still reads as
+    /// "ready" (the pre-manual-cup behavior — nothing was ever gated).
+    public var cupReady: Bool
 
     public init(kind: DiceGameKind, mySeat: Int, seatNames: [String],
                 chips: [Int], centerPot: Int, turnSeat: Int,
-                isMyTurn: Bool, gameOver: Bool, winnerSeat: Int?) {
+                isMyTurn: Bool, gameOver: Bool, winnerSeat: Int?,
+                cupReady: Bool = true) {
         self.kind = kind
         self.mySeat = mySeat
         self.seatNames = seatNames
@@ -40,5 +51,27 @@ public struct DiceClientState: Codable, Sendable, Equatable {
         self.isMyTurn = isMyTurn
         self.gameOver = gameOver
         self.winnerSeat = winnerSeat
+        self.cupReady = cupReady
+    }
+
+    /// `cupReady` postdates the first wire format — decodeIfPresent so an
+    /// older peer's encode (or a message caught mid-rollout) still parses
+    /// instead of dropping the connection over one new field.
+    private enum CodingKeys: String, CodingKey {
+        case kind, mySeat, seatNames, chips, centerPot, turnSeat, isMyTurn, gameOver, winnerSeat, cupReady
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try container.decode(DiceGameKind.self, forKey: .kind)
+        mySeat = try container.decode(Int.self, forKey: .mySeat)
+        seatNames = try container.decode([String].self, forKey: .seatNames)
+        chips = try container.decode([Int].self, forKey: .chips)
+        centerPot = try container.decode(Int.self, forKey: .centerPot)
+        turnSeat = try container.decode(Int.self, forKey: .turnSeat)
+        isMyTurn = try container.decode(Bool.self, forKey: .isMyTurn)
+        gameOver = try container.decode(Bool.self, forKey: .gameOver)
+        winnerSeat = try container.decodeIfPresent(Int.self, forKey: .winnerSeat)
+        cupReady = try container.decodeIfPresent(Bool.self, forKey: .cupReady) ?? true
     }
 }

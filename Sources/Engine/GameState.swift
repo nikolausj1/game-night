@@ -188,6 +188,12 @@ public struct ClientSnapshot: Codable, Sendable, Equatable {
     public let handCounts: [Int: Int]
     public let drawCount: Int
     public let discardPile: [Card]
+    /// UNO manual draw-penalty mode: this seat's pending forced-draw count.
+    /// 0 when nothing is pending, or when it isn't this seat's turn — a
+    /// pending penalty only ever sits on `round.turnSeat`. Mirrors
+    /// `round.pendingDraw`, pre-filtered to "is this mine right now" so the
+    /// hand UI doesn't have to re-derive that from `round`.
+    public let myPendingDraw: Int
 
     public init(
         gameKind: GameKind,
@@ -200,7 +206,8 @@ public struct ClientSnapshot: Codable, Sendable, Equatable {
         myHand: [Card],
         handCounts: [Int: Int],
         drawCount: Int,
-        discardPile: [Card]
+        discardPile: [Card],
+        myPendingDraw: Int = 0
     ) {
         self.gameKind = gameKind
         self.rules = rules
@@ -213,6 +220,30 @@ public struct ClientSnapshot: Codable, Sendable, Equatable {
         self.handCounts = handCounts
         self.drawCount = drawCount
         self.discardPile = discardPile
+        self.myPendingDraw = myPendingDraw
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case gameKind, rules, seats, phase, round, roundHistory, mySeat, myHand
+        case handCounts, drawCount, discardPile, myPendingDraw
+    }
+
+    /// Older encodes predate `myPendingDraw` (manual draw-penalty mode);
+    /// default it to 0 on decode so saved/older-peer snapshots still parse.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        gameKind = try container.decode(GameKind.self, forKey: .gameKind)
+        rules = try container.decode(RulesConfig.self, forKey: .rules)
+        seats = try container.decode([Seat].self, forKey: .seats)
+        phase = try container.decode(Phase.self, forKey: .phase)
+        round = try container.decodeIfPresent(RoundState.self, forKey: .round)
+        roundHistory = try container.decode([CompletedRound].self, forKey: .roundHistory)
+        mySeat = try container.decode(Int.self, forKey: .mySeat)
+        myHand = try container.decode([Card].self, forKey: .myHand)
+        handCounts = try container.decode([Int: Int].self, forKey: .handCounts)
+        drawCount = try container.decode(Int.self, forKey: .drawCount)
+        discardPile = try container.decode([Card].self, forKey: .discardPile)
+        myPendingDraw = try container.decodeIfPresent(Int.self, forKey: .myPendingDraw) ?? 0
     }
 }
 
@@ -232,7 +263,8 @@ public extension GameState {
             myHand: hands[seat] ?? [],
             handCounts: hands.mapValues { $0.count },
             drawCount: drawPile.count,
-            discardPile: discardPile
+            discardPile: discardPile,
+            myPendingDraw: (round?.turnSeat == seat) ? (round?.pendingDraw ?? 0) : 0
         )
     }
 }

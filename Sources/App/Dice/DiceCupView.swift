@@ -16,8 +16,13 @@ import AVFoundation
 struct DiceCupView: View {
     @Bindable var client: GameClientController
     @State private var model = DiceCupModel()
-    /// Which of the three cup looks this phone uses (see CupConcept).
+    /// Which of the three cup looks this phone uses (see CupConcept). A dev
+    /// tool now — moved to Settings' Developer section so real players
+    /// never see the toggle; cross-section is the shipped default.
     @AppStorage("gn.cupConcept") private var cupConceptRaw = CupConcept.crossSection.rawValue
+    /// First-use hint: shown until this player's first successful pour,
+    /// ever (persists across turns and app launches).
+    @AppStorage("gn.cupHasEverPoured") private var hasEverPoured = false
 
     private var cupConcept: CupConcept {
         CupConcept(rawValue: cupConceptRaw) ?? .crossSection
@@ -29,7 +34,14 @@ struct DiceCupView: View {
                 if state.gameOver {
                     gameOverView(state)
                 } else if state.isMyTurn {
-                    cupStage(state)
+                    if state.cupReady {
+                        cupStage(state)
+                    } else {
+                        // Manual cup mode: the table wants this player's
+                        // dice dragged into the rail cup before the phone
+                        // can shake-and-pour.
+                        loadDiceView(state)
+                    }
                 } else {
                     standingsView(state)
                 }
@@ -37,6 +49,9 @@ struct DiceCupView: View {
         }
         .onAppear {
             model.onPour = { [weak client] intensity in
+                // A successful pour — shake, then tip forward — retires
+                // the first-use hint for good.
+                hasEverPoured = true
                 guard let client else { return }
                 // Same self-healing contract as card actions: a failed
                 // hand-off means the session is wedged — start rebuilding
@@ -64,6 +79,28 @@ struct DiceCupView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
             model.pourFromSwipe()
         }
+    }
+
+    // MARK: - Your turn, cup not loaded yet (manual cup mode)
+
+    /// The table is waiting for this player's dice to be dragged into the
+    /// rail cup. The phone can't do the loading — it just says where the
+    /// action is, in the same voice as the lobby's "watch the iPad".
+    private func loadDiceView(_ state: DiceClientState) -> some View {
+        VStack(spacing: 14) {
+            Text("Your roll!")
+                .font(.system(.title, design: .serif).weight(.bold))
+                .foregroundStyle(CardStyle.gold)
+            Text("Load your dice into the cup on the table")
+                .font(.system(.title3, design: .serif).italic())
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.white.opacity(0.85))
+            Text("Drag each die into the cup at your seat — then shake your phone.")
+                .font(.footnote)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.white.opacity(0.55))
+        }
+        .padding(.horizontal, 32)
     }
 
     // MARK: - Your turn: the cup
@@ -99,9 +136,20 @@ struct DiceCupView: View {
                         Text(rollingDiceLabel(state))
                             .font(.subheadline)
                             .foregroundStyle(.white.opacity(0.75))
+                        // First-use hint, in the app's established italic
+                        // ghost-hint voice — retired for good after this
+                        // player's first successful pour.
+                        if !hasEverPoured {
+                            Text("Shake, then tip forward to pour")
+                                .font(.system(.subheadline, design: .serif).italic())
+                                .foregroundStyle(CardStyle.gold.opacity(0.9))
+                                .padding(.top, 2)
+                                .transition(.opacity)
+                        }
                     }
                     .padding(.top, 8)
                     .shadow(color: .black.opacity(0.8), radius: 6)
+                    .animation(.easeOut(duration: 0.25), value: hasEverPoured)
                     Spacer()
                     VStack(spacing: 10) {
                         energyMeter
@@ -114,20 +162,6 @@ struct DiceCupView: View {
                     .padding(.bottom, 14)
                 }
                 .allowsHitTesting(false)
-
-                // The cup-look toggle: small, labeled, top-right. Cycles
-                // Cross-section → Look-in → Glass bottom, persisted.
-                VStack {
-                    HStack {
-                        Spacer()
-                        CupConceptToggle(concept: cupConcept) {
-                            cupConceptRaw = cupConcept.next.rawValue
-                        }
-                    }
-                    Spacer()
-                }
-                .padding(.top, 10)
-                .padding(.trailing, 14)
             }
         }
     }
@@ -271,8 +305,12 @@ struct DiceCupView: View {
     }
 }
 
-/// The small labeled pill that cycles the three cup looks. Kept dim so it
-/// reads as a setting, not part of the game.
+/// The small labeled pill that cycles the three cup looks. Dev tool only
+/// now (audit item): real players never see this — it's gone from the
+/// gameplay UI, replaced by a proper picker in Settings' Developer
+/// section. Kept here, unchanged, because DiceCupPreviewHarness (the
+/// `-autoCupPreview` sim-verify hook) still uses it to cycle looks for
+/// screenshotting.
 struct CupConceptToggle: View {
     let concept: CupConcept
     let onCycle: () -> Void

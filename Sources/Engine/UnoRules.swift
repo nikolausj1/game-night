@@ -6,10 +6,14 @@ import Foundation
 /// `round.trumpSuit` through the fixed Suit↔UnoColor mapping (red↔hearts,
 /// yellow↔diamonds, green↔clubs, blue↔spades).
 ///
-/// While a draw penalty is pending (`round.pendingDraw > 0`, stacking on):
-/// only a draw-two may be stacked on a draw-two chain, and a wild-draw-four
-/// may be stacked on either chain. Everything else is illegal — the player
-/// draws to absorb instead.
+/// While a draw penalty is pending (`round.pendingDraw > 0`) every other
+/// play is illegal — the player must draw instead (one card at a time in
+/// manual mode, `rules.autoDrawPenalty == false`, the default). If
+/// `stackDrawCards` is also on, a draw-two may be stacked on a draw-two
+/// chain, and a wild-draw-four may be stacked on either chain, passing the
+/// accumulated penalty on instead of absorbing it. This is a hard rule: it
+/// is checked before soft-enforcement/`force`, so a pending penalty can
+/// never be played through.
 public struct UnoRules: GameRules {
     public init() {}
 
@@ -22,10 +26,15 @@ public struct UnoRules: GameRules {
         }
 
         let pending = state.round?.pendingDraw ?? 0
-        if pending > 0, state.rules.stackDrawCards {
-            if symbol == .wildDrawFour { return .legal }
-            if symbol == .drawTwo, topSymbol == .drawTwo { return .legal }
-            return .illegal(reason: "Stack a draw card or draw \(pending)")
+        if pending > 0 {
+            if state.rules.stackDrawCards {
+                if symbol == .wildDrawFour { return .legal }
+                if symbol == .drawTwo, topSymbol == .drawTwo { return .legal }
+                return .illegal(reason: "Stack a draw card or draw \(pending)")
+            }
+            // Stacking off: nothing answers a pending penalty, not even a
+            // color/symbol match — draw is the only legal action.
+            return .illegal(reason: "Draw \(pending) first")
         }
 
         if symbol == .wild || symbol == .wildDrawFour { return .legal }

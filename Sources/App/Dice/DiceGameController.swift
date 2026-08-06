@@ -103,6 +103,12 @@ final class DiceGameController {
     private(set) var pendingTransfers: [PendingTransfer] = []
     /// True from a roll until it resolves — the dice are still tumbling.
     private(set) var rollInFlight = false
+    /// Manual cup loading (`gn.autoCup` off, the default): how many of the
+    /// current roller's required dice have been dragged into their
+    /// TableCupView so far this turn. Reset to 0 every time the turn
+    /// changes (advanceTurn/restart) so a stale count from the PREVIOUS
+    /// roller can never carry over and skip the next one's cup.
+    private(set) var loadedDiceCount = 0
     /// Monotonic bump on every mutation (same redraw-guarantee pattern as
     /// GameHostController.stateVersion).
     private(set) var stateVersion = 0
@@ -176,6 +182,15 @@ final class DiceGameController {
                   pendingTransfers.count, turnSeat)
             return
         }
+        guard canRoll(seat: seat) else {
+            // Manual cup mode and this human hasn't loaded every die yet —
+            // a phone shake or a plate tap here is just ignored, same as
+            // any other out-of-turn request. TableCupView is the only
+            // path that unblocks this (loadDie), never a direct override.
+            NSLog("Dice: roll(from: %d) REFUSED — cup not loaded (%d/%d)",
+                  seat, loadedDiceCount, min(chips[seat], 3))
+            return
+        }
         let count = min(chips[seat], 3)
         guard count > 0 else { return } // turn skipping should prevent this
 
@@ -206,6 +221,34 @@ final class DiceGameController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { [weak self] in
             self?.resolve(rollID: id, faces: faces)
         }
+    }
+
+    /// Whether `seat` may currently roll: always true for a bot (no hands
+    /// to load a cup with) and whenever auto-cup is on; for a manual-mode
+    /// human, true only once every required die has been dragged into
+    /// their TableCupView. Read live off UserDefaults rather than a cached
+    /// flag so flipping the setting mid-game takes effect on the very
+    /// next roll attempt, no restart needed.
+    func canRoll(seat: Int) -> Bool {
+        guard seats.indices.contains(seat) else { return false }
+        if seats[seat].isBot || UserDefaults.standard.bool(forKey: "gn.autoCup") { return true }
+        return loadedDiceCount >= min(chips[seat], 3)
+    }
+
+    /// TableCupView calls this once per die dragged into the cup mouth.
+    /// Ignored once the roller already has enough dice loaded (extra
+    /// drops are a no-op, not an over-fill), or if it isn't actually
+    /// their turn (a drag that finishes just as the turn moves on).
+    /// Every load bumps `stateVersion` so the table HUD and the phone's
+    /// `cupReady` flag (via broadcast) both update immediately.
+    func loadDie(forSeat seat: Int) {
+        guard !gameOver, !rollInFlight, pendingTransfers.isEmpty, seat == turnSeat,
+              seats.indices.contains(seat), !seats[seat].isBot,
+              loadedDiceCount < min(chips[seat], 3) else { return }
+        loadedDiceCount += 1
+        TableSFX.shared.playDiceContact(.die, strength: 0.35)
+        stateVersion += 1
+        broadcast()
     }
 
     /// Watchdog fallback only — one die: 3 dot sides, 1 left, 1 right,
@@ -314,6 +357,9 @@ final class DiceGameController {
     private func finishTurn(roller: Int) {
         checkGameOver(roller: roller)
         if !gameOver { advanceTurn() }
+        // New roller, empty cup — manual mode starts them from scratch
+        // every turn, never carrying over the previous roller's progress.
+        loadedDiceCount = 0
         stateVersion += 1
         broadcast()
         scheduleBotIfNeeded()
@@ -376,6 +422,7 @@ final class DiceGameController {
         lastTransfers = []
         pendingTransfers = []
         pendingGeneration += 1
+        loadedDiceCount = 0
         stateVersion += 1
         TableSFX.shared.play(.shuffle)
         broadcast()
@@ -399,7 +446,8 @@ final class DiceGameController {
             chips: chips, centerPot: centerPot, turnSeat: turnSeat,
             isMyTurn: !gameOver && !rollInFlight && pendingTransfers.isEmpty
                 && turnSeat == seatID,
-            gameOver: gameOver, winnerSeat: winnerSeat)
+            gameOver: gameOver, winnerSeat: winnerSeat,
+            cupReady: canRoll(seat: seatID))
     }
 
     /// Re-push the current state to one device (reconnect / re-hello).

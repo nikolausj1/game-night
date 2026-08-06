@@ -177,9 +177,9 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         scene.rootNode.addChildNode(cameraNode)
         view.pointOfView = cameraNode
 
-        contactThrottle = DiceContactThrottle { strength in
+        contactThrottle = DiceContactThrottle { strength, contactClass in
             guard strength > 0.08 else { return }
-            TableSFX.shared.play(.tableKnock)
+            TableSFX.shared.playDiceContact(contactClass, strength: strength)
         }
     }
 
@@ -225,9 +225,11 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
             (thickness, worldHeight + 8, halfW + thickness / 2, 0, 0),
         ]
         for (w, l, x, z, _) in specs {
+            // Named so DiceContactThrottle can tell a rail knock from a
+            // felt landing by node identity alone.
             let wall = DiceScenePhysics.boundsNode(
                 width: w, height: height, length: l,
-                position: SCNVector3(x, height / 2, z))
+                position: SCNVector3(x, height / 2, z), name: "rail-wall")
             scene.rootNode.addChildNode(wall)
             wallNodes.append(wall)
         }
@@ -391,9 +393,17 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
                         body.angularDamping = 0.30
                         body.rollingFriction = 0.22
                     default:
+                        // Tier 2 is "this die is done" — the settle tick
+                        // hooks right off that existing detection instead
+                        // of adding a second one. Ties only ever escalate
+                        // once per die per roll, so this fires exactly
+                        // once as each die individually comes to rest —
+                        // real dice don't all stop on the same frame, and
+                        // now neither does the sound.
                         body.damping = 0.60
                         body.angularDamping = 0.75
                         body.rollingFriction = 0.80
+                        TableSFX.shared.playDiceContact(.settle, strength: 0.3)
                     }
                 }
             }

@@ -27,20 +27,46 @@ struct CardFaceView: View {
 
     // MARK: stock
 
+    /// Deterministic per-card "wear" in 0..<1000, from the card's own stable
+    /// `id` — same djb2-style hash `TableGeometry.jitterDegrees` uses for
+    /// per-card table jitter, kept local here so card-stock rendering stays
+    /// self-contained. One hash of a short string per render, never
+    /// per-frame randomness, so it costs nothing and never flickers.
+    private func wearSeed(_ id: String) -> Int {
+        var hash: UInt64 = 5381
+        for byte in id.utf8 { hash = hash &* 33 &+ UInt64(byte) }
+        return Int(hash % 1000)
+    }
+
     private func cardStock(width w: CGFloat) -> some View {
         let radius = CardStyle.cornerRadius(width: w)
-        return RoundedRectangle(cornerRadius: radius, style: .continuous)
+        // A few degrees of ivory-tone variation and barely-there corner/edge
+        // softening, so a fan of cards reads as individual well-handled
+        // stock rather than identical clones — aged, not dirty: warmth only
+        // ever adds a whisper of sepia, never grays a card down.
+        let wear = wearSeed(card.id)
+        let warmth = Double(wear % 45) / 1000.0                 // 0...0.044
+        let edgeSoften = CGFloat(wear % 7) / 7.0 * 0.6           // 0...0.6pt
+        let radiusJitter: CGFloat = 1 + (CGFloat(wear % 5) - 2) / 260.0 // ~0.992...1.008
+        let cornerRadius = radius * radiusJitter
+
+        return RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             .fill(LinearGradient(colors: [CardStyle.stockTop, CardStyle.stockBottom],
                                  startPoint: .topLeading, endPoint: .bottomTrailing))
             .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color(red: 0.62, green: 0.47, blue: 0.26).opacity(warmth))
+            )
+            .overlay(
                 // Printed inner frame — the hallmark of real card stock.
-                RoundedRectangle(cornerRadius: radius * 0.62, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius * 0.62, style: .continuous)
                     .strokeBorder(CardStyle.ink.opacity(0.10), lineWidth: max(0.5, w * 0.006))
                     .padding(w * 0.045)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .strokeBorder(.black.opacity(0.08), lineWidth: 0.5)
+                    .blur(radius: edgeSoften)
             )
     }
 

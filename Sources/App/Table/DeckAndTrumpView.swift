@@ -5,8 +5,15 @@ import SwiftUI
 /// beside the pile.
 struct DeckAndTrumpView: View {
     let state: GameState
+    /// The felt's full size — used only to size the deck/trump to the
+    /// SAME `TableGeometry.tableCardWidth` every other table card uses
+    /// (deck, shed pile, trick plays, free-play cards: one object class,
+    /// one size). The draw pile grows to match rather than everything
+    /// shrinking to meet it.
+    let tableSize: CGSize
 
     private var deckCount: Int { state.drawPile.count }
+    private var cardWidth: CGFloat { TableGeometry.tableCardWidth(for: tableSize) }
 
     // MARK: - Trump reveal (3D flip)
 
@@ -65,7 +72,7 @@ struct DeckAndTrumpView: View {
 
     private var deckStack: some View {
         let isFreePlay = state.gameKind == .freePlay
-        let width: CGFloat = isFreePlay ? 116 : 96
+        let width: CGFloat = cardWidth
         let layers = min(isFreePlay ? 5 : 3, max(deckCount, 1))
         return ZStack {
             // Buried cards show only their paper EDGES — plain stock, no
@@ -115,7 +122,10 @@ struct DeckAndTrumpView: View {
                             .background(Capsule().fill(.black.opacity(0.4)))
                     }
                 }
-                .offset(y: isFreePlay ? 92 : 62)
+                // Scales with the card width so the count/hint labels
+                // clear the bottom edge of the (now-uniform-sized) stack
+                // the same way regardless of how big `width` ends up.
+                .offset(y: width * (isFreePlay ? 0.79 : 0.65))
             }
         }
         .opacity(deckCount == 0 ? 0.25 : 1)
@@ -146,7 +156,7 @@ struct DeckAndTrumpView: View {
     private func trumpCard(_ trump: Card) -> some View {
         VStack(spacing: 8) {
             CardView(card: trump, faceUp: trumpFaceUp)
-                .frame(width: 96)
+                .frame(width: cardWidth)
                 // A real flip along the card's own long axis: swept in two
                 // phases by animateTrumpReveal(), content swapped at the
                 // edge-on (90°) midpoint — mirrors TableGameView.flipCard.

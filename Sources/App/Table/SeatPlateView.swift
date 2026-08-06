@@ -32,11 +32,7 @@ struct SeatPlateView: View {
                     .font(.system(.headline, design: .serif).weight(.bold))
                     .foregroundStyle(CardStyle.stockTop)
                 if state.round?.dealerSeat == seat.id {
-                    Text("D")
-                        .font(.caption2.weight(.black))
-                        .foregroundStyle(CardStyle.ink)
-                        .frame(width: 18, height: 18)
-                        .background(Circle().fill(CardStyle.gold))
+                    DealerBadge()
                 }
                 if !seat.isConnected {
                     Image(systemName: "wifi.slash")
@@ -83,6 +79,44 @@ struct SeatPlateView: View {
                 .shadow(color: isTheirTurn ? color.opacity(0.65) : .clear, radius: 10)
         )
         .animation(.easeInOut(duration: 0.3), value: isTheirTurn)
+    }
+
+    /// A small brass dealer button: the same specular/emboss language as the
+    /// app's other brass accents — a radial gold-to-bronze fill lit from the
+    /// upper-left, a blurred dark ring clipped to the disc's own interior so
+    /// the rim reads recessed (stamped, not stickered on), and a thin dark
+    /// keyline. Replaces the old flat gold-circle-plus-letter "D".
+    private struct DealerBadge: View {
+        var body: some View {
+            Circle()
+                .fill(
+                    RadialGradient(colors: [
+                        Color(red: 0.99, green: 0.92, blue: 0.72),
+                        CardStyle.gold,
+                        Color(red: 0.52, green: 0.39, blue: 0.19)
+                    ], center: UnitPoint(x: 0.35, y: 0.28), startRadius: 0, endRadius: 13)
+                )
+                .overlay(
+                    // Inner shadow: a dark ring blurred and clipped to the
+                    // disc's own bounds — reads as a recessed rim rather
+                    // than a flat outline sitting on top.
+                    Circle()
+                        .stroke(Color.black.opacity(0.5), lineWidth: 3)
+                        .blur(radius: 1.5)
+                        .clipShape(Circle())
+                )
+                .overlay(Circle().strokeBorder(.black.opacity(0.4), lineWidth: 1))
+                .overlay(
+                    Text("D")
+                        .font(.system(size: 11, weight: .black, design: .serif))
+                        .foregroundStyle(CardStyle.ink)
+                        // A hairline light catch under the glyph is what
+                        // sells "embossed into the metal" at this size.
+                        .shadow(color: .white.opacity(0.35), radius: 0, x: 0, y: 0.7)
+                )
+                .frame(width: 18, height: 18)
+                .shadow(color: .black.opacity(0.45), radius: 2, y: 1.5)
+        }
     }
 
     /// Bid shown as empty chip outlines that fill as tricks come in.

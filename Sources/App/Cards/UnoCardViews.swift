@@ -35,13 +35,40 @@ enum UnoStyle {
     static let allFour: [Color] = [red, yellow, green, blue]
 }
 
+// MARK: - Active color (discard-top glow)
+
+/// Set around the discard pile's top card only, when it's showing an UNO
+/// wild/wild-draw-four face, to the color that was called. `nil` (the
+/// default) renders every wild face exactly as before — a plain wild in a
+/// hand fan, or the table's own discard top before a color is picked, never
+/// glows. See `UnoCardFaceView`'s wild/wild-draw-four glyphs for the effect.
+private struct UnoActiveColorKey: EnvironmentKey {
+    static let defaultValue: UnoColor? = nil
+}
+
+extension EnvironmentValues {
+    var unoActiveColor: UnoColor? {
+        get { self[UnoActiveColorKey.self] }
+        set { self[UnoActiveColorKey.self] = newValue }
+    }
+}
+
 // MARK: - Face
 
 struct UnoCardFaceView: View {
     let color: UnoColor?
     let symbol: UnoSymbol
 
+    /// Only set by the discard pile's own top-card render — see
+    /// `unoActiveColor` above.
+    @Environment(\.unoActiveColor) private var activeColor
+    /// Drives the called-color glow's slow breathe. Only ever animated when
+    /// this face is actually a wild sitting on top with a color called, so
+    /// idle hand cards and buried discards never pay for a repeating timer.
+    @State private var glowPulse = false
+
     private var fieldColor: Color { UnoStyle.field(for: color) }
+    private var isWildFace: Bool { symbol == .wild || symbol == .wildDrawFour }
 
     var body: some View {
         GeometryReader { geo in
@@ -62,6 +89,12 @@ struct UnoCardFaceView: View {
             }
         }
         .aspectRatio(CardStyle.aspectRatio, contentMode: .fit)
+        .onAppear {
+            guard isWildFace, activeColor != nil else { return }
+            withAnimation(.easeInOut(duration: 1.3).repeatForever(autoreverses: true)) {
+                glowPulse = true
+            }
+        }
     }
 
     // MARK: center art
@@ -82,14 +115,26 @@ struct UnoCardFaceView: View {
         let ellipseW = w * 0.98
         let ellipseH = w * 0.62
         if case .wild = symbol {
-            WildWheel()
-                .frame(width: ellipseW, height: ellipseH)
-                .overlay(
+            ZStack {
+                // The called-color halo: a soft blurred gold ellipse sitting
+                // BEHIND the wheel, outside its clip shape, so it reads as
+                // light bleeding out from under the card art rather than a
+                // hard-edged ring trapped inside the ellipse.
+                if activeColor != nil {
                     Ellipse()
-                        .stroke(.white, lineWidth: max(1.5, w * 0.028))
-                        .frame(width: ellipseW, height: ellipseH)
-                )
-                .rotationEffect(.degrees(-28))
+                        .fill(CardStyle.gold.opacity(glowPulse ? 0.55 : 0.22))
+                        .frame(width: ellipseW * 1.1, height: ellipseH * 1.1)
+                        .blur(radius: w * 0.045)
+                }
+                WildWheel(activeColor: activeColor)
+                    .frame(width: ellipseW, height: ellipseH)
+                    .overlay(
+                        Ellipse()
+                            .stroke(.white, lineWidth: max(1.5, w * 0.028))
+                            .frame(width: ellipseW, height: ellipseH)
+                    )
+            }
+            .rotationEffect(.degrees(-28))
         } else {
             Ellipse()
                 .stroke(.white, style: StrokeStyle(lineWidth: max(2, w * 0.045)))
@@ -146,23 +191,40 @@ struct UnoCardFaceView: View {
         let outline = max(1, cardW * 0.09)
         // Back-to-front z-order matches the reference: green sits furthest
         // back, yellow tumbles out in front, bottom-left.
-        let layout: [(color: Color, dx: CGFloat, dy: CGFloat, angle: Double)] = [
-            (UnoStyle.green, 0.85, -0.85, 12),
-            (UnoStyle.blue, 0.30, -0.05, 6),
-            (UnoStyle.red, -0.30, 0.10, -6),
-            (UnoStyle.yellow, -0.85, 0.55, -10)
+        var layout: [(color: Color, uno: UnoColor, dx: CGFloat, dy: CGFloat, angle: Double)] = [
+            (UnoStyle.green, .green, 0.85, -0.85, 12),
+            (UnoStyle.blue, .blue, 0.30, -0.05, 6),
+            (UnoStyle.red, .red, -0.30, 0.10, -6),
+            (UnoStyle.yellow, .yellow, -0.85, 0.55, -10)
         ]
+        // The called color jumps to the end of the array — last drawn in
+        // the ForEach below is topmost in the ZStack — so it tumbles out on
+        // top of the other three exactly like a card that was just chosen.
+        if let activeColor, let called = layout.firstIndex(where: { $0.uno == activeColor }) {
+            layout.append(layout.remove(at: called))
+        }
         return ZStack {
             ForEach(Array(layout.enumerated()), id: \.offset) { _, spec in
+                let isCalled = activeColor != nil && spec.uno == activeColor
                 RoundedRectangle(cornerRadius: cardW * 0.16, style: .continuous)
                     .fill(spec.color)
                     .overlay(
                         RoundedRectangle(cornerRadius: cardW * 0.16, style: .continuous)
                             .strokeBorder(.black, lineWidth: outline)
                     )
+                    .overlay(
+                        // A thin gold ring on the called panel itself, on
+                        // top of the black print outline.
+                        RoundedRectangle(cornerRadius: cardW * 0.16, style: .continuous)
+                            .strokeBorder(CardStyle.gold, lineWidth: isCalled ? outline * 0.55 : 0)
+                    )
                     .frame(width: cardW, height: cardH)
                     .rotationEffect(.degrees(spec.angle))
                     .offset(x: spec.dx * w * 0.16, y: spec.dy * w * 0.16)
+                    // Soft gold-tinged halo, pulsing gently — tasteful, not
+                    // a strobe. Only the called panel casts it.
+                    .shadow(color: isCalled ? CardStyle.gold.opacity(glowPulse ? 0.85 : 0.35) : .clear,
+                            radius: isCalled ? cardW * (glowPulse ? 0.42 : 0.26) : 0)
             }
         }
     }
@@ -259,14 +321,32 @@ private struct PieSlice: Shape {
 }
 
 private struct WildWheel: View {
+    /// The called color, when this wheel is the discard top and a color's
+    /// been picked — traces its quadrant in gold on top of the print.
+    var activeColor: UnoColor? = nil
+
     var body: some View {
         ZStack {
             PieSlice(startAngle: .degrees(180), endAngle: .degrees(270)).fill(UnoStyle.red)     // top-left
             PieSlice(startAngle: .degrees(270), endAngle: .degrees(360)).fill(UnoStyle.blue)     // top-right
             PieSlice(startAngle: .degrees(90), endAngle: .degrees(180)).fill(UnoStyle.yellow)    // bottom-left
             PieSlice(startAngle: .degrees(0), endAngle: .degrees(90)).fill(UnoStyle.green)       // bottom-right
+            if let activeColor {
+                let angles = Self.quadrant(for: activeColor)
+                PieSlice(startAngle: angles.0, endAngle: angles.1)
+                    .stroke(CardStyle.gold, lineWidth: 2)
+            }
         }
         .clipShape(Ellipse())
+    }
+
+    private static func quadrant(for color: UnoColor) -> (Angle, Angle) {
+        switch color {
+        case .red: return (.degrees(180), .degrees(270))
+        case .blue: return (.degrees(270), .degrees(360))
+        case .yellow: return (.degrees(90), .degrees(180))
+        case .green: return (.degrees(0), .degrees(90))
+        }
     }
 }
 
@@ -313,32 +393,76 @@ struct SkipGlyph: View {
     }
 }
 
-/// An L-shaped bent arrow with a triangular head — two of these, rotated
-/// 180° from one another, approximate UNO's chasing-arrows reverse glyph.
-private struct BentArrow: Shape {
+/// One arrow of UNO's chasing-arrows reverse glyph: a thick curved shaft
+/// swept along an ellipse (so it fills whatever aspect frame the caller
+/// hands it — square-ish center art or a squat corner index) ending in a
+/// flared triangular head. Two of these, point-symmetric through the
+/// center, chase each other around — the real card's reverse icon is not a
+/// blocky right-angle bend, it's a soft hook, and this traces one directly.
+///
+/// Everything is built on the unit circle (radius 1, centered at the
+/// origin) and mapped into `rect` by scaling x by `rect.width/2` and y by
+/// `rect.height/2` independently — a circle squashed into an ellipse — so
+/// the same angle math produces a correctly-proportioned hook at any aspect.
+private struct ReverseArrow: Shape {
+    /// Sweep, in radians, on the unit circle. `endAngle` is where the
+    /// arrowhead sits; `startAngle` is the shaft's plain cut tail.
+    let startAngle: Double
+    let endAngle: Double
+
     func path(in rect: CGRect) -> Path {
-        let w = rect.width, h = rect.height
-        let thickness = w * 0.30
+        let a = rect.width / 2
+        let b = rect.height / 2
+        let cx = rect.midX, cy = rect.midY
+
+        let outer = 0.98
+        let inner = 0.46
+        let thickness = outer - inner
+        let headLength = thickness * 1.55   // tip's reach beyond the shaft's mid-radius
+        let flare = thickness * 0.34        // head base bulge past the shaft's half-width
+        let samples = 22
+
+        func screen(_ x: Double, _ y: Double) -> CGPoint {
+            CGPoint(x: cx + x * a, y: cy + y * b)
+        }
+        func unit(_ radius: Double, _ theta: Double) -> (Double, Double) {
+            (cos(theta) * radius, sin(theta) * radius)
+        }
+
+        var points: [CGPoint] = []
+        // Outer edge of the shaft, tail → head.
+        for i in 0...samples {
+            let t = startAngle + (endAngle - startAngle) * Double(i) / Double(samples)
+            let (x, y) = unit(outer, t)
+            points.append(screen(x, y))
+        }
+        // Flared triangular head, built from the tangent/radial directions
+        // at the shaft's leading edge.
+        let tangent = (x: -sin(endAngle), y: cos(endAngle))
+        let radial = (x: cos(endAngle), y: sin(endAngle))
+        let (mx, my) = unit((outer + inner) / 2, endAngle)
+        let halfSpan = thickness / 2 + flare
+        points.append(screen(mx + radial.x * halfSpan, my + radial.y * halfSpan))
+        points.append(screen(mx + tangent.x * headLength, my + tangent.y * headLength))
+        points.append(screen(mx - radial.x * halfSpan, my - radial.y * halfSpan))
+        // Inner edge of the shaft, head → tail, closing the ribbon.
+        for i in stride(from: samples, through: 0, by: -1) {
+            let t = startAngle + (endAngle - startAngle) * Double(i) / Double(samples)
+            let (x, y) = unit(inner, t)
+            points.append(screen(x, y))
+        }
+
         var p = Path()
-        p.addRoundedRect(in: CGRect(x: 0, y: 0, width: w * 0.80, height: thickness),
-                          cornerSize: CGSize(width: thickness / 2, height: thickness / 2))
-        p.addRoundedRect(in: CGRect(x: w * 0.80 - thickness, y: 0, width: thickness, height: h * 0.78),
-                          cornerSize: CGSize(width: thickness / 2, height: thickness / 2))
-        var head = Path()
-        let hx = w * 0.80 - thickness / 2
-        let hy = h * 0.78
-        head.move(to: CGPoint(x: hx - thickness * 1.15, y: hy - thickness * 0.1))
-        head.addLine(to: CGPoint(x: hx + thickness * 1.15, y: hy - thickness * 0.1))
-        head.addLine(to: CGPoint(x: hx, y: h))
-        head.closeSubpath()
-        p.addPath(head)
+        p.addLines(points)
+        p.closeSubpath()
         return p
     }
 }
 
 /// Same three-pass treatment as `SkipGlyph`: black base shadow, black
-/// outline, white face — built from `BentArrow`'s solid silhouette so the
-/// outline is a true traced stroke rather than an oversized duplicate.
+/// outline, white face — built from `ReverseArrowPair`'s solid silhouette
+/// so the outline is a true traced stroke rather than an oversized
+/// duplicate.
 struct ReverseGlyph: View {
     var outlineWidth: CGFloat
     var baseOffset: CGFloat
@@ -357,28 +481,17 @@ struct ReverseGlyph: View {
 }
 
 /// Both arrows as a single Shape so `.stroke`/`.fill` apply uniformly to
-/// the whole glyph, matching whatever frame the caller assigns.
+/// the whole glyph. The second arrow is the first rotated 180° about the
+/// shared center (point symmetry) — chasing point-to-tail, like the print.
 private struct ReverseArrowPair: Shape {
     func path(in rect: CGRect) -> Path {
-        let w = rect.width, h = rect.height
-        let arrowW = w * 0.58, arrowH = h * 0.9
         var path = Path()
-
-        var left = BentArrow().path(in: CGRect(x: 0, y: 0, width: arrowW, height: arrowH))
-        let leftOrigin = CGPoint(x: w * 0.33 - arrowW / 2, y: h * 0.5 - arrowH / 2)
-        left = left.applying(CGAffineTransform(translationX: leftOrigin.x, y: leftOrigin.y))
-        path.addPath(left)
-
-        var right = BentArrow().path(in: CGRect(x: 0, y: 0, width: arrowW, height: arrowH))
-        // Rotate 180° about the arrow's own center, then translate into place.
-        let rotate180 = CGAffineTransform(translationX: arrowW / 2, y: arrowH / 2)
-            .rotated(by: .pi)
-            .translatedBy(x: -arrowW / 2, y: -arrowH / 2)
-        right = right.applying(rotate180)
-        let rightOrigin = CGPoint(x: w * 0.67 - arrowW / 2, y: h * 0.5 - arrowH / 2)
-        right = right.applying(CGAffineTransform(translationX: rightOrigin.x, y: rightOrigin.y))
-        path.addPath(right)
-
+        let first = ReverseArrow(startAngle: Angle.degrees(198).radians,
+                                  endAngle: Angle.degrees(344).radians)
+        path.addPath(first.path(in: rect))
+        let second = ReverseArrow(startAngle: Angle.degrees(18).radians,
+                                   endAngle: Angle.degrees(164).radians)
+        path.addPath(second.path(in: rect))
         return path
     }
 }

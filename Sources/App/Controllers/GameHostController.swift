@@ -72,6 +72,69 @@ final class GameHostController {
         }
     }
 
+    // MARK: - Free play dice (sandbox: any connected remote may pour)
+
+    /// Free play's dice toy has no rules or turns — unlike LCR, EVERY
+    /// connected remote may become a cup and pour AT ANY TIME (it's a
+    /// sandbox, not a game). This mirrors the LCR wiring just above
+    /// (`diceSeatByDevice`/`onDicePour`/`onDiceHello`/`sendDiceState`) but
+    /// keyed off a single on/off latch instead of a running
+    /// `DiceGameController`, since free play's dice have no controller of
+    /// their own — TableGameView owns the roll trigger locally.
+    ///
+    /// Integration: TableGameView's Dice toggle calls
+    /// `setFreePlayDiceEnabled(_:)` when `freePlayDiceOn` changes, and sets
+    /// `onFreePlayDicePour` to fire the same table roll the Roll button
+    /// does. Free play keeps `engine` non-nil (it's a real card-engine
+    /// game, just with no rules enforced), so a reconnecting device's
+    /// `.hello` takes the EXISTING card-reclaim branch below, not the
+    /// `engine == nil` branch `onDiceHello` normally answers — that reclaim
+    /// branch calls `sendFreePlayDiceState` directly so a phone that drops
+    /// and returns mid-free-play still gets its dice state back.
+    private(set) var freePlayDiceEnabled = false
+    var onFreePlayDicePour: ((Double) -> Void)?
+
+    func setFreePlayDiceEnabled(_ enabled: Bool) {
+        guard freePlayDiceEnabled != enabled else { return }
+        freePlayDiceEnabled = enabled
+        if enabled {
+            // Every lobby player becomes a "seat" purely so an incoming
+            // .dicePour has something to route through diceSeatByDevice —
+            // free play has no real seats/turns, the index is unused by
+            // anything (there are no rules to key off it).
+            var map: [String: Int] = [:]
+            for (index, player) in lobbyPlayers.enumerated() { map[player.deviceID] = index }
+            diceSeatByDevice = map
+            onDiceHello = { [weak self] deviceID in self?.sendFreePlayDiceState(toDevice: deviceID) }
+            onDicePour = { [weak self] _, intensity in self?.onFreePlayDicePour?(intensity) }
+            for player in lobbyPlayers { sendFreePlayDiceState(toDevice: player.deviceID) }
+        } else {
+            diceSeatByDevice = [:]
+            onDiceHello = nil
+            onDicePour = nil
+            let sentinel = DiceClientState(kind: .leftRightCenter, mySeat: -1, seatNames: [],
+                                           chips: [], centerPot: 0, turnSeat: -1,
+                                           isMyTurn: false, gameOver: true, winnerSeat: nil)
+            for player in lobbyPlayers { sendDiceState(sentinel, toDevice: player.deviceID) }
+        }
+    }
+
+    /// Re-push (reconnect, or the initial enable broadcast). No-ops once
+    /// the toy's been switched back off — a straggling hello shouldn't
+    /// resurrect dice mode for one phone after the table turned it off.
+    private func sendFreePlayDiceState(toDevice deviceID: String) {
+        guard freePlayDiceEnabled else { return }
+        let names = lobbyPlayers.map(\.name)
+        let mySeat = lobbyPlayers.firstIndex(where: { $0.deviceID == deviceID }) ?? 0
+        // isMyTurn always true: any remote may pour, any time — the
+        // sandbox has no turn order for DiceCupView to gate against.
+        let state = DiceClientState(kind: .leftRightCenter, mySeat: mySeat, seatNames: names,
+                                    chips: Array(repeating: 0, count: names.count), centerPot: 0,
+                                    turnSeat: mySeat, isMyTurn: true, gameOver: false,
+                                    winnerSeat: nil, cupReady: true) // no manual-cup gating here
+        sendDiceState(state, toDevice: deviceID)
+    }
+
     /// Free play, table-local physics: where the humans have slid each
     /// card (normalized coords) and which they've flipped face-down.
     var freePlayLayout: [String: CGPoint] = [:]
@@ -246,6 +309,10 @@ final class GameHostController {
                 session.send(.welcome(seat: seat), to: [peer])
                 session.send(.snapshot(engine.state.snapshot(for: seat)), to: [peer])
                 emit([])
+                // Free play keeps `engine` non-nil, so THIS is the reclaim
+                // path a returning phone takes — `onDiceHello` (below)
+                // never fires here. No-ops unless free-play dice is on.
+                sendFreePlayDiceState(toDevice: deviceID)
             } else if engine == nil {
                 if !lobbyPlayers.contains(where: { $0.deviceID == deviceID }) {
                     lobbyPlayers.append((deviceID, name))

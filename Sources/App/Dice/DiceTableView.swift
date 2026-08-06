@@ -11,6 +11,11 @@ struct DiceTableView: View {
     var onClose: (() -> Void)?
 
     @State private var chipFlights: [ChipFlight] = []
+    /// Manual cup loading, default ON (manual): the roller must drag every
+    /// required die into their TableCupView before rolling. Read live by
+    /// `DiceGameController.canRoll`/`roll` too (straight off UserDefaults,
+    /// not this binding) so flipping it mid-game takes effect immediately.
+    @AppStorage("gn.autoCup") private var autoCup = false
 
     /// Exit affordance: tap dead felt → a hold-to-close dial appears
     /// (same pattern as TableGameView).
@@ -37,6 +42,7 @@ struct DiceTableView: View {
                     .position(x: geo.size.width * 0.5, y: geo.size.height * 0.45)
                 platesLayer(size: geo.size)
                 feltCoinLayer(size: geo.size)
+                cupLayer(size: geo.size)
                 diceScene
                     .onAppear {
                         // The table feels being touched: slams re-tumble a
@@ -55,7 +61,6 @@ struct DiceTableView: View {
                     }
                     .onDisappear { TableMotion.shared.stop() }
                 chipFlightLayer
-                pendingCoinLayer(size: geo.size)
                 if controller.gameOver {
                     gameOverBanner
                 }
@@ -68,6 +73,10 @@ struct DiceTableView: View {
                     .position(x: 64, y: 56)
                     .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
+                GameHUD(title: "Dice", onExit: { onClose?() },
+                       toggles: [HUDToggle(label: "Auto-cup", isOn: $autoCup)])
+                    .padding(16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             }
             .onChange(of: controller.lastTransfers) { _, transfers in
                 spawnChipFlights(transfers, size: geo.size)
@@ -98,6 +107,88 @@ struct DiceTableView: View {
         return CGPoint(x: 0.5, y: 0.94)
     }
 
+    // MARK: - Manual cup loading (gn.autoCup off, the default)
+
+    /// Which rail edge a normalized seat anchor is nearest — same
+    /// nearest-edge test TableGameView's plate rotation uses, duplicated
+    /// locally since that logic is private over there and this view owns
+    /// its own cup placement.
+    private func railEdge(for anchor: CGPoint) -> TableCupView.RailEdge {
+        let dLeft = anchor.x, dRight = 1 - anchor.x, dTop = anchor.y, dBottom = 1 - anchor.y
+        let nearest = min(dLeft, dRight, dTop, dBottom)
+        if nearest == dBottom { return .bottom }
+        if nearest == dTop { return .top }
+        if nearest == dLeft { return .left }
+        return .right
+    }
+
+    /// The cup sits BEYOND the plate, toward (and bleeding past) the rail.
+    private func cupCenter(seatAnchor: CGPoint, size: CGSize) -> CGPoint {
+        let plate = platePosition(anchor: seatAnchor, size: size)
+        let center = CGPoint(x: size.width * 0.5, y: size.height * 0.47)
+        let outward = CGVector(dx: plate.x - center.x, dy: plate.y - center.y)
+        let length = max(1, hypot(outward.dx, outward.dy))
+        let unit = CGVector(dx: outward.dx / length, dy: outward.dy / length)
+        return CGPoint(x: plate.x + unit.dx * 92, y: plate.y + unit.dy * 92)
+    }
+
+    /// Only ever shown for a HUMAN whose turn it is, manual mode, mid-
+    /// nothing-else (no roll in flight, no pending debts) — bots and
+    /// auto-cup skip this entirely.
+    private var manualCupSeat: Int? {
+        guard !autoCup, !controller.gameOver, !controller.rollInFlight,
+              controller.pendingTransfers.isEmpty,
+              controller.seats.indices.contains(controller.turnSeat),
+              !controller.seats[controller.turnSeat].isBot else { return nil }
+        return controller.turnSeat
+    }
+
+    @ViewBuilder
+    private func cupLayer(size: CGSize) -> some View {
+        if let seat = manualCupSeat {
+            let anchors = TableGeometry.seatAnchors(count: controller.seats.count)
+            let anchor = anchors[seat]
+            let edge = railEdge(for: anchor)
+            let cup = cupCenter(seatAnchor: anchor, size: size)
+            let mouthOffset = TableCupView.mouthOffset(for: edge)
+            let mouth = CGPoint(x: cup.x + mouthOffset.dx, y: cup.y + mouthOffset.dy)
+            let plate = platePosition(anchor: anchor, size: size)
+            let required = min(controller.chips[seat], 3)
+
+            TableCupView(edge: edge, loadedCount: controller.loadedDiceCount,
+                        requiredCount: required)
+                .position(cup)
+            ForEach(0..<max(0, required), id: \.self) { index in
+                LoadableDieToken(home: dieHome(plate: plate, edge: edge, index: index,
+                                               of: required),
+                                 cupMouth: mouth,
+                                 face: restingFace(for: index)) {
+                    controller.loadDie(forSeat: seat)
+                }
+            }
+        }
+    }
+
+    /// Purely flavor — which face an unloaded die shows at rest. Physics
+    /// decides the real result once the roll actually happens.
+    private func restingFace(for index: Int) -> LcrFace {
+        let faces: [LcrFace] = [.dot, .left, .right, .center]
+        return faces[index % faces.count]
+    }
+
+    /// A small resting row/column of loose dice just off the plate, fanned
+    /// perpendicular to the rail so they don't overlap the cup itself.
+    private func dieHome(plate: CGPoint, edge: TableCupView.RailEdge, index: Int,
+                         of count: Int) -> CGPoint {
+        let lateral = (CGFloat(index) - CGFloat(count - 1) / 2) * 44
+        switch edge {
+        case .bottom: return CGPoint(x: plate.x + lateral, y: plate.y - 56)
+        case .top: return CGPoint(x: plate.x + lateral, y: plate.y + 56)
+        case .left: return CGPoint(x: plate.x + 56, y: plate.y + lateral)
+        case .right: return CGPoint(x: plate.x - 56, y: plate.y + lateral)
+        }
+    }
+
     // MARK: - Plates
 
     private func platesLayer(size: CGSize) -> some View {
@@ -123,7 +214,12 @@ struct DiceTableView: View {
                         controller.roll(from: seat.id, intensity: .random(in: 0.5...1.1))
                     }
                 if isTurn && !seat.isBot && !controller.rollInFlight {
-                    if pendingIdle {
+                    if pendingIdle, !controller.canRoll(seat: seat.id) {
+                        Text("drag your dice into the cup")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(CardStyle.gold.opacity(0.85))
+                            .transition(.opacity)
+                    } else if pendingIdle {
                         Text(seat.deviceID == nil ? "tap to roll" : "shake your phone — or tap to roll")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(CardStyle.gold.opacity(0.85))
@@ -201,11 +297,25 @@ struct DiceTableView: View {
     /// Every player's chips live ON the felt as a loose cluster of big
     /// coins — always visible, always draggable (they tidy themselves
     /// gently after a fidget). During a penalty phase the destination
-    /// cluster gets a gold call-out ring.
+    /// cluster gets a gold call-out ring, AND — this is the actual payment
+    /// mechanism — every coin in the OWING seat's own cluster becomes a
+    /// valid payer: drag ANY of them to a glowing destination and IT pays
+    /// the debt. There's no separate synthetic "the one pending coin"
+    /// token; the choice of which physical coin pays is the player's,
+    /// same as reaching into a real pile of chips.
     private func feltCoinLayer(size: CGSize) -> some View {
-        ForEach(controller.seats) { seat in
+        let pot = CGPoint(x: size.width * 0.5, y: size.height * 0.45)
+        return ForEach(controller.seats) { seat in
             let center = clusterCenter(seat: seat.id, size: size)
             let isDestination = controller.pendingTransfers.contains { $0.to == seat.id }
+            // Every pending debt THIS seat owes, as a (transfer id,
+            // absolute felt point) pair. Non-empty = "you owe — drag any
+            // coin from your own pile to one of these spots to pay it."
+            let owedTargets: [(id: Int, point: CGPoint)] = controller.pendingTransfers
+                .filter { $0.from == seat.id }
+                .map { pending in
+                    (pending.id, pending.to.map { clusterCenter(seat: $0, size: size) } ?? pot)
+                }
             ZStack {
                 if isDestination {
                     Circle()
@@ -217,7 +327,12 @@ struct DiceTableView: View {
                 }
                 DraggableCoinCluster(count: controller.chips[seat.id],
                                      diameter: 50,
-                                     seedKey: "seat\(seat.id)")
+                                     seedKey: "seat\(seat.id)",
+                                     center: center,
+                                     payTargets: owedTargets,
+                                     onPay: { transferID in
+                                         controller.completePendingTransfer(id: transferID)
+                                     })
             }
             .position(center)
             .animation(.easeInOut(duration: 0.35), value: isDestination)
@@ -257,37 +372,6 @@ struct DiceTableView: View {
             ChipFlightView(flight: .init(from: flight.from, to: flight.to, delay: flight.delay))
         }
         .allowsHitTesting(false)
-    }
-
-    // MARK: - Pending coins (humans pay their own debts)
-
-    /// A human's owed coins after their roll: each rises out of the
-    /// roller's felt cluster and pulses until DRAGGED home. Within ~110pt
-    /// of the right target (the neighbor's coin cluster or the pot pile)
-    /// it snaps in and the transfer applies; anywhere else it shakes back.
-    /// The turn is blocked until the queue is empty (25s watchdog in the
-    /// controller catches walk-aways).
-    private func pendingCoinLayer(size: CGSize) -> some View {
-        let pot = CGPoint(x: size.width * 0.5, y: size.height * 0.45)
-        return ForEach(Array(controller.pendingTransfers.enumerated()),
-                       id: \.element.id) { index, pending in
-            let cluster = clusterCenter(seat: pending.from, size: size)
-            let toward = CGVector(dx: pot.x - cluster.x, dy: pot.y - cluster.y)
-            let length = max(1, hypot(toward.dx, toward.dy))
-            let unit = CGVector(dx: toward.dx / length, dy: toward.dy / length)
-            // Home: floated off the cluster toward the pot, siblings
-            // spread perpendicular so three owed coins sit in a neat rank.
-            let spread = CGFloat(index) - CGFloat(controller.pendingTransfers.count - 1) / 2
-            let home = CGPoint(
-                x: cluster.x + unit.dx * 70 + -unit.dy * spread * 54,
-                y: cluster.y + unit.dy * 70 + unit.dx * spread * 54)
-            let destination = pending.to.map {
-                clusterCenter(seat: $0, size: size)
-            } ?? pot
-            PendingCoinView(plate: cluster, home: home, destination: destination) {
-                controller.completePendingTransfer(id: pending.id)
-            }
-        }
     }
 
     // MARK: - Game over
@@ -524,8 +608,10 @@ struct ChipToken: View {
 /// A loose CLUSTER of full-size coins lying on the felt — how real chips
 /// actually sit in front of a player. Coins take stable seeded spots on a
 /// golden-angle spiral (the pile grows outward instead of twitching), each
-/// with its own resting rotation and a shared contact shadow. Overflow
-/// past `maxVisible` shows as a small "×N" tag.
+/// with its own resting rotation, position jitter, stamp-scale variance,
+/// vertical stack lift, and a tight individual contact shadow — on top of
+/// the whole pile's shared soft ambient shadow. Overflow past `maxVisible`
+/// shows as a small "×N" tag.
 struct CoinCluster: View {
     let count: Int
     var diameter: CGFloat = 50
@@ -544,11 +630,31 @@ struct CoinCluster: View {
                       height: CGFloat(sin(angle)) * radius * 0.86) // felt-flat oval
     }
 
+    /// Per-coin "it's a messy real pile, not a mathematical spiral":
+    /// extra position jitter on top of the spiral slot, a stamp-to-stamp
+    /// scale variance (no two coins minted identically), and a vertical
+    /// lift so higher-index coins — already painted on top by ZStack's
+    /// draw order — visually RISE onto the ones below instead of merely
+    /// overlapping them. Pure function of `index`/`seedKey`: deterministic,
+    /// never re-rolled per frame, so the pile never twitches.
+    static func pileJitter(index: Int, seedKey: String,
+                           diameter: CGFloat) -> (offset: CGSize, scale: CGFloat, lift: CGFloat) {
+        let jx = TableGeometry.jitterDegrees(cardID: "\(seedKey)jx\(index)") / 9.0  // -1...1
+        let jy = TableGeometry.jitterDegrees(cardID: "\(seedKey)jy\(index)") / 9.0
+        let js = TableGeometry.jitterDegrees(cardID: "\(seedKey)js\(index)") / 9.0
+        let jl = abs(TableGeometry.jitterDegrees(cardID: "\(seedKey)jl\(index)")) / 9.0 // 0...1
+        return (offset: CGSize(width: jx * diameter * 0.10, height: jy * diameter * 0.08),
+                scale: 1 + js * 0.05,
+                lift: jl * diameter * 0.055)
+    }
+
     var body: some View {
         let visible = min(count, maxVisible)
         ZStack {
             if visible > 0 {
-                // One soft pooled shadow under the whole cluster.
+                // One soft pooled shadow under the whole cluster — the
+                // per-coin CoinContactShadow below handles the TIGHT
+                // grounding; this is the wider, softer bed under all of it.
                 Ellipse()
                     .fill(.black.opacity(0.30))
                     .frame(width: diameter * (1.1 + spreadScale * CGFloat(visible) * 0.5),
@@ -559,10 +665,16 @@ struct CoinCluster: View {
             ForEach(0..<visible, id: \.self) { index in
                 let slot = Self.slot(index: index, seedKey: seedKey,
                                      diameter: diameter, spreadScale: spreadScale)
+                let jitter = Self.pileJitter(index: index, seedKey: seedKey, diameter: diameter)
+                let coinOffset = CGSize(width: slot.width + jitter.offset.width,
+                                        height: slot.height + jitter.offset.height - jitter.lift)
+                CoinContactShadow(diameter: diameter)
+                    .offset(coinOffset)
                 ChipToken(diameter: diameter, animatesSheen: index < 3)
                     .rotationEffect(.degrees(
                         TableGeometry.jitterDegrees(cardID: "\(seedKey)r\(index)") * 4))
-                    .offset(slot)
+                    .scaleEffect(jitter.scale)
+                    .offset(coinOffset)
                     .transition(.scale(scale: 0.4).combined(with: .opacity))
             }
             if count > maxVisible {
@@ -577,20 +689,56 @@ struct CoinCluster: View {
     }
 }
 
+/// A tight dark contact-shadow pool directly under ONE coin — distinct
+/// from CoinCluster's single soft ambient shadow for the whole pile: this
+/// one hugs an individual coin's footprint so an overlapped coin reads as
+/// sitting ON the coin below it instead of the two alpha-blending into an
+/// indistinct blob. Same "grounding" idea as the 3D table's DieShadowNode,
+/// done natively in SwiftUI since coins are a 2D felt layer.
+struct CoinContactShadow: View {
+    var diameter: CGFloat
+    var body: some View {
+        Ellipse()
+            .fill(RadialGradient(
+                colors: [.black.opacity(0.55), .black.opacity(0.20), .clear],
+                center: .center, startRadius: 0, endRadius: diameter * 0.5))
+            .frame(width: diameter * 0.88, height: diameter * 0.58)
+            .offset(y: diameter * 0.15)
+    }
+}
+
 /// A CoinCluster whose coins the players can fidget with: every coin is
-/// draggable on its own, rides the finger, and when released drifts
+/// draggable on its own, rides the finger, and when released either drifts
 /// gently back to its spot in the cluster (auto-tidy — the felt stays
-/// composed without ever fighting the hand).
+/// composed without ever fighting the hand) OR, when `payTargets` is
+/// non-empty (this seat currently owes a penalty coin), pays a debt if
+/// released near one of them. `payTargets` deliberately doesn't
+/// discriminate WHICH coin — any of them can settle any owed transfer for
+/// this seat; the player's only choice is which physical coin to send.
 struct DraggableCoinCluster: View {
     let count: Int
     var diameter: CGFloat = 50
     var seedKey: String = "cluster"
     var maxVisible: Int = 8
     var spreadScale: CGFloat = 0.40
+    /// This cluster's own absolute felt position — needed to resolve a
+    /// dragged coin's ABSOLUTE point against `payTargets`, which are given
+    /// in that same felt coordinate space.
+    var center: CGPoint = .zero
+    /// Live pending-transfer destinations THIS seat currently owes coins
+    /// to: (transfer id, absolute felt point). Empty outside a penalty
+    /// phase — coins just auto-tidy as before.
+    var payTargets: [(id: Int, point: CGPoint)] = []
+    var onPay: ((Int) -> Void)?
 
-    /// Live drag offsets per coin index (cleared by the tidy spring).
+    /// Live drag offsets per coin index (cleared by the tidy spring, or
+    /// carried on into the pay-flight animation).
     @State private var dragOffsets: [Int: CGSize] = [:]
     @State private var draggingIndex: Int?
+    /// Set the instant a drop resolves onto a pay target — freezes that
+    /// coin's gesture and fades it out mid-flight instead of letting a
+    /// second drag interrupt the payment.
+    @State private var payingIndex: Int?
 
     var body: some View {
         let visible = min(count, maxVisible)
@@ -606,32 +754,59 @@ struct DraggableCoinCluster: View {
             ForEach(0..<visible, id: \.self) { index in
                 let slot = CoinCluster.slot(index: index, seedKey: seedKey,
                                             diameter: diameter, spreadScale: spreadScale)
+                let jitter = CoinCluster.pileJitter(index: index, seedKey: seedKey, diameter: diameter)
+                let rest = CGSize(width: slot.width + jitter.offset.width,
+                                  height: slot.height + jitter.offset.height - jitter.lift)
                 let drag = dragOffsets[index] ?? .zero
+                CoinContactShadow(diameter: diameter)
+                    .offset(x: rest.width, y: rest.height)
+                    .opacity(payingIndex == index ? 0 : 1)
                 ChipToken(diameter: diameter, animatesSheen: index < 3)
                     .rotationEffect(.degrees(
                         TableGeometry.jitterDegrees(cardID: "\(seedKey)r\(index)") * 4))
-                    .scaleEffect(draggingIndex == index ? 1.18 : 1)
+                    .scaleEffect(jitter.scale * (draggingIndex == index ? 1.18 : 1))
+                    .opacity(payingIndex == index ? 0 : 1)
                     .shadow(color: .black.opacity(draggingIndex == index ? 0.45 : 0),
                             radius: 8, y: 5)
-                    .offset(x: slot.width + drag.width, y: slot.height + drag.height)
+                    .offset(x: rest.width + drag.width, y: rest.height + drag.height)
                     .zIndex(draggingIndex == index ? 10 : 0)
                     .transition(.scale(scale: 0.4).combined(with: .opacity))
                     .gesture(
                         DragGesture()
                             .onChanged { value in
+                                guard payingIndex == nil else { return }
                                 if draggingIndex != index {
                                     draggingIndex = index
                                     Haptics.tick()
                                 }
                                 dragOffsets[index] = value.translation
                             }
-                            .onEnded { _ in
+                            .onEnded { value in
+                                guard payingIndex == nil else { return }
                                 draggingIndex = nil
-                                // Auto-tidy: a lazy, unhurried settle back
-                                // into the cluster.
-                                withAnimation(.spring(response: 0.9,
-                                                      dampingFraction: 0.82)) {
-                                    dragOffsets[index] = .zero
+                                if let target = nearestPayTarget(rest: rest, translation: value.translation) {
+                                    // This coin pays: fly it to the target,
+                                    // then apply — same beat the old
+                                    // synthetic pending-coin token used.
+                                    payingIndex = index
+                                    Haptics.arm()
+                                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                                        dragOffsets[index] = CGSize(
+                                            width: target.point.x - (center.x + rest.width),
+                                            height: target.point.y - (center.y + rest.height))
+                                    }
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+                                        onPay?(target.id)
+                                        dragOffsets[index] = nil
+                                        payingIndex = nil
+                                    }
+                                } else {
+                                    // Auto-tidy: a lazy, unhurried settle
+                                    // back into the cluster.
+                                    withAnimation(.spring(response: 0.9,
+                                                          dampingFraction: 0.82)) {
+                                        dragOffsets[index] = .zero
+                                    }
                                 }
                             }
                     )
@@ -646,94 +821,26 @@ struct DraggableCoinCluster: View {
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.75), value: count)
     }
-}
 
-/// One owed coin waiting to be paid: floats up from the roller's plate,
-/// pulses for attention, and rides the finger. Release within the snap
-/// radius of ITS destination → it seats itself and the transfer applies;
-/// release anywhere else → a rejection wobble back home.
-struct PendingCoinView: View {
-    let plate: CGPoint
-    let home: CGPoint
-    let destination: CGPoint
-    let onComplete: () -> Void
-
-    static let snapRadius: CGFloat = 110
-
-    /// Current position offset relative to `home`.
-    @State private var offset: CGSize
-    @State private var dragStart: CGSize = .zero
-    @State private var dragging = false
-    @State private var pulsing = false
-    @State private var landed = false
-
-    init(plate: CGPoint, home: CGPoint, destination: CGPoint,
-         onComplete: @escaping () -> Void) {
-        self.plate = plate
-        self.home = home
-        self.destination = destination
-        self.onComplete = onComplete
-        // Born ON the plate; floats up to its waiting spot on appear.
-        _offset = State(initialValue: CGSize(width: plate.x - home.x,
-                                             height: plate.y - home.y))
-    }
-
-    var body: some View {
-        ChipToken(diameter: 50)
-            .scaleEffect(dragging ? 1.3 : (pulsing ? 1.12 : 0.96))
-            .shadow(color: CardStyle.gold.opacity(dragging ? 0.8 : 0.5),
-                    radius: dragging ? 16 : 9)
-            .contentShape(Circle().inset(by: -12)) // forgiving finger target
-            .position(x: home.x + offset.width, y: home.y + offset.height)
-            .gesture(
-                DragGesture(coordinateSpace: .global)
-                    .onChanged { value in
-                        guard !landed else { return }
-                        if !dragging {
-                            dragging = true
-                            dragStart = offset
-                        }
-                        offset = CGSize(width: dragStart.width + value.translation.width,
-                                        height: dragStart.height + value.translation.height)
-                    }
-                    .onEnded { _ in
-                        guard !landed else { return }
-                        let at = CGPoint(x: home.x + offset.width,
-                                         y: home.y + offset.height)
-                        if hypot(at.x - destination.x, at.y - destination.y)
-                            <= Self.snapRadius {
-                            landed = true
-                            Haptics.arm()
-                            withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                                offset = CGSize(width: destination.x - home.x,
-                                                height: destination.y - home.y)
-                            }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
-                                onComplete()
-                            }
-                        } else {
-                            // Wrong spot: indignant little shake back home.
-                            Haptics.tick()
-                            dragging = false
-                            withAnimation(.interpolatingSpring(stiffness: 340,
-                                                               damping: 9)) {
-                                offset = .zero
-                            }
-                        }
-                    }
-            )
-            .onAppear {
-                withAnimation(.spring(response: 0.55, dampingFraction: 0.7)) {
-                    offset = .zero
-                }
-                withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)
-                    .delay(0.55)) {
-                    pulsing = true
-                }
-            }
-            .animation(.easeInOut(duration: 0.15), value: dragging)
+    /// Nearest owed target within snap radius of where this coin was
+    /// dropped (absolute felt coordinates), or nil if it landed nowhere
+    /// meaningful.
+    private func nearestPayTarget(rest: CGSize, translation: CGSize) -> (id: Int, point: CGPoint)? {
+        guard !payTargets.isEmpty else { return nil }
+        let at = CGPoint(x: center.x + rest.width + translation.width,
+                         y: center.y + rest.height + translation.height)
+        return payTargets
+            .map { ($0, hypot(at.x - $0.point.x, at.y - $0.point.y)) }
+            .filter { $0.1 <= coinPaySnapRadius }
+            .min { $0.1 < $1.1 }?.0
     }
 }
+
+/// Snap radius for dragging a real cluster coin onto a pending-transfer
+/// target (DraggableCoinCluster's `payTargets`) — same generous ~110pt
+/// PendingCoinView used to use before every coin in the pile became a
+/// valid payer.
+private let coinPaySnapRadius: CGFloat = 110
 
 /// One chip sliding from a plate to its destination (neighbor or pot).
 struct ChipFlightView: View {

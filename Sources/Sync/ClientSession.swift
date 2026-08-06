@@ -19,8 +19,13 @@ final class ClientSession: NSObject {
     private let playerName: String
     /// DISPOSABLE: regenerated on every rebuild — see PeerIdentity.
     private var peerID: MCPeerID
-    private var session: MCSession!
-    private var browser: MCNearbyServiceBrowser!
+    // Optionals, not IUOs: MCSession/MCNearbyServiceBrowser are ObjC
+    // initializers that CAN return nil when the network daemon is sick
+    // (seen live on a freshly-erased simulator — the nil sailed into an
+    // IUO and the very next line trapped). A nil transport self-heals via
+    // the watchdog's refresh cycle instead of crashing.
+    private var session: MCSession?
+    private var browser: MCNearbyServiceBrowser?
     private var outSeq: UInt64 = 0
     private var tablePeer: MCPeerID?
 
@@ -46,6 +51,7 @@ final class ClientSession: NSObject {
         setState(.connecting(tableName: best.value.name))
         // Short timeout: a ghost that won't answer should cost seconds,
         // not a stare-down. notConnected/timeout blacklists and cycles.
+        guard let browser, let session else { return }
         browser.invitePeer(best.key, to: session, withContext: nil, timeout: 6)
     }
 
@@ -66,14 +72,17 @@ final class ClientSession: NSObject {
         self.playerName = playerName
         self.peerID = PeerIdentity.freshPeerID(displayName: playerName)
         super.init()
-        rebuildTransport()
+        // NO transport here: constructing MCSession has real side effects
+        // (and can even crash outright on a sick simulator network stack).
+        // A session that is never start()ed — the offline demo harness —
+        // must never touch MultipeerConnectivity at all. start()/refresh()
+        // build the transport when someone actually wants the network.
     }
 
     /// Fresh identity, fresh session, fresh browser — the host sees a
     /// brand-new peer every time, so no ghost can block us.
     private func rebuildTransport() {
-        session?.disconnect()
-        browser?.stopBrowsingForPeers()
+        retireTransport()
         peerID = PeerIdentity.freshPeerID(displayName: playerName)
         // Mirrors HostSession: simulator-to-simulator DTLS never completes.
         #if targetEnvironment(simulator)
@@ -81,24 +90,55 @@ final class ClientSession: NSObject {
         #else
         let encryption: MCEncryptionPreference = .required
         #endif
-        session = MCSession(peer: peerID, securityIdentity: nil, encryptionPreference: encryption)
-        session.delegate = self
-        browser = MCNearbyServiceBrowser(peer: peerID, serviceType: HostSession.serviceType)
-        browser.delegate = self
+        let newSession: MCSession? = MCSession(peer: peerID, securityIdentity: nil,
+                                               encryptionPreference: encryption)
+        let newBrowser: MCNearbyServiceBrowser? =
+            MCNearbyServiceBrowser(peer: peerID, serviceType: HostSession.serviceType)
+        guard let newSession, let newBrowser else {
+            log.error("transport construction returned nil — leaving transport down; watchdog will retry")
+            return
+        }
+        newSession.delegate = self
+        newBrowser.delegate = self
+        session = newSession
+        browser = newBrowser
     }
 
     func start() {
+        if session == nil { rebuildTransport() } // first start builds it
         setState(.searching)
-        browser.startBrowsingForPeers()
+        browser?.startBrowsingForPeers()
         startWatchdog()
     }
 
     func stop() {
         watchdog?.invalidate()
-        browser.stopBrowsingForPeers()
-        session.disconnect()
+        retireTransport()
         tablePeer = nil
         setState(.disconnected)
+    }
+
+    /// Tear the old session down OFF the main thread. `-[MCSession dealloc]`
+    /// runs GCKSessionRelease, which can sit in select() for many seconds
+    /// when the network stack is cold or littered with orphaned sockets —
+    /// sampled live: the entire app froze white at launch because assigning
+    /// a fresh `session` released the old one right here on the main
+    /// thread. Same hazard on every lock/unlock refresh(). Detach the
+    /// delegates on main (no callbacks after this line), then let a utility
+    /// queue own the last reference so the blocking dealloc happens there.
+    private func retireTransport() {
+        guard session != nil || browser != nil else { return }
+        session?.delegate = nil
+        browser?.delegate = nil
+        let old = (session, browser)
+        session = nil
+        browser = nil
+        DispatchQueue.global(qos: .utility).async {
+            old.1?.stopBrowsingForPeers()
+            old.0?.disconnect()
+            // `old` dies here, off the main thread, taking the slow
+            // GCKSessionRelease with it.
+        }
     }
 
     /// Revive a session that was fully STOPPED (leave table). Anything
@@ -124,7 +164,7 @@ final class ClientSession: NSObject {
         candidates = [:] // fresh browser re-reports live peers only
         rebuildTransport()
         setState(.searching)
-        browser.startBrowsingForPeers()
+        browser?.startBrowsingForPeers()
     }
 
     private func startWatchdog() {
@@ -163,7 +203,7 @@ final class ClientSession: NSObject {
     /// callers treat that as "the link is lying about being alive".
     @discardableResult
     func send(_ msg: NetMessage) -> Bool {
-        guard let table = tablePeer, session.connectedPeers.contains(table) else {
+        guard let table = tablePeer, let session, session.connectedPeers.contains(table) else {
             log.error("send while not connected — dropped")
             return false
         }

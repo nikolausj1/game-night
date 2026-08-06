@@ -272,6 +272,14 @@ struct HandView: View {
 
     // MARK: fan
 
+    /// A fraction of the DEVICE width, capped at 130pt — and deliberately
+    /// independent of `hand.count`. A 3-card hand and a 7-card hand get the
+    /// identical card size; only the arc's spread (see
+    /// HandFanLayout.totalSpreadDegrees) and the wide-hand scroll threshold
+    /// vary with count. If a small hand ever looks like it has bigger
+    /// cards than a bigger one, that's a new bug here, not a fix — the
+    /// "1-3 cards look modest" goal is met by tightening the arc, not by
+    /// touching this.
     private func fanCardWidth(in size: CGSize) -> CGFloat { min(size.width * 0.30, 130) }
 
     private func fanLayout(in size: CGSize) -> HandFanLayout {
@@ -933,12 +941,18 @@ struct FeltBackground: View {
     var body: some View {
         ZStack {
             CardStyle.feltGreen.ignoresSafeArea()
-            // ONE stretched crop, not `.tile`: FeltTexture.png has its own
-            // baked lighting, so tiling stamps a visible seam at every
-            // repeat boundary (same root cause fixed in TableSurface).
-            Image("FeltTexture")
-                .resizable()
-                .aspectRatio(contentMode: .fill)
+            // Mirror-tiled, still `.tile`: FeltTexture.png has baked
+            // lighting, so a plain tile stamps a seam at every repeat —
+            // but stretching one crop to fill is WORSE here: an
+            // aspectRatio(.fill) image with no frame changes the layout
+            // proposal itself (it inflated the whole hand screen to a
+            // 860×860 square — blowing up the fan geometry and pushing
+            // the status strip offscreen) and magnifies the bake into
+            // huge dark bands. Mirroring 2×2 once at load makes every
+            // tile boundary self-matching, keeps grain at native scale,
+            // and keeps .tile's layout-neutral sizing.
+            Image(uiImage: FeltTile.mirrored)
+                .resizable(resizingMode: .tile)
                 .ignoresSafeArea()
                 .opacity(0.55)
                 .blendMode(.overlay)
@@ -947,6 +961,28 @@ struct FeltBackground: View {
                 .ignoresSafeArea()
         }
     }
+}
+
+/// FeltTexture, pre-mirrored 2×2 so tiling it is seamless by construction
+/// (each edge meets its own reflection). Built once, cached for the app's
+/// lifetime.
+enum FeltTile {
+    static let mirrored: UIImage = {
+        guard let base = UIImage(named: "FeltTexture") else { return UIImage() }
+        let w = base.size.width, h = base.size.height
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: w * 2, height: h * 2))
+        return renderer.image { ctx in
+            let cg = ctx.cgContext
+            let rect = CGRect(x: 0, y: 0, width: w, height: h)
+            base.draw(in: rect)
+            cg.saveGState(); cg.translateBy(x: w * 2, y: 0); cg.scaleBy(x: -1, y: 1)
+            base.draw(in: rect); cg.restoreGState()
+            cg.saveGState(); cg.translateBy(x: 0, y: h * 2); cg.scaleBy(x: 1, y: -1)
+            base.draw(in: rect); cg.restoreGState()
+            cg.saveGState(); cg.translateBy(x: w * 2, y: h * 2); cg.scaleBy(x: -1, y: -1)
+            base.draw(in: rect); cg.restoreGState()
+        }
+    }()
 }
 
 /// Light haptic vocabulary; one voice for the whole app.

@@ -578,6 +578,13 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
         let up = CupVector.normalized(SCNVector3(t.m21, t.m22, t.m23))
         let forward = CupVector.normalized(SCNVector3(-t.m31, -t.m32, -t.m33))
 
+        // Captured for setDiceCount's crossSectionSpawnPoint — dice spawn
+        // inside this SAME cone the walls below fence in (see that
+        // function's doc comment for why that matters).
+        crossSectionFrustum = CrossSectionFrustum(
+            cameraPosition: cameraNode.position, right: right, up: up, forward: forward,
+            rightSlope: tan(halfH * margin), upSlope: tan(halfV * margin))
+
         func edgeDirection(right hSign: CGFloat, up vSign: CGFloat) -> SCNVector3 {
             var dir = forward
             if hSign != 0 {
@@ -635,6 +642,51 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
 
     // MARK: dice
 
+    /// The cross-section camera's own frustum, captured once (by
+    /// `buildCrossSectionContainmentWalls`, right after the containment
+    /// walls above are built) so dice can be SPAWNED inside the exact same
+    /// cone those walls fence in. `rightSlope`/`upSlope` are
+    /// tan(halfAngle · margin) — the same margin the walls themselves use
+    /// — so "fraction 1.0" lands a spawn right at the wall.
+    private struct CrossSectionFrustum {
+        let cameraPosition: SCNVector3
+        let right: SCNVector3
+        let up: SCNVector3
+        let forward: SCNVector3
+        let rightSlope: CGFloat
+        let upSlope: CGFloat
+    }
+    private var crossSectionFrustum: CrossSectionFrustum?
+
+    /// A spawn point expressed IN the cross-section camera's own frustum
+    /// (forward depth + lateral/vertical fractions of the safe cone at
+    /// that depth), converted to world space. This is the actual fix for
+    /// "only one die visible": the three cup dice used to spawn at fixed
+    /// WORLD offsets sized for the old, wider open-tube view (±1.6 die
+    /// widths of lateral spread). The containment walls added later fence
+    /// in a MUCH narrower cone — the crossSection camera's horizontal FOV
+    /// works out to roughly ±25° vs. ±46° vertical — so the two outer dice
+    /// were spawning already outside the frustum, overlapping/beyond the
+    /// walls. Bullet's overlap-recovery impulse then flung them off far
+    /// enough to leave only the center die (index 1, spread 0, the one
+    /// that happened to spawn on-axis) visible. Spawning relative to the
+    /// SAME frustum the walls are built from can't repeat that mistake.
+    private func crossSectionSpawnPoint(depth: CGFloat, lateralFraction: CGFloat,
+                                        verticalFraction: CGFloat) -> SCNVector3? {
+        guard let frustum = crossSectionFrustum else { return nil }
+        // Comfortably inside the walls (which sit at fraction ~1.0 of the
+        // margin-adjusted frustum) — leaves real clearance for a die's own
+        // half-width so it doesn't spawn already touching a wall.
+        let safety: CGFloat = 0.5
+        let lateral = depth * frustum.rightSlope * safety * lateralFraction
+        let vertical = depth * frustum.upSlope * safety * verticalFraction
+        let offset = CupVector.add(
+            CupVector.scaled(frustum.forward, Float(depth)),
+            CupVector.add(CupVector.scaled(frustum.right, Float(lateral)),
+                         CupVector.scaled(frustum.up, Float(vertical))))
+        return CupVector.add(frustum.cameraPosition, offset)
+    }
+
     func setDiceCount(_ count: Int) {
         let clamped = max(0, min(3, count))
         guard clamped != dice.count else { return }
@@ -650,9 +702,22 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
             die.physicsBody?.angularDamping = 0.45
             die.physicsBody?.rollingFriction = 0.55
             let spread = CGFloat(index) - CGFloat(clamped - 1) / 2
-            die.position = SCNVector3(spread * Dice3D.side * 1.6 + .random(in: -0.5...0.5),
-                                      5.0 + CGFloat(index) * Dice3D.side * 0.8,
-                                      CGFloat.random(in: -2.6 ... -1.2))
+            if concept == .crossSection,
+               let point = crossSectionSpawnPoint(depth: 5.4 + CGFloat(index) * 0.9,
+                                                  lateralFraction: spread,
+                                                  verticalFraction: .random(in: -0.3...0.3)) {
+                // Frustum-safe placement (see crossSectionSpawnPoint) —
+                // the fix for the "only one die visible" bug.
+                die.position = point
+            } else {
+                // lookIn/glassBottom: the camera sits ON the tube's own
+                // axis of symmetry and this spread comfortably clears the
+                // tube's inner radius (5.2) either way, so no frustum
+                // math is needed here — unaffected by the bug above.
+                die.position = SCNVector3(spread * Dice3D.side * 1.6 + .random(in: -0.5...0.5),
+                                          5.0 + CGFloat(index) * Dice3D.side * 0.8,
+                                          CGFloat.random(in: -2.6 ... -1.2))
+            }
             die.eulerAngles = SCNVector3(CGFloat.random(in: 0..<(2 * .pi)),
                                          CGFloat.random(in: 0..<(2 * .pi)),
                                          CGFloat.random(in: 0..<(2 * .pi)))

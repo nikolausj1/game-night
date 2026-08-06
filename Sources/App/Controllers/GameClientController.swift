@@ -27,7 +27,13 @@ final class GameClientController {
         self.playerName = playerName
         session = ClientSession(playerName: playerName)
         session.onMessage = { [weak self] msg in self?.handle(msg) }
-        session.start()
+        // Demo-hand harness runs fully OFFLINE: it adopts a canned
+        // snapshot, so real browsing would be pure noise — and on stressed
+        // simulators MultipeerConnectivity's legacy select() loop can even
+        // trip the fd-set guard (EXC_GUARD) and kill screenshot runs.
+        if !DemoData.wantsHandDemo {
+            session.start()
+        }
     }
 
     /// The ONE live client for this phone. SwiftUI re-initializes view

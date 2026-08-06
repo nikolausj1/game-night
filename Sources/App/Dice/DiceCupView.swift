@@ -16,9 +16,10 @@ import AVFoundation
 struct DiceCupView: View {
     @Bindable var client: GameClientController
     @State private var model = DiceCupModel()
-    /// Which of the three cup looks this phone uses (see CupConcept). A dev
-    /// tool now — moved to Settings' Developer section so real players
-    /// never see the toggle; cross-section is the shipped default.
+    /// Which of the three cup looks this phone uses (see CupConcept).
+    /// Switchable right here on the cup stage (owner feedback: bring the
+    /// switcher back) AND from Settings' Developer section — both read/
+    /// write this same key; cross-section is the shipped default.
     @AppStorage("gn.cupConcept") private var cupConceptRaw = CupConcept.crossSection.rawValue
 
     private var cupConcept: CupConcept {
@@ -147,6 +148,26 @@ struct DiceCupView: View {
                     .padding(.bottom, 14)
                 }
                 .allowsHitTesting(false)
+
+                // The concept switcher, back where players can actually
+                // reach it (owner feedback: "I still want the ability to
+                // switch between cup concepts. Bring back the switcher on
+                // remote"). OUTSIDE the block above (which is
+                // allowsHitTesting(false)) so it stays tappable — same
+                // pattern as the TipKit view below. The Settings/Developer
+                // picker still exists too; both read/write the same
+                // `gn.cupConcept`.
+                VStack {
+                    HStack {
+                        Spacer()
+                        CupConceptToggle(concept: cupConcept) {
+                            cupConceptRaw = cupConcept.next.rawValue
+                        }
+                    }
+                    Spacer()
+                }
+                .padding(.top, 8)
+                .padding(.trailing, 12)
 
                 // First-use tip (TipKit, one-shot) — outside the block
                 // above so its own close button stays tappable.
@@ -299,12 +320,12 @@ struct DiceCupView: View {
     }
 }
 
-/// The small labeled pill that cycles the three cup looks. Dev tool only
-/// now (audit item): real players never see this — it's gone from the
-/// gameplay UI, replaced by a proper picker in Settings' Developer
-/// section. Kept here, unchanged, because DiceCupPreviewHarness (the
-/// `-autoCupPreview` sim-verify hook) still uses it to cycle looks for
-/// screenshotting.
+/// The small labeled pill that cycles the three cup looks. Back on the cup
+/// stage itself (owner feedback, wave 4 — it had been demoted to a
+/// Settings-only Developer picker; players wanted it in-hand again), gold-
+/// on-dark styling to match the table's other overlays. Also used by
+/// DiceCupPreviewHarness (the `-autoCupPreview` sim-verify hook) to cycle
+/// looks for screenshotting.
 struct CupConceptToggle: View {
     let concept: CupConcept
     let onCycle: () -> Void

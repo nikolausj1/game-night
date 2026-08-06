@@ -2,16 +2,33 @@ import SwiftUI
 import SceneKit
 
 /// The table's 3D dice layer: a transparent SCNView floating over the
-/// felt. Dice spawn just inside the roller's rail with real velocity and
-/// spin, tumble across the table under scaled gravity, clack off the
-/// invisible rails and each other, and cast soft shadows onto the felt
-/// below. When they stop, physics — not a pre-rolled array — names the
-/// result: DieFaceReader reads each up-face and `onResult` reports back.
+/// felt. A persistent POOL of up to 3 real dice lives here for the whole
+/// game — the same physical dice a roller throws, the next roller drags
+/// (or, in auto-cup mode, watches glide) into their own cup, and so on.
+/// Rolls spawn them from wherever they were loaded, gravity and friction
+/// settle them across the table, and DieFaceReader reads the result back
+/// into the controller. Never intercepts a touch unless it actually lands
+/// on a draggable die.
 struct DiceTableSceneView: UIViewRepresentable {
     /// The roll currently requested by the controller (nil between turns).
     let roll: DiceGameController.Roll?
     /// Normalized felt anchor of the rolling seat (spawn edge).
     let anchor: CGPoint
+    /// Manual/auto cup loading, table-side: which seat (if any) currently
+    /// has a cup open and waiting, how many dice it still needs, and the
+    /// cup mouth's on-screen drop zone. `mouthScreen` lives in the SAME
+    /// coordinate space as this view (both are unpositioned children of
+    /// the same GeometryReader-sized ZStack in DiceTableView), so no
+    /// conversion is needed at the call site. All default to "no cup" so
+    /// call sites that just want the physics toy (Free Play's sandbox
+    /// dice in TableGameView) don't need to know cup loading exists.
+    var cupSeat: Int? = nil
+    var requiredCount: Int = 0
+    var loadedCount: Int = 0
+    var autoCup: Bool = false
+    var mouthScreen: CGPoint? = nil
+    /// Fired once per die that lands in the cup (drag-drop OR auto-glide).
+    var onDieLoaded: (Int) -> Void = { _ in }
     /// Called exactly once per roll id, on the main queue, with the faces
     /// physics settled on (in die order).
     let onResult: (_ rollID: Int, _ faces: [LcrFace]) -> Void
@@ -26,6 +43,10 @@ struct DiceTableSceneView: UIViewRepresentable {
 
     func updateUIView(_ view: DiceSCNView, context: Context) {
         context.coordinator.onResult = onResult
+        context.coordinator.onDieLoaded = onDieLoaded
+        context.coordinator.updateCupLoading(seat: cupSeat, required: requiredCount,
+                                             loaded: loadedCount, autoCup: autoCup,
+                                             mouthScreen: mouthScreen)
         context.coordinator.requestRoll(roll, anchor: anchor)
     }
 
@@ -33,13 +54,26 @@ struct DiceTableSceneView: UIViewRepresentable {
 }
 
 /// SCNView that tells its coordinator when its size is finally known —
-/// walls and camera framing depend on the real bounds.
+/// walls and camera framing depend on the real bounds — and gates its own
+/// hit-testing so it only ever "claims" a touch that's actually dragging a
+/// real die. Every other touch (dead felt, plates, coins) falls straight
+/// through to the SwiftUI layers underneath, exactly as when this view
+/// was fully non-interactive.
 final class DiceSCNView: SCNView {
     var onLayout: ((CGSize) -> Void)?
+    /// Returns whether `point` (in this view's own coordinate space)
+    /// should be handled here at all. `nil`/false → `hitTest` returns nil,
+    /// so UIKit keeps looking at whatever's behind this view.
+    var hitTestProbe: ((CGPoint) -> Bool)?
 
     override func layoutSubviews() {
         super.layoutSubviews()
         onLayout?(bounds.size)
+    }
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        guard hitTestProbe?(point) == true else { return nil }
+        return super.hitTest(point, with: event)
     }
 }
 
@@ -49,13 +83,34 @@ final class DiceSCNView: SCNView {
 final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
                                        SCNPhysicsContactDelegate {
     var onResult: ((Int, [LcrFace]) -> Void)?
+    var onDieLoaded: ((Int) -> Void)?
 
     private let scene = SCNScene()
     private weak var view: DiceSCNView?
     private let cameraNode = SCNNode()
     private var wallNodes: [SCNNode] = []
-    private var dice: [DieNode] = []
-    private var shadows: [DieShadowNode] = []
+
+    /// The persistent pool: up to 3 real dice that live for the entire
+    /// game. `poolStates[i]` tracks what die `pool[i]` is doing right now;
+    /// `poolShadows[i]` is its tracked contact shadow. Nothing here is
+    /// ever destroyed and recreated mid-game — loading, pouring, and
+    /// settling all just move the SAME nodes around and flip their state,
+    /// which is what makes "the same dice persist across turns" true.
+    private enum PoolDieState: Equatable {
+        case resting     // free on the felt, dynamic physics, draggable
+        case dragging    // a finger (or the auto-glide) has it, kinematic
+        case loaded(seat: Int) // hidden inside a seat's cup, waiting to be thrown
+        case flying      // mid-roll, dynamic physics, being read for a result
+    }
+    private var pool: [DieNode] = []
+    private var poolStates: [PoolDieState] = []
+    private var poolShadows: [DieShadowNode] = []
+
+    /// The subset of `pool` actually in flight for the CURRENT roll (by
+    /// pool index) — settle detection, resistance tiers, and face-reading
+    /// all operate on just these, same as the old per-roll `dice` array.
+    private var activeIndices: [Int] = []
+    private var activeDice: [DieNode] { activeIndices.map { pool[$0] } }
 
     // World framing (recomputed from the view size).
     private var worldWidth: CGFloat = 50
@@ -96,6 +151,17 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     /// result — only the visible tumble is hidden and the reveal shortened.
     private var rollMotionReduced = false
 
+    // MARK: cup loading (drag-drop + auto-glide)
+
+    private var dragSeat: Int?
+    private var mouthScreen: CGPoint?
+    private var draggingIndex: Int?
+    /// Guards the auto-cup glide sequence to firing exactly once per human
+    /// turn (reset whenever `cupSeat` goes back to nil).
+    private var autoLoadedForTurnSeat: Int?
+    private var autoGlideActive = false
+    private static let dropCaptureRadius: CGFloat = 64
+
     // MARK: setup
 
     /// The one live table scene, reachable by TableMotion wiring.
@@ -108,17 +174,18 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     /// because those faces are already the recorded result.
     func jolt(intensity: Double) {
         let midRoll = activeRollID != nil && !reported
+        let targets = liveDice()
         if midRoll {
             // A slam re-loosens the felt grip: back to tier 0 so the
             // re-tumble carries like a fresh throw.
-            resistanceTiers = Array(repeating: 0, count: dice.count)
-            for die in dice {
+            resistanceTiers = Array(repeating: 0, count: activeIndices.count)
+            for die in targets {
                 die.physicsBody?.damping = 0.1
                 die.physicsBody?.angularDamping = Dice3D.angularDamping
                 die.physicsBody?.rollingFriction = Dice3D.rollingFriction
             }
         }
-        for die in dice {
+        for die in targets {
             guard let body = die.physicsBody else { continue }
             body.isAffectedByGravity = true
             if midRoll {
@@ -141,11 +208,22 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
 
     /// Gentle handling: dice slide a touch with the iPad's motion.
     func nudge(direction: CGVector, strength: Double) {
-        for die in dice {
+        for die in liveDice() {
             die.physicsBody?.applyForce(SCNVector3(
                 Float(direction.dx) * Float(strength) * 0.012,
                 0,
                 Float(direction.dy) * Float(strength) * 0.012), asImpulse: true)
+        }
+    }
+
+    /// Dice a table jolt/nudge should actually touch: not hidden inside a
+    /// cup, and not mid-drag under someone's finger.
+    private func liveDice() -> [DieNode] {
+        pool.indices.compactMap { index in
+            switch poolStates[index] {
+            case .loaded, .dragging: return nil
+            case .resting, .flying: return pool[index]
+            }
         }
     }
 
@@ -155,13 +233,18 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         view.scene = scene
         view.backgroundColor = .clear
         view.allowsCameraControl = false
-        view.isUserInteractionEnabled = false
+        view.isUserInteractionEnabled = true
         view.preferredFramesPerSecond = 60
         view.antialiasingMode =
             UIDevice.current.userInterfaceIdiom == .pad ? .multisampling4X : .multisampling2X
         view.rendersContinuously = false
         view.delegate = self
         view.onLayout = { [weak self] size in self?.rebuildWorld(for: size) }
+        view.hitTestProbe = { [weak self] point in self?.shouldClaim(point) ?? false }
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        pan.maximumNumberOfTouches = 1
+        view.addGestureRecognizer(pan)
 
         scene.background.contents = UIColor.clear
         scene.physicsWorld.gravity = DiceScenePhysics.gravity
@@ -210,6 +293,8 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         cameraNode.eulerAngles = SCNVector3(-(CGFloat.pi / 2 - cameraTilt), 0, 0)
         cameraNode.camera?.orthographicScale = Double(worldHeight / 2 * cos(cameraTilt))
 
+        ensurePool()
+
         if let pending = pendingRoll {
             pendingRoll = nil
             launch(pending, anchor: pendingAnchor)
@@ -241,6 +326,227 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         }
     }
 
+    /// Builds the 3-die pool the first time the world is sized, resting at
+    /// the table center — the "fresh set of dice sitting at the pot,
+    /// waiting to be loaded" a brand-new game starts with. Every later
+    /// roll/load/pour just moves these SAME three nodes; nothing here ever
+    /// gets destroyed and recreated again.
+    private func ensurePool() {
+        guard pool.isEmpty else { return }
+        for index in 0..<3 {
+            let die = DieNode(lcrDie: index)
+            let lateral = (CGFloat(index) - 1) * Dice3D.side * 1.3
+            die.position = SCNVector3(lateral, Dice3D.side * 3 + CGFloat(index) * 0.5,
+                                      CGFloat.random(in: -0.8...0.8))
+            die.eulerAngles = SCNVector3(CGFloat.random(in: 0..<(2 * .pi)),
+                                         CGFloat.random(in: 0..<(2 * .pi)),
+                                         CGFloat.random(in: 0..<(2 * .pi)))
+            scene.rootNode.addChildNode(die)
+            pool.append(die)
+            poolStates.append(.resting)
+            let shadow = DieShadowNode()
+            scene.rootNode.addChildNode(shadow)
+            poolShadows.append(shadow)
+        }
+        // Freshly spawned above the floor — needs a moment of real physics
+        // ticks to actually fall and settle (see beginSettleWindow's doc).
+        beginSettleWindow()
+    }
+
+    // MARK: cup loading — drag-drop
+
+    /// Called from `updateUIView` every SwiftUI pass with the current cup
+    /// state. Cheap and idempotent; the actual work (starting an auto
+    /// glide) only fires on a genuine turn change.
+    func updateCupLoading(seat: Int?, required: Int, loaded: Int, autoCup: Bool, mouthScreen: CGPoint?) {
+        self.mouthScreen = mouthScreen
+        if autoCup {
+            dragSeat = nil
+            if seat == nil {
+                autoLoadedForTurnSeat = nil
+            } else if let seat, loaded < required, autoLoadedForTurnSeat != seat, mouthScreen != nil {
+                autoLoadedForTurnSeat = seat
+                autoGlideSequence(seat: seat, count: required)
+            }
+        } else {
+            dragSeat = (seat != nil && loaded < required) ? seat : nil
+            autoLoadedForTurnSeat = nil
+        }
+        updateRenderingContinuity()
+    }
+
+    /// Whether `point` (view-local) should be handled by this view at all:
+    /// either a drag is already underway (keep routing it here through
+    /// `.changed`/`.ended`) or it's landing fresh on a currently-draggable
+    /// resting die. Anything else — dead felt, a plate, a coin — is
+    /// waved through to whatever's behind this view.
+    private func shouldClaim(_ point: CGPoint) -> Bool {
+        if draggingIndex != nil { return true }
+        guard dragSeat != nil, let view else { return false }
+        let hits = view.hitTest(point, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+        guard let hit = hits.first,
+              let index = pool.firstIndex(where: { $0 === hit.node }) else { return false }
+        return poolStates[index] == .resting
+    }
+
+    @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
+        guard let view else { return }
+        let point = recognizer.location(in: view)
+        switch recognizer.state {
+        case .began:
+            beginDrag(at: point)
+        case .changed:
+            updateDrag(at: point)
+        case .ended, .cancelled, .failed:
+            endDrag(at: point)
+        default:
+            break
+        }
+    }
+
+    private func beginDrag(at point: CGPoint) {
+        guard let view, draggingIndex == nil, dragSeat != nil else { return }
+        let hits = view.hitTest(point, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+        guard let hit = hits.first, let index = pool.firstIndex(where: { $0 === hit.node }),
+              poolStates[index] == .resting else { return }
+        draggingIndex = index
+        poolStates[index] = .dragging
+        pool[index].physicsBody?.type = .kinematic
+        Haptics.tick()
+        updateRenderingContinuity()
+    }
+
+    private func updateDrag(at point: CGPoint) {
+        guard let index = draggingIndex, let view,
+              let target = feltPoint(forScreen: point, in: view, liftedY: 1.6) else { return }
+        pool[index].position = target
+    }
+
+    private func endDrag(at point: CGPoint) {
+        guard let index = draggingIndex else { return }
+        draggingIndex = nil
+        guard let seat = dragSeat,
+              let mouthScreen,
+              hypot(point.x - mouthScreen.x, point.y - mouthScreen.y) <= Self.dropCaptureRadius else {
+            // Missed the mouth (or the cup closed mid-drag) — the die just
+            // falls back to the felt from wherever it was released.
+            poolStates[index] = .resting
+            pool[index].physicsBody?.type = .dynamic
+            beginSettleWindow(0.6)
+            return
+        }
+        // Not physics-driven (the die is kinematic through the whole drop-
+        // in animation), but a short forced-continuous window guarantees
+        // SceneKit actually renders the animated frames even though
+        // nothing else currently demands continuous rendering.
+        beginSettleWindow(0.4)
+        loadDie(index: index, seat: seat)
+    }
+
+    /// The auto-cup visual: dice already resting on the felt glide into
+    /// the cup by themselves, one at a time, at turn start — same drop-in
+    /// animation a manual drag ends with, just triggered by code instead
+    /// of a finger. Purely cosmetic (DiceGameController.canRoll already
+    /// waives the load requirement in auto-cup mode) but keeps the two
+    /// modes visually consistent, per owner feedback.
+    private func autoGlideSequence(seat: Int, count: Int) {
+        let indices = Array(poolStates.indices.filter { poolStates[$0] == .resting }.prefix(count))
+        guard !indices.isEmpty else { return }
+        autoGlideActive = true
+        updateRenderingContinuity()
+        for (step, index) in indices.enumerated() {
+            let delay = 0.35 + Double(step) * 0.32
+            let isLast = step == indices.count - 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.poolStates.indices.contains(index),
+                      self.poolStates[index] == .resting else { return }
+                self.poolStates[index] = .dragging
+                self.pool[index].physicsBody?.type = .kinematic
+                self.loadDie(index: index, seat: seat, isLastInAutoSequence: isLast)
+            }
+        }
+    }
+
+    /// Animates `pool[index]` sliding down into the cup mouth and hides it
+    /// there (state → `.loaded`) — the die "leaves the scene" exactly as
+    /// the owner asked for, rather than a synthetic icon standing in for
+    /// it. `launch(_:anchor:)` is what brings it back.
+    private func loadDie(index: Int, seat: Int, isLastInAutoSequence: Bool = false) {
+        guard pool.indices.contains(index) else { return }
+        let die = pool[index]
+        poolStates[index] = .loaded(seat: seat)
+        die.physicsBody?.type = .kinematic
+        guard let view, let mouthScreen,
+              let target = feltPoint(forScreen: mouthScreen, in: view, liftedY: 0.5) else {
+            // No mouth to aim at (shouldn't happen while a cup is showing)
+            // — hide it in place rather than leaving a half-dragged die
+            // stranded mid-air.
+            die.isHidden = true
+            DispatchQueue.main.async { [weak self] in self?.onDieLoaded?(seat) }
+            return
+        }
+        TableSFX.shared.playDiceContact(.die, strength: 0.45)
+        Haptics.arm()
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0.22
+        SCNTransaction.completionBlock = { [weak self] in
+            DispatchQueue.main.async {
+                die.isHidden = true
+                die.position = SCNVector3(0, -400, 0) // tucked well out of the way
+                die.scale = SCNVector3(1, 1, 1)
+                die.opacity = 1
+                self?.onDieLoaded?(seat)
+                if isLastInAutoSequence {
+                    self?.autoGlideActive = false
+                    self?.updateRenderingContinuity()
+                }
+            }
+        }
+        die.position = target
+        die.scale = SCNVector3(0.22, 0.22, 0.22)
+        die.opacity = 0
+        SCNTransaction.commit()
+    }
+
+    /// Projects a view-local screen point onto the felt-height plane
+    /// (`liftedY` above the physics floor) using the camera's own
+    /// projection — works for the table's orthographic camera the same
+    /// way it would for a perspective one.
+    private func feltPoint(forScreen point: CGPoint, in view: SCNView, liftedY: CGFloat) -> SCNVector3? {
+        let near = view.unprojectPoint(SCNVector3(Float(point.x), Float(point.y), 0))
+        let far = view.unprojectPoint(SCNVector3(Float(point.x), Float(point.y), 1))
+        let dx = far.x - near.x, dy = far.y - near.y, dz = far.z - near.z
+        guard abs(dy) > 0.0001 else { return nil }
+        let targetY = Float(liftedY)
+        let t = (targetY - near.y) / dy
+        return SCNVector3(near.x + dx * t, targetY, near.z + dz * t)
+    }
+
+    /// Rendering is normally OFF between rolls (perf) — but SceneKit's
+    /// physics only steps forward when a frame actually renders, so any
+    /// die that needs to FALL (freshly spawned into the pool, or dropped
+    /// back after a drag misses the cup) needs a brief forced-continuous
+    /// window or it just hangs frozen mid-air until the next unrelated
+    /// render happens to fire.
+    private var settleWindowUntil: Date?
+
+    private func beginSettleWindow(_ duration: TimeInterval = 1.4) {
+        let deadline = Date().addingTimeInterval(duration)
+        if settleWindowUntil.map({ deadline > $0 }) ?? true {
+            settleWindowUntil = deadline
+        }
+        updateRenderingContinuity()
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+            self?.updateRenderingContinuity()
+        }
+    }
+
+    private func updateRenderingContinuity() {
+        let settling = settleWindowUntil.map { $0 > Date() } ?? false
+        view?.rendersContinuously = activeRollID != nil || draggingIndex != nil
+            || autoGlideActive || settling
+    }
+
     // MARK: rolling
 
     /// Idempotent per roll id — updateUIView calls this on every SwiftUI
@@ -248,7 +554,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     func requestRoll(_ roll: DiceGameController.Roll?, anchor: CGPoint) {
         guard let roll, roll.id != lastRollID else { return }
         lastRollID = roll.id
-        guard let view, view.bounds.width > 10 else {
+        guard let view, view.bounds.width > 10, !pool.isEmpty else {
             pendingRoll = roll
             pendingAnchor = anchor
             return
@@ -257,10 +563,41 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     }
 
     private func launch(_ roll: DiceGameController.Roll, anchor: CGPoint) {
-        dice.forEach { $0.removeFromParentNode() }
-        dice = []
-        shadows.forEach { $0.removeFromParentNode() }
-        shadows = []
+        ensurePool()
+        guard !pool.isEmpty else {
+            pendingRoll = roll
+            pendingAnchor = anchor
+            return
+        }
+
+        // Pick which pool dice actually throw: the ones this seat loaded
+        // into its cup, first — that's "the same dice the roller just
+        // dragged in" pouring back out. If manual loading never happened
+        // (a bot, a watchdog fallback, or auto-cup's cosmetic glide still
+        // catching up), top up from whatever's simply resting on the felt
+        // so a roll can never soft-lock waiting on a drag that isn't
+        // coming.
+        var chosen = poolStates.indices.filter {
+            if case .loaded(let seat) = poolStates[$0] { return seat == roll.seat }
+            return false
+        }
+        if chosen.count < roll.count {
+            let extra = poolStates.indices.filter { idx in
+                !chosen.contains(idx) && poolStates[idx] == .resting
+            }
+            chosen.append(contentsOf: extra.prefix(roll.count - chosen.count))
+        }
+        if chosen.count < roll.count {
+            // Still short (e.g. a die is mid-drag elsewhere) — grab
+            // whatever's left rather than leave the roll stuck.
+            let leftover = poolStates.indices.filter { !chosen.contains($0) }
+            chosen.append(contentsOf: leftover.prefix(roll.count - chosen.count))
+        }
+        chosen = Array(chosen.prefix(roll.count).sorted())
+
+        activeIndices = chosen
+        for index in activeIndices { poolStates[index] = .flying }
+        let dice = activeDice
 
         // Reduce Motion: physics still runs the tumble (it's what decides
         // the result), but nobody has to watch it — dice stay invisible
@@ -273,7 +610,9 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         // the rails. Real dice arrive from a cup held over the table: they
         // spawn high near the roller, travel toward the middle AND down,
         // and their first contact with the felt is a BOUNCE mid-tumble —
-        // never a flat puck-slide in from the rail.
+        // never a flat puck-slide in from the rail. Since these are the
+        // SAME dice that were just sitting hidden in that roller's cup,
+        // this entry point IS the cup's position — pouring them back out.
         let halfW = worldWidth / 2 - wallInset - Dice3D.side
         let halfH = worldHeight / 2 - wallInset - Dice3D.side
         // The cup is tipped out OVER the felt, not at the rim: pull the
@@ -289,24 +628,26 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         let dropHeight = 26.0 + 10.0 * norm        // cup height above the felt
         let plungeSpeed = 22.0 + 10.0 * norm       // downward launch (cup tips out)
 
-        for index in 0..<roll.count {
-            let die = DieNode(lcrDie: index)
+        for (i, die) in dice.enumerated() {
+            let poolIndex = activeIndices[i]
+            die.physicsBody?.type = .dynamic
+            die.isHidden = false
+            die.scale = SCNVector3(1, 1, 1)
+            die.opacity = rollMotionReduced ? 0 : 1
             // Fan the dice out perpendicular to the throw line, and stagger
             // their heights slightly — a cupful never leaves as one layer.
-            let lateral = (CGFloat(index) - CGFloat(roll.count - 1) / 2) * Dice3D.side * 1.4
+            let lateral = (CGFloat(i) - CGFloat(dice.count - 1) / 2) * Dice3D.side * 1.4
             die.position = SCNVector3(
                 entryX + -sin(heading) * lateral + .random(in: -0.5...0.5),
-                dropHeight + CGFloat(index) * Dice3D.side * 0.8 + .random(in: -1.5...1.5),
+                dropHeight + CGFloat(i) * Dice3D.side * 0.8 + .random(in: -1.5...1.5),
                 entryZ + cos(heading) * lateral + .random(in: -0.5...0.5))
             // Random initial orientation so no two throws start alike.
             die.eulerAngles = SCNVector3(CGFloat.random(in: 0..<(2 * .pi)),
                                          CGFloat.random(in: 0..<(2 * .pi)),
                                          CGFloat.random(in: 0..<(2 * .pi)))
-            if rollMotionReduced { die.opacity = 0 }
-            scene.rootNode.addChildNode(die)
 
             let aim = heading + CGFloat.random(in: -0.16...0.16)
-                + (CGFloat(index) - CGFloat(roll.count - 1) / 2) * 0.13
+                + (CGFloat(i) - CGFloat(dice.count - 1) / 2) * 0.13
             let speed = baseSpeed * CGFloat.random(in: 0.85...1.15)
             die.physicsBody?.velocity = SCNVector3(
                 cos(aim) * speed,
@@ -320,12 +661,13 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
             let length = max(0.001, sqrt(ax * ax + ay * ay + az * az))
             die.physicsBody?.angularVelocity = SCNVector4(ax / length, ay / length,
                                                           az / length, spin)
-            dice.append(die)
+            die.physicsBody?.damping = 0.1
+            die.physicsBody?.angularDamping = Dice3D.angularDamping
+            die.physicsBody?.rollingFriction = Dice3D.rollingFriction
 
-            let shadow = DieShadowNode()
-            if rollMotionReduced { shadow.opacity = 0 }
-            scene.rootNode.addChildNode(shadow)
-            shadows.append(shadow)
+            let shadow = poolShadows[poolIndex]
+            shadow.isHidden = rollMotionReduced
+            shadow.opacity = rollMotionReduced ? 0 : shadow.opacity
         }
 
         activeRollID = roll.id
@@ -337,7 +679,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         lastPoses = dice.map { ($0.presentation.simdWorldPosition,
                                 $0.presentation.simdWorldOrientation) }
         resistanceTiers = Array(repeating: 0, count: dice.count)
-        view?.rendersContinuously = true
+        updateRenderingContinuity()
     }
 
     // MARK: settle detection (render delegate — no allocations here)
@@ -346,14 +688,9 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     /// the presentation transform — the physics-animated pose) stays under
     /// tiny linear/angular rates for 0.3s straight.
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
-        guard activeRollID != nil, !reported, dice.count == lastPoses.count else { return }
-        // Contact shadows ride under the dice every frame.
-        if shadows.count == dice.count {
-            let floorY = Float(Dice3D.side / 2)
-            for index in dice.indices {
-                shadows[index].track(dice[index], floorY: floorY)
-            }
-        }
+        trackAllShadows()
+        guard activeRollID != nil, !reported, activeIndices.count == lastPoses.count else { return }
+        let dice = activeDice
         if rollStartTime == nil { rollStartTime = time }
         let elapsed = time - (rollStartTime ?? time)
         guard let last = lastFrameTime, time > last else {
@@ -400,8 +737,9 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         if !tierChanges.isEmpty {
             DispatchQueue.main.async { [weak self] in
                 guard let self, !self.reported else { return }
-                for change in tierChanges where self.dice.indices.contains(change.index) {
-                    guard let body = self.dice[change.index].physicsBody else { continue }
+                let dice = self.activeDice
+                for change in tierChanges where dice.indices.contains(change.index) {
+                    guard let body = dice[change.index].physicsBody else { continue }
                     switch change.tier {
                     case 1:
                         body.damping = 0.22
@@ -452,7 +790,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
             nudged = true
             DispatchQueue.main.async { [weak self] in
                 guard let self, !self.reported else { return }
-                for die in self.dice where DieFaceReader.flatness(of: die) < 0.94 {
+                for die in self.activeDice where DieFaceReader.flatness(of: die) < 0.94 {
                     die.physicsBody?.velocity = SCNVector3(0, -1.5, 0)
                     die.physicsBody?.angularVelocity = SCNVector4(
                         1, 0, 0, CGFloat.random(in: 0.8...1.6))
@@ -464,21 +802,37 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         }
     }
 
+    /// Every pool die's contact shadow, tracked every frame it's visible —
+    /// resting dice sit on the felt permanently now (not just mid-roll),
+    /// and a dragged die's shadow needs to follow the finger too.
+    private func trackAllShadows() {
+        let floorY = Float(Dice3D.side / 2)
+        for index in pool.indices where poolShadows.indices.contains(index) {
+            let die = pool[index]
+            let shadow = poolShadows[index]
+            shadow.isHidden = die.isHidden
+            guard !die.isHidden else { continue }
+            shadow.track(die, floorY: floorY)
+        }
+    }
+
     /// Physics has spoken: read the up-faces and report exactly once. The
     /// bodies are frozen at the same moment so no die can tip to another
     /// face after its value entered the game.
     private func finishRoll() {
         guard !reported, let rollID = activeRollID else { return }
         reported = true
+        let dice = activeDice
         let faces = dice.map { DieFaceReader.upFace(of: $0) }
         #if DEBUG
         let elapsed = (lastFrameTime ?? 0) - (rollStartTime ?? 0)
         NSLog("Dice3D roll %d settled in %.2fs: %@", rollID, elapsed,
               faces.map(\.rawValue).joined(separator: ","))
         #endif
+        let settledIndices = activeIndices
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            for (index, die) in self.dice.enumerated() {
+            for (i, die) in dice.enumerated() {
                 die.physicsBody?.velocity = SCNVector3(0, 0, 0)
                 die.physicsBody?.angularVelocity = SCNVector4(0, 0, 0, 0)
                 die.physicsBody?.clearAllForces()
@@ -486,13 +840,17 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
                 // already-settled result with a quick fade instead.
                 if self.rollMotionReduced {
                     die.runAction(.fadeIn(duration: 0.2))
-                    if index < self.shadows.count {
-                        self.shadows[index].runAction(.fadeIn(duration: 0.2))
+                    if i < settledIndices.count, self.poolShadows.indices.contains(settledIndices[i]) {
+                        self.poolShadows[settledIndices[i]].runAction(.fadeIn(duration: 0.2))
                     }
                 }
             }
+            for index in settledIndices where self.poolStates.indices.contains(index) {
+                self.poolStates[index] = .resting
+            }
             self.activeRollID = nil
-            self.view?.rendersContinuously = false
+            self.activeIndices = []
+            self.updateRenderingContinuity()
             self.onResult?(rollID, faces)
         }
     }

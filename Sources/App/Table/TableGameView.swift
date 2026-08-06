@@ -10,10 +10,6 @@ struct TableGameView: View {
     /// and crucially no auto-advance (the real table owns the game clock).
     var isSpectator: Bool = false
 
-    /// Wired by TableRootView (nil on the spectator screen, which has no
-    /// event stream of its own): transient serif callouts for game events.
-    var calloutCenter: TableCalloutCenter? = nil
-
     /// Free play: a card back being dragged off the deck toward a plate.
     @State private var dealDragLocation: CGPoint?
     /// The deal confirmation: one motion from the RELEASE POINT to the
@@ -62,13 +58,19 @@ struct TableGameView: View {
 
     /// Plates live ON the table's rim — the iPad lies flat in the middle,
     /// so a plate's text must read for the person sitting past that edge.
+    /// Pulled in closer to the true screen edge than a plate's own footprint
+    /// would suggest: the plate sits at the seam between itself and its
+    /// rail hand fan (see `RailHandFan`/`seatPlates`), so nudging the seam
+    /// toward the bezel is what puts the PLATE flush against the rail with
+    /// the fan's cards bleeding off past it, not the plate itself floating
+    /// mid-felt.
     private func snapToEdge(_ p: CGPoint) -> CGPoint {
         let dLeft = p.x, dRight = 1 - p.x, dTop = p.y, dBottom = 1 - p.y
         let nearest = min(dLeft, dRight, dTop, dBottom)
-        if nearest == dBottom { return CGPoint(x: min(0.86, max(0.14, p.x)), y: 0.94) }
-        if nearest == dTop { return CGPoint(x: min(0.86, max(0.14, p.x)), y: 0.06) }
-        if nearest == dLeft { return CGPoint(x: 0.055, y: min(0.84, max(0.16, p.y))) }
-        return CGPoint(x: 0.945, y: min(0.84, max(0.16, p.y)))
+        if nearest == dBottom { return CGPoint(x: min(0.86, max(0.14, p.x)), y: 0.965) }
+        if nearest == dTop { return CGPoint(x: min(0.86, max(0.14, p.x)), y: 0.035) }
+        if nearest == dLeft { return CGPoint(x: 0.035, y: min(0.84, max(0.16, p.y))) }
+        return CGPoint(x: 0.965, y: min(0.84, max(0.16, p.y)))
     }
 
     /// Reading orientation for the person nearest this plate's edge:
@@ -196,27 +198,19 @@ struct TableGameView: View {
                     // paint over a banner or a control.
                     phaseOverlay(state: state)
                         .zIndex(10)
-                    // MOUNT(signage): table callouts + direction arc + color chip overlay here
-                    if let calloutCenter {
-                        TableCalloutView(center: calloutCenter)
-                            .position(x: geo.size.width * 0.5,
-                                      y: geo.size.height * 0.16)
-                            .allowsHitTesting(false)
-                            .zIndex(9) // under chrome (10), over everything else
-                    }
-                    if state.gameKind == .uno {
-                        // Ambient, on the felt: below resting cards (0+),
-                        // orbiting the pile so turn direction is never a guess.
-                        // Sized to orbit OUTSIDE the pile: table cards run
-                        // ~140pt, so anything smaller hides under them.
-                        DirectionOfPlayArc(clockwise: (state.round?.direction ?? 1) > 0)
-                            .frame(width: 260, height: 260)
-                            .position(x: 0.52 * geo.size.width,
-                                      y: 0.47 * geo.size.height)
-                            .allowsHitTesting(false)
-                            .zIndex(-0.5)
-                        ActiveColorChip(color: state.discardPile.last?.unoColor
-                                            ?? state.round?.trumpSuit?.unoColor)
+                    // MOUNT(signage): color chip overlay here — direction arc
+                    // and event callouts are gone per owner feedback (arrow
+                    // was noise on top of the plate glow; the felt already
+                    // says who's up, and the color chip only needs to speak
+                    // for wilds — see the wild-only guard below).
+                    if state.gameKind == .uno,
+                       case .uno(nil, _)? = state.discardPile.last?.kind,
+                       let declared = state.round?.trumpSuit?.unoColor {
+                        // A non-wild top card already shows its own printed
+                        // color on the card face — the chip would just be
+                        // noise. Only a wild (which carries no color of its
+                        // own) needs the declared color spelled out.
+                        ActiveColorChip(color: declared)
                             .position(x: 0.52 * geo.size.width,
                                       y: 0.34 * geo.size.height)
                             .allowsHitTesting(false)
@@ -506,15 +500,23 @@ struct TableGameView: View {
 
     private func seatPlates(state: GameState, size: CGSize) -> some View {
         let anchors = effectiveAnchors(state)
+        // Real table-card scale, a touch under the felt cards' own size so
+        // a full-width hand fan doesn't overwhelm the rail — still the same
+        // object class as everything else on the table, not a miniature.
+        let railCardWidth = TableGeometry.tableCardWidth(for: size) * 0.88
         return ForEach(state.seats) { seat in
             let anchor = anchors[seat.id]
-            VStack(spacing: 6) {
+            VStack(spacing: 2) {
                 SeatPlateView(seat: seat, state: state,
                               edgeAngle: outwardAngle(anchor))
-                // The player's hand, ON the table: overlapping card backs
-                // between the plate and the rim — the count mirror of what
-                // their remote holds, and the landing spot for deals/draws.
-                RailHandFan(count: state.hands[seat.id]?.count ?? 0)
+                // The player's hand, ON the table: a real-scale fan of card
+                // backs bleeding off the rail past the plate — the count
+                // mirror of what their remote holds, and the landing spot
+                // for deals/draws. Sits snug against the plate (spacing 2)
+                // so the two read as one object: nameplate against the
+                // rail, cards poking in from the hand holding them there.
+                RailHandFan(count: state.hands[seat.id]?.count ?? 0,
+                            cardWidth: railCardWidth)
             }
                 .rotationEffect(outwardAngle(anchor))
                 .scaleEffect(draggingPlateSeat == seat.id ? 1.08 : 1)

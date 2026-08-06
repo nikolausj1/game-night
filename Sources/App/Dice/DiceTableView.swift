@@ -44,7 +44,7 @@ struct DiceTableView: View {
                 platesLayer(size: geo.size)
                 feltCoinLayer(size: geo.size)
                 cupLayer(size: geo.size)
-                diceScene
+                diceScene(size: geo.size)
                     .onAppear {
                         // The table feels being touched: slams re-tumble a
                         // live roll (fair chaos — faces are read only after
@@ -98,15 +98,26 @@ struct DiceTableView: View {
 
     // MARK: - Dice (the 3D layer)
 
-    /// Transparent SceneKit overlay: rolls spawn real dice, gravity and
-    /// friction settle them, DieFaceReader reads the result back into the
-    /// controller. Never intercepts touches.
-    private var diceScene: some View {
-        DiceTableSceneView(roll: controller.currentRoll,
-                           anchor: rollerAnchor) { rollID, faces in
+    /// Transparent SceneKit overlay: a persistent pool of real dice lives
+    /// here for the whole game. Rolls spawn them (from wherever they were
+    /// loaded), gravity and friction settle them, DieFaceReader reads the
+    /// result back into the controller — and when a cup is open at this
+    /// seat, the SAME dice are what the roller drags (or, in auto-cup,
+    /// watches glide) into it. Only claims touches that actually land on a
+    /// draggable die (see DiceSCNView.hitTest); everything else falls
+    /// through to the felt/plates/coins beneath it, same as when this
+    /// layer was fully non-interactive.
+    private func diceScene(size: CGSize) -> some View {
+        let seat = activeCupSeat
+        let required = seat.map { min(controller.chips[$0], 3) } ?? 0
+        return DiceTableSceneView(
+            roll: controller.currentRoll, anchor: rollerAnchor,
+            cupSeat: seat, requiredCount: required, loadedCount: controller.loadedDiceCount,
+            autoCup: autoCup, mouthScreen: seat != nil ? cupMouthScreen(seatID: seat!, size: size) : nil,
+            onDieLoaded: { s in controller.loadDie(forSeat: s) }
+        ) { rollID, faces in
             controller.completeRoll(id: rollID, faces: faces)
         }
-        .allowsHitTesting(false)
     }
 
     private var rollerAnchor: CGPoint {
@@ -117,7 +128,7 @@ struct DiceTableView: View {
         return CGPoint(x: 0.5, y: 0.94)
     }
 
-    // MARK: - Manual cup loading (gn.autoCup off, the default)
+    // MARK: - Cup loading (real dice — manual drag OR auto-glide)
 
     /// Which rail edge a normalized seat anchor is nearest — same
     /// nearest-edge test TableGameView's plate rotation uses, duplicated
@@ -142,60 +153,48 @@ struct DiceTableView: View {
         return CGPoint(x: plate.x + unit.dx * 92, y: plate.y + unit.dy * 92)
     }
 
-    /// Only ever shown for a HUMAN whose turn it is, manual mode, mid-
-    /// nothing-else (no roll in flight, no pending debts) — bots and
-    /// auto-cup skip this entirely.
-    private var manualCupSeat: Int? {
-        guard !autoCup, !controller.gameOver, !controller.rollInFlight,
+    /// Only ever shown for a HUMAN whose turn it is, mid-nothing-else (no
+    /// roll in flight, no pending debts) — bots skip this entirely (no
+    /// hands to load a cup with). Active in BOTH manual and auto-cup mode
+    /// now: the cup itself, and the real dice gliding into it, are the
+    /// same show either way — only whether a finger or the game does the
+    /// loading differs (see DiceTableSceneCoordinator.updateCupLoading).
+    private var activeCupSeat: Int? {
+        guard !controller.gameOver, !controller.rollInFlight,
               controller.pendingTransfers.isEmpty,
               controller.seats.indices.contains(controller.turnSeat),
               !controller.seats[controller.turnSeat].isBot else { return nil }
         return controller.turnSeat
     }
 
+    /// The cup mouth's exact on-screen point for `seatID` — shared by the
+    /// cup's own presentation layer (`cupLayer`) and the SceneKit drag/
+    /// auto-glide drop zone (`diceScene`), which is why it's split out
+    /// rather than computed inline in either place.
+    private func cupMouthScreen(seatID: Int, size: CGSize) -> CGPoint {
+        let anchors = TableGeometry.seatAnchors(count: controller.seats.count)
+        let anchor = anchors[seatID]
+        let edge = railEdge(for: anchor)
+        let cup = cupCenter(seatAnchor: anchor, size: size)
+        let mouthOffset = TableCupView.mouthOffset(for: edge)
+        return CGPoint(x: cup.x + mouthOffset.dx, y: cup.y + mouthOffset.dy)
+    }
+
+    /// The cup's own drawing. Purely presentational
+    /// (`TableCupView.allowsHitTesting(false)`) — every bit of the actual
+    /// loading interaction lives in the SceneKit dice layer (`diceScene`),
+    /// which hit-tests the REAL dice already resting on the felt.
     @ViewBuilder
     private func cupLayer(size: CGSize) -> some View {
-        if let seat = manualCupSeat {
+        if let seat = activeCupSeat {
             let anchors = TableGeometry.seatAnchors(count: controller.seats.count)
-            let anchor = anchors[seat]
-            let edge = railEdge(for: anchor)
-            let cup = cupCenter(seatAnchor: anchor, size: size)
-            let mouthOffset = TableCupView.mouthOffset(for: edge)
-            let mouth = CGPoint(x: cup.x + mouthOffset.dx, y: cup.y + mouthOffset.dy)
-            let plate = platePosition(anchor: anchor, size: size)
+            let edge = railEdge(for: anchors[seat])
+            let cup = cupCenter(seatAnchor: anchors[seat], size: size)
             let required = min(controller.chips[seat], 3)
 
             TableCupView(edge: edge, loadedCount: controller.loadedDiceCount,
                         requiredCount: required)
                 .position(cup)
-            ForEach(0..<max(0, required), id: \.self) { index in
-                LoadableDieToken(home: dieHome(plate: plate, edge: edge, index: index,
-                                               of: required),
-                                 cupMouth: mouth,
-                                 face: restingFace(for: index)) {
-                    controller.loadDie(forSeat: seat)
-                }
-            }
-        }
-    }
-
-    /// Purely flavor — which face an unloaded die shows at rest. Physics
-    /// decides the real result once the roll actually happens.
-    private func restingFace(for index: Int) -> LcrFace {
-        let faces: [LcrFace] = [.dot, .left, .right, .center]
-        return faces[index % faces.count]
-    }
-
-    /// A small resting row/column of loose dice just off the plate, fanned
-    /// perpendicular to the rail so they don't overlap the cup itself.
-    private func dieHome(plate: CGPoint, edge: TableCupView.RailEdge, index: Int,
-                         of count: Int) -> CGPoint {
-        let lateral = (CGFloat(index) - CGFloat(count - 1) / 2) * 44
-        switch edge {
-        case .bottom: return CGPoint(x: plate.x + lateral, y: plate.y - 56)
-        case .top: return CGPoint(x: plate.x + lateral, y: plate.y + 56)
-        case .left: return CGPoint(x: plate.x + 56, y: plate.y + lateral)
-        case .right: return CGPoint(x: plate.x - 56, y: plate.y + lateral)
         }
     }
 

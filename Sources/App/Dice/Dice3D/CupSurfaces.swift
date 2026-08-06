@@ -39,8 +39,16 @@ enum CupSurfaces {
 
     // MARK: - Felt (interior: walls + floor)
 
+    /// Photoreal pass (wave 4): the diffuse maps now come straight off the
+    /// generated `CupFeltTile`/`CupLeatherTile` photo textures instead of
+    /// the fully procedural color fields below — a plain woven-fiber
+    /// close-up is a clean win over hand-painted noise. The NORMAL maps
+    /// stay 100% procedural: they're derived from the same height fields
+    /// that used to also drive color, so the bump detail (and the
+    /// hard-won mipmapping/mirror-wrap antialiasing fix) is unchanged —
+    /// only what's painted ON TOP of that bump changed.
     static func feltWallDiffuse() -> UIImage {
-        cached("felt-wall-d") { felt(wornCenter: false, channel: .diffuse) }
+        cached("felt-wall-d") { photoImage("CupFeltTile") ?? felt(wornCenter: false, channel: .diffuse) }
     }
 
     static func feltWallNormal() -> UIImage {
@@ -48,7 +56,7 @@ enum CupSurfaces {
     }
 
     static func feltFloorDiffuse() -> UIImage {
-        cached("felt-floor-d") { felt(wornCenter: true, channel: .diffuse) }
+        cached("felt-floor-d") { photoImage("CupFeltTile") ?? felt(wornCenter: true, channel: .diffuse) }
     }
 
     static func feltFloorNormal() -> UIImage {
@@ -57,12 +65,51 @@ enum CupSurfaces {
 
     // MARK: - Rim: burnished leather, stitched, with a brass trim band
 
+    /// The rim's diffuse is a COMPOSITE, not a straight photo swap: the
+    /// brass band and raised stitch dashes are identity features of this
+    /// cup (and are baked as real height-field bumps, not just paint) that
+    /// a flat leather swatch photo can't reproduce on its own. `rim(...)`
+    /// now samples `CupLeatherTile`'s actual pixels for the hide color
+    /// wherever neither of those overlays applies, tinted by the same
+    /// height field for a little shading variance — real leather grain
+    /// under the brass/stitch detail instead of procedural noise under it.
     static func rimLeatherDiffuse() -> UIImage {
         cached("rim-leather-d") { rim(channel: .diffuse) }
     }
 
     static func rimLeatherNormal() -> UIImage {
         cached("rim-leather-n") { rim(channel: .normal) }
+    }
+
+    /// The generated photo texture, resampled to this file's working
+    /// resolution so it composites pixel-for-pixel with the procedural
+    /// normal maps and overlay masks. `nil` if the asset is somehow
+    /// missing from the bundle — callers fall back to the old procedural
+    /// diffuse rather than drawing nothing.
+    private static func photoImage(_ name: String) -> UIImage? {
+        guard let source = UIImage(named: name), let cg = source.cgImage else { return nil }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: CGSize(width: size, height: size), format: format).image { ctx in
+            ctx.cgContext.interpolationQuality = .high
+            ctx.cgContext.draw(cg, in: CGRect(x: 0, y: 0, width: size, height: size))
+        }
+    }
+
+    /// Raw RGBA bytes of a resampled photo texture, for per-pixel sampling
+    /// (the rim composite needs to read leather color under its brass/
+    /// stitch masks, not just hand it to SceneKit as a flat material map).
+    private static func photoPixels(_ name: String) -> [UInt8]? {
+        guard let image = photoImage(name), let cg = image.cgImage else { return nil }
+        var pixels = [UInt8](repeating: 255, count: size * size * 4)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let context = CGContext(data: &pixels, width: size, height: size, bitsPerComponent: 8,
+                                      bytesPerRow: size * 4, space: colorSpace, bitmapInfo: bitmapInfo)
+        else { return nil }
+        context.draw(cg, in: CGRect(x: 0, y: 0, width: size, height: size))
+        return pixels
     }
 
     // MARK: - Felt generation
@@ -181,6 +228,9 @@ enum CupSurfaces {
             let thread = UIColor(red: 0.80, green: 0.64, blue: 0.36, alpha: 1)
             let brassDark = UIColor(red: 0.52, green: 0.37, blue: 0.15, alpha: 1)
             let brassLight = UIColor(red: 0.88, green: 0.71, blue: 0.36, alpha: 1)
+            // Real leather grain under the hide areas, wherever the photo
+            // texture is available — see `photoPixels` above.
+            let leatherPhoto = photoPixels("CupLeatherTile")
             var pixels = [UInt8](repeating: 255, count: size * size * 4)
             for y in 0..<size {
                 for xPix in 0..<size {
@@ -191,6 +241,17 @@ enum CupSurfaces {
                         color = brassDark.mixed(with: brassLight, t: CGFloat(h))
                     } else if stitchMask[idx] {
                         color = thread
+                    } else if let leatherPhoto {
+                        // Photo color, gently shaded by the SAME height
+                        // field driving the bump — real grain sits under
+                        // real light-and-dark variation instead of a flat
+                        // texture stamp.
+                        let base = idx * 4
+                        let shade = 0.78 + 0.32 * CGFloat(h)
+                        let r = CGFloat(leatherPhoto[base]) / 255 * shade
+                        let g = CGFloat(leatherPhoto[base + 1]) / 255 * shade
+                        let b = CGFloat(leatherPhoto[base + 2]) / 255 * shade
+                        color = UIColor(red: min(1, r), green: min(1, g), blue: min(1, b), alpha: 1)
                     } else {
                         color = hideDark.mixed(with: hideLight, t: CGFloat(h))
                     }

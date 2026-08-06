@@ -41,10 +41,27 @@ struct HandFanLayout {
     /// `wideThreshold`) hands don't saturate — they keep a steady per-card
     /// angular step so the fan spreads naturally past the screen edge;
     /// `fanScroll` (HandView) brings the off-screen ends to center instead.
+    ///
+    /// 2-3 card hands get their own tighter total (below) instead of
+    /// sharing the same 6.5°/card step every 4-10-card hand uses. That flat
+    /// step was the actual "3 cards look spread out" bug: a 3-card hand
+    /// fanned out exactly as wide, per card, as a 7-card hand — nothing in
+    /// the geometry treated "you're holding a couple of cards" as tighter
+    /// than "you're holding most of a hand." This was true well before
+    /// wave 3 (`wideThreshold` going width-aware there never touched this
+    /// branch — `cardWidth` and this 6.5°/46° curve are unchanged since
+    /// v0.1); wave 3 just widened the container in landscape enough that
+    /// people finally looked closely at small hands and noticed. 4+ cards
+    /// are the exact `min(46, …)` saturating curve as always — unchanged,
+    /// per the classic behavior that's meant to be restored, not touched.
     private var totalSpreadDegrees: CGFloat {
         guard cardCount > 1 else { return 0 }
         if isWide { return CGFloat(cardCount - 1) * 6.5 }
-        return min(46, CGFloat(cardCount - 1) * 6.5)
+        switch cardCount {
+        case 2: return 5
+        case 3: return 9
+        default: return min(46, CGFloat(cardCount - 1) * 6.5)
+        }
     }
 
     /// The virtual pivot sits well below the screen: shallow, natural arc.
@@ -82,12 +99,21 @@ struct HandFanLayout {
         // A touched card slides up out of the fan to say "I'm yours".
         if selected { y -= cardWidth * 0.55 }
 
-        // Small hands already fit — keep them pinned inside the container,
-        // same as before. Wide hands are deliberately allowed to overflow;
-        // that's what makes them scrollable.
+        // Small hands: hold a CENTERED span (~82% of the container) rather
+        // than letting the arc stretch until the per-card clamp pins the
+        // outer cards flush against the bezel — that flush-to-both-edges
+        // look is exactly what read as "really spread out" in the field.
+        // Overflow compresses every position uniformly, so the fan keeps
+        // even overlap like a real hand squeezed tighter, instead of the
+        // outer cards stacking dead at the clamp. Wide hands still
+        // overflow deliberately; that's what makes them scrollable.
         if !isWide {
-            let maxX = (containerWidth - cardWidth) / 2
-            x = max(-maxX, min(maxX, x))
+            let span = max(cardWidth * 0.35,
+                           (containerWidth * 0.82 - cardWidth) / 2)
+            let halfArc = abs(rawX(for: cardCount - 1))
+            if halfArc > span {
+                x *= span / halfArc // scrollOffset is 0 for narrow hands
+            }
         }
 
         return Slot(angle: .degrees(Double(degrees)),

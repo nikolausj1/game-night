@@ -8,6 +8,19 @@ enum DemoData {
     static var wantsHandDemo: Bool { CommandLine.arguments.contains("-demoHand") }
     static var wantsFreePlayDemo: Bool { CommandLine.arguments.contains("-demoFreePlay") }
 
+    /// Wave-4 fan-layout screenshot verification hook: `-demoHandCount N`
+    /// forces exactly N cards into the `-demoHand` snapshot instead of
+    /// whatever count round 5 of the scripted Wizard game naturally leaves
+    /// seat 0 holding. Lets us shoot a 3-card, 7-card, or 13-card fan on
+    /// demand (see `makeHandSnapshot`) without hand-tuning the scripted
+    /// game to land on a specific count. Real play never sets this — it's
+    /// read only by the demo path.
+    static var demoHandCountOverride: Int? {
+        guard let idx = CommandLine.arguments.firstIndex(of: "-demoHandCount"),
+              CommandLine.arguments.indices.contains(idx + 1) else { return nil }
+        return Int(CommandLine.arguments[idx + 1])
+    }
+
     /// Solo free-play: one seat, a few cards drawn, a few played to the felt.
     static func makeFreePlayEngine() -> HostEngine {
         let seat = Seat(id: 0, playerName: "Justin", colorIndex: 0,
@@ -100,7 +113,39 @@ enum DemoData {
     }
 
     /// A hand-screen snapshot: seat 0's real view of that same table state.
+    /// Honors `demoHandCountOverride` (see above) by refilling `myHand`
+    /// from the same real engine's remaining cards — drawn hands, the draw
+    /// pile, and the discard, deduped by id — instead of the natural
+    /// mid-round count. Every other field (phase, round, turn) is the real
+    /// snapshot untouched, so the rest of HandView behaves exactly as it
+    /// would mid-game; only the fan's card count is under test.
     static func makeHandSnapshot() -> ClientSnapshot {
-        makeTableEngine().state.snapshot(for: 0)
+        let engine = makeTableEngine()
+        let base = engine.state.snapshot(for: 0)
+        guard let count = demoHandCountOverride, count >= 0 else { return base }
+
+        var pool: [Card] = []
+        var seenIDs = Set<String>()
+        let allKnownCards = engine.state.hands.values.flatMap { $0 }
+            + engine.state.drawPile
+            + engine.state.discardPile
+        for card in allKnownCards where seenIDs.insert(card.id).inserted {
+            pool.append(card)
+        }
+
+        return ClientSnapshot(
+            gameKind: base.gameKind,
+            rules: base.rules,
+            seats: base.seats,
+            phase: base.phase,
+            round: base.round,
+            roundHistory: base.roundHistory,
+            mySeat: base.mySeat,
+            myHand: Array(pool.prefix(count)),
+            handCounts: base.handCounts,
+            drawCount: base.drawCount,
+            discardPile: base.discardPile,
+            myPendingDraw: base.myPendingDraw
+        )
     }
 }

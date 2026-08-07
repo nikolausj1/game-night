@@ -47,7 +47,12 @@ struct HandRootView: View {
             // Coming back from the lock screen: the Multipeer session is
             // dead even when it claims otherwise. Rebuild and rejoin —
             // the host reseats us by device ID with our exact hand.
-            if phase == .active { client.session.refresh() }
+            // Demo mode stays fully OFFLINE: this refresh was the one
+            // leak that let a -demoHand run open a real browser and
+            // join a live table mid-screenshot (field-observed).
+            if phase == .active, !DemoData.wantsHandDemo {
+                client.session.refresh()
+            }
         }
     }
 

@@ -21,6 +21,34 @@ enum DemoData {
         return Int(CommandLine.arguments[idx + 1])
     }
 
+    /// Wave-5 gesture-freeze screenshot hook: `-demoDragProgress <0...1>`
+    /// (with `-demoHand`) asks HandView to render a fan card as if a real
+    /// finger had it selected and lifted that fraction of the way to the
+    /// play threshold — a static frozen frame, not an animation, so a
+    /// screenshot taken any time after launch is deterministic. Nil (the
+    /// flag absent) means "no demo gesture," the normal case. See
+    /// HandView.applyDemoGestureIfAsked for the math that turns this into
+    /// `dragState.translation`. Real play never sets this — read only by
+    /// the demo path, same convention as `demoHandCountOverride` above.
+    static var demoDragProgress: Double? {
+        guard let idx = CommandLine.arguments.firstIndex(of: "-demoDragProgress"),
+              CommandLine.arguments.indices.contains(idx + 1) else { return nil }
+        return Double(CommandLine.arguments[idx + 1])
+    }
+
+    /// Optional companion to `demoDragProgress`: which card in the fan gets
+    /// frozen, expressed as a lateral position (0 = leftmost, 1 = rightmost,
+    /// 0.5 default = the middle card) rather than a raw index — so it stays
+    /// meaningful across `-demoHandCount` values without the caller having
+    /// to know the hand size. Lets edge cards (under the wide-hand fade
+    /// cue) get screenshot-tested, not just the middle one.
+    static var demoDragX: Double {
+        guard let idx = CommandLine.arguments.firstIndex(of: "-demoDragX"),
+              CommandLine.arguments.indices.contains(idx + 1),
+              let value = Double(CommandLine.arguments[idx + 1]) else { return 0.5 }
+        return value
+    }
+
     /// Solo free-play: one seat, a few cards drawn, a few played to the felt.
     static func makeFreePlayEngine() -> HostEngine {
         let seat = Seat(id: 0, playerName: "Justin", colorIndex: 0,

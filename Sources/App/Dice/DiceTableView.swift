@@ -299,6 +299,18 @@ struct DiceTableView: View {
 
     // MARK: - Coins on the felt
 
+    /// The playable felt rect, in the same absolute screen coordinates as
+    /// `clusterCenter`/pot — a flicked coin's glide clamps inside this with
+    /// a soft rail stop (`CoinPhysics.clamp`) rather than sliding off the
+    /// table. Slightly more generous than card-toss's own rest bounds
+    /// (`FeltPhysics.toss`'s 0.10…0.90 × 0.12…0.86): a coin is small enough
+    /// to comfortably graze closer to the rail without reading as "off the
+    /// table."
+    private func feltBounds(size: CGSize) -> CGRect {
+        CGRect(x: size.width * 0.04, y: size.height * 0.07,
+              width: size.width * 0.92, height: size.height * 0.86)
+    }
+
     /// Where a seat's coin cluster lives: just inside the rail from the
     /// plate, pulled toward the pot — the same "in front of your spot"
     /// band the pending coins use.
@@ -353,7 +365,8 @@ struct DiceTableView: View {
                                      payTargets: owedTargets,
                                      onPay: { transferID in
                                          controller.completePendingTransfer(id: transferID)
-                                     })
+                                     },
+                                     feltBounds: feltBounds(size: size))
             }
             .position(center)
             .animation(.easeInOut(duration: 0.35), value: isDestination)
@@ -731,13 +744,19 @@ struct CoinContactShadow: View {
 }
 
 /// A CoinCluster whose coins the players can fidget with: every coin is
-/// draggable on its own, rides the finger, and when released either drifts
-/// gently back to its spot in the cluster (auto-tidy — the felt stays
-/// composed without ever fighting the hand) OR, when `payTargets` is
-/// non-empty (this seat currently owes a penalty coin), pays a debt if
-/// released near one of them. `payTargets` deliberately doesn't
-/// discriminate WHICH coin — any of them can settle any owed transfer for
-/// this seat; the player's only choice is which physical coin to send.
+/// draggable on its own, rides the finger, and on release either
+/// glides on with the flick's own momentum (see `CoinPhysics`) before
+/// resolving, or — for a slow/soft release — resolves right where it was
+/// let go. Resolving means either drifting gently back to its spot in the
+/// cluster (auto-tidy — the felt stays composed without ever fighting the
+/// hand) OR, when `payTargets` is non-empty (this seat currently owes a
+/// penalty coin) and the resolve point lands near one, paying that debt.
+/// `payTargets` deliberately doesn't discriminate WHICH coin — any of them
+/// can settle any owed transfer for this seat; the player's only choice is
+/// which physical coin to send (or flick — a flicked coin that GLIDES into
+/// the pot pays just as well as one dropped there directly, since the pay
+/// check runs against where the glide actually ends, never the release
+/// point mid-flight).
 struct DraggableCoinCluster: View {
     let count: Int
     var diameter: CGFloat = 50
@@ -753,15 +772,25 @@ struct DraggableCoinCluster: View {
     /// phase — coins just auto-tidy as before.
     var payTargets: [(id: Int, point: CGPoint)] = []
     var onPay: ((Int) -> Void)?
+    /// The felt's playable rect, in this same absolute coordinate space —
+    /// a flicked coin's glide is clamped inside it with a soft rail stop
+    /// (see `CoinPhysics.clamp`) instead of sliding off the table. `nil`
+    /// skips clamping (call sites that don't have a felt rect handy).
+    var feltBounds: CGRect? = nil
 
     /// Live drag offsets per coin index (cleared by the tidy spring, or
-    /// carried on into the pay-flight animation).
+    /// carried on into the glide/pay-flight animation).
     @State private var dragOffsets: [Int: CGSize] = [:]
     @State private var draggingIndex: Int?
     /// Set the instant a drop resolves onto a pay target — freezes that
     /// coin's gesture and fades it out mid-flight instead of letting a
     /// second drag interrupt the payment.
     @State private var payingIndex: Int?
+    /// Extra rotation riding ON TOP of the coin's stable resting spin,
+    /// live only while a glide is in flight — a real flicked coin keeps
+    /// turning a few more degrees as it skids, then settles. Decays to 0
+    /// in the same animation as the glide itself.
+    @State private var glideSpin: [Int: Double] = [:]
 
     var body: some View {
         let visible = min(count, maxVisible)
@@ -781,12 +810,12 @@ struct DraggableCoinCluster: View {
                 let rest = CGSize(width: slot.width + jitter.offset.width,
                                   height: slot.height + jitter.offset.height - jitter.lift)
                 let drag = dragOffsets[index] ?? .zero
+                let baseRotation = TableGeometry.jitterDegrees(cardID: "\(seedKey)r\(index)") * 4
                 CoinContactShadow(diameter: diameter)
                     .offset(x: rest.width, y: rest.height)
                     .opacity(payingIndex == index ? 0 : 1)
                 ChipToken(diameter: diameter, animatesSheen: index < 3)
-                    .rotationEffect(.degrees(
-                        TableGeometry.jitterDegrees(cardID: "\(seedKey)r\(index)") * 4))
+                    .rotationEffect(.degrees(baseRotation + (glideSpin[index] ?? 0)))
                     .scaleEffect(jitter.scale * (draggingIndex == index ? 1.18 : 1))
                     .opacity(payingIndex == index ? 0 : 1)
                     .shadow(color: .black.opacity(draggingIndex == index ? 0.45 : 0),
@@ -807,29 +836,34 @@ struct DraggableCoinCluster: View {
                             .onEnded { value in
                                 guard payingIndex == nil else { return }
                                 draggingIndex = nil
-                                if let target = nearestPayTarget(rest: rest, translation: value.translation) {
-                                    // This coin pays: fly it to the target,
-                                    // then apply — same beat the old
-                                    // synthetic pending-coin token used.
-                                    payingIndex = index
-                                    Haptics.arm()
-                                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                                        dragOffsets[index] = CGSize(
-                                            width: target.point.x - (center.x + rest.width),
-                                            height: target.point.y - (center.y + rest.height))
+                                let releasePoint = CGPoint(x: center.x + rest.width + value.translation.width,
+                                                           y: center.y + rest.height + value.translation.height)
+                                if let glide = CoinPhysics.glide(velocity: value.velocity) {
+                                    // Metal-on-felt: the coin keeps sliding
+                                    // past the finger's release point on its
+                                    // own momentum. Pay-target detection
+                                    // happens once the glide actually ENDS
+                                    // (never at the release point) — a
+                                    // flicked coin into the pot should
+                                    // count, a mid-glide pass shouldn't.
+                                    var glideTo = CoinPhysics.project(
+                                        from: releasePoint, velocity: value.velocity, distance: glide.distance)
+                                    if let feltBounds {
+                                        glideTo = CoinPhysics.clamp(glideTo, to: feltBounds, radius: diameter / 2)
                                     }
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
-                                        onPay?(target.id)
-                                        dragOffsets[index] = nil
-                                        payingIndex = nil
+                                    let spin = CoinPhysics.spinDrift(velocity: value.velocity)
+                                    glideSpin[index] = spin
+                                    withAnimation(FeltPhysics.slide(duration: glide.duration)) {
+                                        dragOffsets[index] = CGSize(
+                                            width: glideTo.x - center.x - rest.width,
+                                            height: glideTo.y - center.y - rest.height)
+                                        glideSpin[index] = 0
+                                    }
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + glide.duration) {
+                                        resolveRelease(index: index, rest: rest, at: glideTo)
                                     }
                                 } else {
-                                    // Auto-tidy: a lazy, unhurried settle
-                                    // back into the cluster.
-                                    withAnimation(.spring(response: 0.9,
-                                                          dampingFraction: 0.82)) {
-                                        dragOffsets[index] = .zero
-                                    }
+                                    resolveRelease(index: index, rest: rest, at: releasePoint)
                                 }
                             }
                     )
@@ -852,17 +886,107 @@ struct DraggableCoinCluster: View {
                            : "You owe a coin — drag any coin to the glowing spot to pay")
     }
 
-    /// Nearest owed target within snap radius of where this coin was
-    /// dropped (absolute felt coordinates), or nil if it landed nowhere
-    /// meaningful.
-    private func nearestPayTarget(rest: CGSize, translation: CGSize) -> (id: Int, point: CGPoint)? {
+    /// A coin's release (or glide-end) resolves exactly one of two ways:
+    /// pay a nearby owed target, or auto-tidy back into the pile. Shared by
+    /// both the slow-release path (resolves immediately) and the flicked
+    /// path (resolves once `CoinPhysics.glide`'s duration elapses).
+    private func resolveRelease(index: Int, rest: CGSize, at point: CGPoint) {
+        guard payingIndex == nil else { return }
+        if let target = nearestPayTarget(at: point) {
+            // This coin pays: fly it to the target, then apply — same beat
+            // the old synthetic pending-coin token used.
+            payingIndex = index
+            Haptics.arm()
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                dragOffsets[index] = CGSize(
+                    width: target.point.x - (center.x + rest.width),
+                    height: target.point.y - (center.y + rest.height))
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+                onPay?(target.id)
+                dragOffsets[index] = nil
+                payingIndex = nil
+            }
+        } else {
+            // Auto-tidy: a lazy, unhurried settle back into the cluster.
+            withAnimation(.spring(response: 0.9, dampingFraction: 0.82)) {
+                dragOffsets[index] = .zero
+            }
+        }
+    }
+
+    /// Nearest owed target within snap radius of `point` (absolute felt
+    /// coordinates), or nil if it landed nowhere meaningful.
+    private func nearestPayTarget(at point: CGPoint) -> (id: Int, point: CGPoint)? {
         guard !payTargets.isEmpty else { return nil }
-        let at = CGPoint(x: center.x + rest.width + translation.width,
-                         y: center.y + rest.height + translation.height)
         return payTargets
-            .map { ($0, hypot(at.x - $0.point.x, at.y - $0.point.y)) }
+            .map { ($0, hypot(point.x - $0.point.x, point.y - $0.point.y)) }
             .filter { $0.1 <= coinPaySnapRadius }
             .min { $0.1 < $1.1 }?.0
+    }
+}
+
+/// Release-momentum glide for a dragged coin: a dense metal disc sliding
+/// on felt, medium friction — it CAN slide, but a real coin is heavy, so
+/// it travels a fraction of what a flicked card does and finishes fast.
+/// `FeltPhysics.slide(duration:)` still supplies the actual quad-ease-out
+/// animation curve (cards already solved "decelerate smoothly to a stop");
+/// this only solves the velocity → distance/duration mapping feeding it,
+/// tuned heavier/shorter than `FeltPhysics.toss`'s card numbers.
+enum CoinPhysics {
+    struct Glide {
+        let distance: CGFloat // points, along the release heading
+        let duration: Double
+    }
+
+    /// Below a light-touch threshold there's no glide at all — a slow
+    /// release just stays where the finger left it (`nil`).
+    static func glide(velocity: CGSize) -> Glide? {
+        let speed = hypot(velocity.width, velocity.height)
+        guard speed > 140 else { return nil }
+        // Soft-knee normalize (same shape FeltPhysics.toss uses for a
+        // card's flick strength), then a slight power curve so distance
+        // isn't linear in speed: a light flick barely creeps, a hard one
+        // really sends it, capped short — metal doesn't sail like a card.
+        let norm = min(1.0, (speed - 140) / 2600)
+        let distance: CGFloat = 68 * CGFloat(pow(norm, 1.3))
+        let duration = 0.13 + 0.19 * norm // ~0.13–0.32s vs. a card's up to ~0.5s
+        return Glide(distance: distance, duration: duration)
+    }
+
+    /// Where a coin ends up after gliding `distance` points along
+    /// `velocity`'s heading from `point`.
+    static func project(from point: CGPoint, velocity: CGSize, distance: CGFloat) -> CGPoint {
+        let heading = atan2(velocity.height, velocity.width)
+        return CGPoint(x: point.x + cos(heading) * distance,
+                       y: point.y + sin(heading) * distance)
+    }
+
+    /// A few extra degrees of spin a coin carries into its glide, signed
+    /// with the flick's own lateral direction and scaled by speed — settles
+    /// to 0 over the same animation as the glide itself.
+    static func spinDrift(velocity: CGSize) -> Double {
+        let speed = hypot(velocity.width, velocity.height)
+        let norm = min(1.0, speed / 2600)
+        let sign: Double = velocity.width >= 0 ? 1 : -1
+        return sign * 6 * norm
+    }
+
+    /// Soft rail stop: clamp `point` inside `bounds` (inset by the coin's
+    /// own `radius` so it can't clip past the rail), and if clamping
+    /// actually had to move it, kiss the edge with a small damped
+    /// bounce-back instead of freezing dead against a hard wall.
+    static func clamp(_ point: CGPoint, to bounds: CGRect, radius: CGFloat) -> CGPoint {
+        let minX = bounds.minX + radius, maxX = bounds.maxX - radius
+        let minY = bounds.minY + radius, maxY = bounds.maxY - radius
+        guard minX <= maxX, minY <= maxY else { return point }
+        let bounceIn: CGFloat = 6
+        var x = point.x, y = point.y
+        if point.x < minX { x = min(maxX, minX + bounceIn) }
+        else if point.x > maxX { x = max(minX, maxX - bounceIn) }
+        if point.y < minY { y = min(maxY, minY + bounceIn) }
+        else if point.y > maxY { y = max(minY, maxY - bounceIn) }
+        return CGPoint(x: x, y: y)
     }
 }
 

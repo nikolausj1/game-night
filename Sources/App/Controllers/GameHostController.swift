@@ -82,6 +82,14 @@ final class GameHostController {
     /// `DiceGameController`, since free play's dice have no controller of
     /// their own — TableGameView owns the roll trigger locally.
     ///
+    /// ONE exception to "pour any time": lobby index 0 is the HOST seat —
+    /// the iPad's own "your name" plate, seated at anchor (0.5, 0.94) the
+    /// same as every seat count's seat 0 — and if that seat's phone is
+    /// connected it mirrors the SAME manual-cup ceremony the table itself
+    /// shows (`FreePlayDiceLayer`, `Sources/App/Dice/`): loading gated by
+    /// `freePlayCanRoll`, `freePlayLoadedDice` ticking up live. Every OTHER
+    /// connected remote keeps the sandbox's original no-gate freedom.
+    ///
     /// Integration: TableGameView's Dice toggle calls
     /// `setFreePlayDiceEnabled(_:)` when `freePlayDiceOn` changes, and sets
     /// `onFreePlayDicePour` to fire the same table roll the Roll button
@@ -94,6 +102,30 @@ final class GameHostController {
     private(set) var freePlayDiceEnabled = false
     var onFreePlayDicePour: ((Double) -> Void)?
 
+    /// The table's own on-screen cup ceremony (mirrors
+    /// `DiceGameController.loadedDiceCount`): how many of the sandbox's 3
+    /// dice `FreePlayDiceLayer` has loaded so far. Table-owned state lives
+    /// there as `@State`; this is purely the outbound mirror for a
+    /// connected host-seat phone.
+    private(set) var freePlayLoadedDice = 0
+
+    /// Mirrors `DiceGameController.canRoll` for free play's host seat:
+    /// `gn.autoCup` waives the requirement exactly like LCR; otherwise all
+    /// 3 dice must be loaded.
+    var freePlayCanRoll: Bool {
+        UserDefaults.standard.bool(forKey: "gn.autoCup") || freePlayLoadedDice >= 3
+    }
+
+    /// `FreePlayDiceLayer` calls this on every die loaded (and to reset to
+    /// 0 when a fresh roll launches) — re-broadcasts so a connected host-
+    /// seat phone's mirrored cup fills in step with the table's, the same
+    /// beat `DiceGameController.loadDie` runs for LCR.
+    func setFreePlayLoadedDice(_ count: Int) {
+        freePlayLoadedDice = count
+        guard freePlayDiceEnabled else { return }
+        for player in lobbyPlayers { sendFreePlayDiceState(toDevice: player.deviceID) }
+    }
+
     func setFreePlayDiceEnabled(_ enabled: Bool) {
         guard freePlayDiceEnabled != enabled else { return }
         freePlayDiceEnabled = enabled
@@ -101,7 +133,9 @@ final class GameHostController {
             // Every lobby player becomes a "seat" purely so an incoming
             // .dicePour has something to route through diceSeatByDevice —
             // free play has no real seats/turns, the index is unused by
-            // anything (there are no rules to key off it).
+            // anything (there are no rules to key off it) except the
+            // host-seat (0) cup gate above.
+            freePlayLoadedDice = 0
             var map: [String: Int] = [:]
             for (index, player) in lobbyPlayers.enumerated() { map[player.deviceID] = index }
             diceSeatByDevice = map
@@ -127,11 +161,17 @@ final class GameHostController {
         let names = lobbyPlayers.map(\.name)
         let mySeat = lobbyPlayers.firstIndex(where: { $0.deviceID == deviceID }) ?? 0
         // isMyTurn always true: any remote may pour, any time — the
-        // sandbox has no turn order for DiceCupView to gate against.
+        // sandbox has no turn order for DiceCupView to gate against. The
+        // ONE exception is the host seat's manual cup (see the doc above
+        // `freePlayLoadedDice`): seat 0 mirrors the table's real loading
+        // state; every other seat stays permanently "ready".
+        let isHostSeat = mySeat == 0
         let state = DiceClientState(kind: .leftRightCenter, mySeat: mySeat, seatNames: names,
                                     chips: Array(repeating: 0, count: names.count), centerPot: 0,
                                     turnSeat: mySeat, isMyTurn: true, gameOver: false,
-                                    winnerSeat: nil, cupReady: true) // no manual-cup gating here
+                                    winnerSeat: nil,
+                                    cupReady: !isHostSeat || freePlayCanRoll,
+                                    loadedDice: isHostSeat ? freePlayLoadedDice : 0)
         sendDiceState(state, toDevice: deviceID)
     }
 
@@ -374,6 +414,15 @@ final class GameHostController {
                       diceSeatByDevice.description)
                 return
             }
+            // Free play's host seat (0) is gated by the table's own
+            // on-screen cup, same as LCR's roller — a swipe/shake-pour
+            // fired early (before the drag gesture's own cupReady-hidden
+            // affordance would normally stop it) is just dropped rather
+            // than launching a roll the cup hasn't actually loaded for.
+            // Every other free-play seat keeps the sandbox's pour-any-time
+            // freedom; LCR itself is already gated inside
+            // DiceGameController.roll, so this only ever fires for free play.
+            if freePlayDiceEnabled, seat == 0, !freePlayCanRoll { return }
             onDicePour?(seat, intensity)
 
         case .seatClaim, .heartbeat:

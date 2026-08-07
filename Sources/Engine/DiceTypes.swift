@@ -37,11 +37,26 @@ public struct DiceClientState: Codable, Sendable, Equatable {
     /// on decode so an old peer's message without this key still reads as
     /// "ready" (the pre-manual-cup behavior — nothing was ever gated).
     public var cupReady: Bool
+    /// How many of `mySeat`'s required dice are currently sitting in the
+    /// table's on-screen cup — 0 until the first one lands, ticking up by
+    /// one on every die dragged in (manual) or auto-glided (auto-cup) —
+    /// see `DiceGameController.loadDie`/`GameHostController.
+    /// setFreePlayLoadedDice`, the two table-side writers. Resets to 0 at
+    /// the start of every new roll (LCR: `finishTurn`; free play: whenever
+    /// a fresh `Roll` launches, from either source — the Roll button or a
+    /// remote pour). Only meaningful while `cupReady` is false — once ready
+    /// the phone just shows the full required count instead (see
+    /// `DiceCupView.cupSceneDiceCount`). `decodeIfPresent ?? 0` so an older
+    /// peer's message without this key still reads as "none loaded", the
+    /// pre-loading-mirror behavior (the phone showed the full cup the
+    /// instant `cupReady` flipped true — this field simply wasn't consulted
+    /// yet).
+    public var loadedDice: Int
 
     public init(kind: DiceGameKind, mySeat: Int, seatNames: [String],
                 chips: [Int], centerPot: Int, turnSeat: Int,
                 isMyTurn: Bool, gameOver: Bool, winnerSeat: Int?,
-                cupReady: Bool = true) {
+                cupReady: Bool = true, loadedDice: Int = 0) {
         self.kind = kind
         self.mySeat = mySeat
         self.seatNames = seatNames
@@ -52,13 +67,15 @@ public struct DiceClientState: Codable, Sendable, Equatable {
         self.gameOver = gameOver
         self.winnerSeat = winnerSeat
         self.cupReady = cupReady
+        self.loadedDice = loadedDice
     }
 
-    /// `cupReady` postdates the first wire format — decodeIfPresent so an
-    /// older peer's encode (or a message caught mid-rollout) still parses
-    /// instead of dropping the connection over one new field.
+    /// `cupReady`/`loadedDice` postdate the first wire format —
+    /// decodeIfPresent so an older peer's encode (or a message caught
+    /// mid-rollout) still parses instead of dropping the connection over a
+    /// new field.
     private enum CodingKeys: String, CodingKey {
-        case kind, mySeat, seatNames, chips, centerPot, turnSeat, isMyTurn, gameOver, winnerSeat, cupReady
+        case kind, mySeat, seatNames, chips, centerPot, turnSeat, isMyTurn, gameOver, winnerSeat, cupReady, loadedDice
     }
 
     public init(from decoder: Decoder) throws {
@@ -73,5 +90,6 @@ public struct DiceClientState: Codable, Sendable, Equatable {
         gameOver = try container.decode(Bool.self, forKey: .gameOver)
         winnerSeat = try container.decodeIfPresent(Int.self, forKey: .winnerSeat)
         cupReady = try container.decodeIfPresent(Bool.self, forKey: .cupReady) ?? true
+        loadedDice = try container.decodeIfPresent(Int.self, forKey: .loadedDice) ?? 0
     }
 }

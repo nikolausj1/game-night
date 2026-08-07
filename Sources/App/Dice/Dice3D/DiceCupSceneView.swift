@@ -3,8 +3,9 @@ import SceneKit
 import CoreMotion
 
 /// The three looks for the phone-as-dice-cup. All three share one physics
-/// world, one motion pipeline, and one pour gesture — only the camera,
-/// lighting, and what the floor is made of change. Persisted via
+/// world, one motion pipeline, one pour gesture, and the same felt-and-
+/// leather cup construction — only the camera framing, lighting, and (for
+/// the deep look-in) the cup's own height change. Persisted via
 /// @AppStorage("gn.cupConcept"); toggling is instant (the scene is
 /// rebuilt fresh, dice re-seeded).
 enum CupConcept: Int, CaseIterable {
@@ -14,22 +15,44 @@ enum CupConcept: Int, CaseIterable {
     /// C2 — LOOK-IN: straight down into the cup from just under the rim,
     /// the whole floor and wall circle in frame (the original view).
     case lookIn = 1
-    /// C3 — GLASS BOTTOM: you're under the cup looking up through its
-    /// glass base. Dice tumble against the glass inches from your eye,
-    /// silhouetted by warm light pouring down the tube from the mouth.
-    /// Pouring reads as the dice falling up-and-away THROUGH the phone.
-    case glassBottom = 2
+    /// C3 — DEEP LOOK-IN (rawValue kept at 2 — this used to be the "glass
+    /// bottom" concept; the owner killed that design outright because it
+    /// made gravity read as pulling the WRONG way, and asked for this in
+    /// its place so old stored prefs still land somewhere sane). Camera
+    /// at the mouth, straight down, wide-angle — the rim hugs the screen
+    /// edges and the walls telescope down a MUCH taller shaft to a small,
+    /// distant felt floor. Same gravity mapping as `.lookIn` (dice still
+    /// get pulled down toward the floor when the phone is face-up — see
+    /// `mapToCup`); the drama comes from geometry, FOV, and lighting
+    /// falloff, not a different axis convention.
+    case deepLookIn = 2
 
     var label: String {
         switch self {
         case .crossSection: return "Cross-section"
         case .lookIn: return "Look-in"
-        case .glassBottom: return "Glass bottom"
+        case .deepLookIn: return "Deep cup"
         }
     }
 
     var next: CupConcept {
         CupConcept(rawValue: (rawValue + 1) % CupConcept.allCases.count) ?? .crossSection
+    }
+
+    /// Wave 5 (photoreal pass): lookIn and deepLookIn traded their fully
+    /// procedural leather-tube geometry for a generated PHOTO of a real
+    /// leather dice-cup interior, composited full-bleed behind a
+    /// transparent SCNView so only the live 3D dice (+ shadows) draw over
+    /// it — see `DiceCupSceneView`'s UIViewRepresentable. crossSection
+    /// keeps its own render this pass (untouched) and has no photo.
+    /// `nil` here means "build the procedural cup" to both the view layer
+    /// and `DiceCupSceneCoordinator.buildCup`.
+    var photoBackdropImageName: String? {
+        switch self {
+        case .crossSection: return nil
+        case .lookIn: return "CupInteriorShallow"
+        case .deepLookIn: return "CupInteriorDeep"
+        }
     }
 }
 
@@ -43,7 +66,12 @@ enum CupConcept: Int, CaseIterable {
 /// The `concept` decides the viewpoint (see CupConcept). Callers apply
 /// `.id(concept)` so switching concepts rebuilds the scene instantly.
 struct DiceCupSceneView: UIViewRepresentable {
-    /// How many dice are in the cup (min(chips, 3)).
+    /// How many dice should be in the cup right now — the full
+    /// min(chips, 3) once `cupReady`, or however many have been loaded so
+    /// far while manual cup mode is still gating the turn (see
+    /// `DiceCupView.cupSceneDiceCount`). A rise from one call to the next
+    /// spawns just the new die/dice falling in from the mouth rather than
+    /// re-seeding everything — see `DiceCupSceneCoordinator.setDiceCount`.
     let diceCount: Int
     /// Motion source: the coordinator subscribes to the model's sample
     /// stream (single CMMotionManager for pour detection AND physics).
@@ -51,15 +79,59 @@ struct DiceCupSceneView: UIViewRepresentable {
     /// Which of the three cup looks to build.
     var concept: CupConcept = .crossSection
 
-    func makeUIView(context: Context) -> SCNView {
-        let view = SCNView(frame: .zero, options: [
+    /// Returns a plain `UIView` rather than the `SCNView` directly so the
+    /// photo backdrop (lookIn/deepLookIn — see `CupConcept.photoBackdropImageName`)
+    /// can live UNDER a transparent SCNView, self-contained inside this one
+    /// representable. That matters beyond DiceCupView: `-autoCupPreview`
+    /// (DiceCupPreviewHarness) also instantiates this view directly, so
+    /// building the composite here — instead of one layer up, in
+    /// DiceCupView's own ZStack — is what makes the harness screenshot the
+    /// photo too, without that file needing to know the photo exists.
+    func makeUIView(context: Context) -> UIView {
+        let container = UIView(frame: .zero)
+        container.backgroundColor = .clear
+
+        if let photoName = concept.photoBackdropImageName {
+            // Full-bleed, aspect-fill, center-cropped — same "the screen
+            // edges are the frame" language TableCup's photo uses, just at
+            // full scale instead of a small on-felt sprite. `clipsToBounds`
+            // does the center-crop; UIKit's own scaleAspectFill matches the
+            // calibration math in `DiceCupSceneCoordinator.photoContainerRadius`
+            // (which assumes only the horizontal axis ever gets cropped).
+            let imageView = UIImageView(image: UIImage(named: photoName))
+            imageView.contentMode = .scaleAspectFill
+            imageView.clipsToBounds = true
+            imageView.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(imageView)
+            NSLayoutConstraint.activate([
+                imageView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                imageView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                imageView.topAnchor.constraint(equalTo: container.topAnchor),
+                imageView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            ])
+        }
+
+        let sceneView = SCNView(frame: .zero, options: [
             SCNView.Option.preferredRenderingAPI.rawValue: SCNRenderingAPI.metal.rawValue,
         ])
-        context.coordinator.attach(to: view, model: model, concept: concept)
-        return view
+        sceneView.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(sceneView)
+        NSLayoutConstraint.activate([
+            sceneView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            sceneView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            sceneView.topAnchor.constraint(equalTo: container.topAnchor),
+            sceneView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+
+        // The real starting count (0 mid-load, full count once ready or in
+        // auto-cup/back-compat) goes straight to the coordinator so it
+        // seeds correctly on the very first frame — no placeholder count
+        // that then has to be torn down again a moment later.
+        context.coordinator.attach(to: sceneView, model: model, concept: concept, diceCount: diceCount)
+        return container
     }
 
-    func updateUIView(_ view: SCNView, context: Context) {
+    func updateUIView(_ view: UIView, context: Context) {
         context.coordinator.setDiceCount(diceCount)
     }
 
@@ -92,7 +164,81 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
     // the phone's long axis, the mouth is at +Y.
     private let cupInnerRadius: CGFloat = 5.2
     private let cupWall: CGFloat = 0.55
-    private let cupHeight: CGFloat = 15.0
+    /// Cup depth — varies by concept. Cross-section and the classic
+    /// look-in keep the original modest tumbler; the deep look-in more
+    /// than doubles it, since a genuinely tall shaft between the rim and
+    /// the floor is the entire point of that redesign (owner: the old
+    /// glass-bottom concept "makes gravity go the wrong way" — this is
+    /// real, correctly-signed depth in its place). A computed property
+    /// rather than a stored constant so every piece of geometry/lighting
+    /// below that's positioned off `cupHeight` (rim, sky glow, invisible
+    /// lid, room lamp) automatically scales with it — nothing here is
+    /// hand-duplicated per concept.
+    /// Owner field feedback on the first deep-cup build: 34 units tall on
+    /// a 10.4-unit-wide cup read as a mineshaft — "not physically
+    /// possible." A real leather dice cup is only ~1.3× its diameter deep,
+    /// so the deep look-in now uses honest proportions (13.8 ≈ 1.33×) and
+    /// leans on the wide-angle camera at the mouth + lighting falloff for
+    /// its depth drama instead of impossible geometry.
+    private var cupHeight: CGFloat { concept == .deepLookIn ? 13.8 : 15.0 }
+
+    /// World-unit radius for the invisible physics cylinder that replaces
+    /// the leather tube in the two photo-composited concepts (lookIn,
+    /// deepLookIn — see `buildPhotoBackedCup`), calibrated so a die resting
+    /// at the wall visually sits at the picked photo's own rim/interior
+    /// circle instead of floating out over the leather or vanishing into
+    /// the black margin outside it.
+    ///
+    /// Measured (PIL, on the recentered picks in `_review/assets/cup/`):
+    /// the rim's INNER edge — the boundary between leather and the dark
+    /// interior/felt, i.e. exactly where a die must stop — forms a circle
+    /// whose radius is a fraction `rf` of the (square) photo's height.
+    /// Both photos were re-centered in Python first so that circle sits at
+    /// image-fraction (0.5, 0.5) — dead center — which matters because the
+    /// UIImageView composites `.scaleAspectFill` + `clipsToBounds`: on a
+    /// portrait phone that scales the square photo up until its HEIGHT
+    /// matches the screen height (cropping only left/right), so the
+    /// photo's vertical axis maps 1:1 onto the screen regardless of device
+    /// — the one measurement this math actually needs.
+    ///
+    /// Camera projection (both concepts use `projectionDirection = .vertical`,
+    /// looking straight down at height `H` above the floor plane y = 0):
+    /// the floor plane's visible vertical extent is 2·H·tan(fovV⁄2), which
+    /// maps onto the full screen height. A world radius `r` therefore lands
+    /// at screen-fraction r ⁄ (2·H·tan(fovV⁄2)) from center — set equal to
+    /// the photo's own measured `rf` and solve for `r`:
+    ///     r = rf · 2 · H · tan(fovV⁄2)
+    ///
+    ///            rf      H (camera Y − floor Y=0)   fovV   → r (raw)
+    /// lookIn:     0.31    13.8 (cupHeight − 1.2)     76°    ≈ 6.7
+    /// deepLookIn: 0.3225  19.8 (cupHeight + 6.0)     100°   ≈ 15.2
+    ///
+    /// (deepLookIn's raw radius comes out much larger than lookIn's — not a
+    /// bug: its camera sits higher AND wider-FOV, so it frames a much
+    /// bigger patch of floor for the same on-screen circle size. The
+    /// container is invisible either way; only its screen-space projection
+    /// has to match the photo.)
+    ///
+    /// The formula alone still isn't the shipped number: it places a die's
+    /// CENTER at the photo's rim boundary, but a resting/tumbling die's
+    /// visible edge reaches up to its own half-diagonal (√2, ≈1.41 world
+    /// units for a side-2 die) past center — screenshotted at the raw
+    /// radius (`_review/wave5-photoreal-deep-raw.png`, first pass), dice
+    /// visibly overlapped the gold rim band. Pulling the radius in by a
+    /// flat 2.0 world units (comfortably past that half-diagonal, same
+    /// margin for both concepts since it's a physical die property, not a
+    /// per-concept one) keeps the die's OUTER edge inside the felt instead
+    /// of just its center — confirmed against `_review/wave5-photoreal-*.png`.
+    ///            r (raw)   − margin  = shipped
+    /// lookIn:     6.7       2.0        4.7
+    /// deepLookIn: 15.2      2.0        13.2
+    private var photoContainerRadius: CGFloat {
+        switch concept {
+        case .lookIn: return 4.7
+        case .deepLookIn: return 13.2
+        case .crossSection: return cupInnerRadius // unused — crossSection builds its own tube
+        }
+    }
 
     private let scene = SCNScene()
     private weak var view: SCNView?
@@ -103,19 +249,35 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
     private let clackHaptic = UIImpactFeedbackGenerator(style: .light)
     private let thumpHaptic = UIImpactFeedbackGenerator(style: .medium)
     private var lastImpulse = Date.distantPast
+    /// `-autoCupLoadDemo` sim-verify hook (see `scheduleLoadDemo`).
+    private var loadDemoTimer: Timer?
 
-    func attach(to view: SCNView, model: DiceCupModel, concept: CupConcept) {
+    func attach(to view: SCNView, model: DiceCupModel, concept: CupConcept, diceCount: Int) {
         self.view = view
         self.concept = concept
         view.scene = scene
-        view.backgroundColor = .black // interior fills the frame; no felt behind
+        if concept.photoBackdropImageName != nil {
+            // lookIn/deepLookIn: the photo drawn by DiceCupSceneView's
+            // UIImageView sits BEHIND this SCNView (see makeUIView) — the
+            // view (and the scene's own background) must be fully
+            // transparent so only the dice and the shadow-catcher plane
+            // (see buildPhotoBackedCup) draw over it. `isOpaque = false` is
+            // required alongside `.clear` — SCNView defaults to an opaque
+            // backing layer for performance, which would otherwise punch a
+            // solid rectangle through the photo regardless of this color.
+            view.backgroundColor = .clear
+            view.isOpaque = false
+            scene.background.contents = nil
+        } else {
+            view.backgroundColor = .black // interior fills the frame; no felt behind
+            scene.background.contents = UIColor.black
+        }
         view.allowsCameraControl = false
         view.isUserInteractionEnabled = false // SwiftUI keeps the pour swipe
         view.preferredFramesPerSecond = 60
         view.antialiasingMode = .multisampling2X
         view.rendersContinuously = true // motion drives physics nonstop
 
-        scene.background.contents = UIColor.black
         // Until the first real motion sample lands (and always in the
         // simulator), assume the natural hold: phone reclined ~25° from
         // flat, the way a seated player actually looks at a screen.
@@ -126,7 +288,18 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
         buildCup()
         buildLights()
         buildCamera()
-        setDiceCount(3)
+        if Self.isLoadDemoActive {
+            // Sim-verify hook: the loading-mirror flow can't be driven
+            // end-to-end without a real table broadcasting `loadedDice`,
+            // so this ignores whatever count the hosting SwiftUI view
+            // passed in and drives the exact same "start empty, spawn one
+            // die per increment" timeline that a live broadcast would —
+            // see `scheduleLoadDemo`.
+            seedDice(count: 0)
+            scheduleLoadDemo()
+        } else {
+            seedDice(count: diceCount)
+        }
 
         clackHaptic.prepare()
         contactThrottle = DiceContactThrottle(minInterval: 0.08, minImpulse: 0.010) {
@@ -162,18 +335,19 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
     /// - lookIn: the camera looks DOWN the cup axis from the mouth;
     ///   screen right = +X, screen up = −Z, out of the screen = cup-up
     ///   (+Y). Face-up phone → dice pressed onto the floor.
-    /// - glassBottom: the camera looks UP the cup axis through the glass
-    ///   base; screen right = +X, screen up = +Z, out of the screen
-    ///   (toward the viewer) = base-down (−Y). Face-up phone → dice
-    ///   pressed onto the glass, right in front of the lens.
+    /// - deepLookIn: SAME mapping as lookIn — it's the same camera-at-the-
+    ///   mouth-looking-down setup, just a taller shaft underneath it. Face-
+    ///   up phone → dice still pressed onto the floor, just a lot farther
+    ///   from the lens now. (This is deliberate: the concept it replaced,
+    ///   glass-bottom, used a DIFFERENT mapping — camera looking UP through
+    ///   the base — which is exactly what made its gravity read backwards.
+    ///   Reusing lookIn's mapping here is the actual fix.)
     private func mapToCup(x: Double, y: Double, z: Double) -> SCNVector3 {
         switch concept {
         case .crossSection:
             return SCNVector3(CGFloat(x), CGFloat(y), CGFloat(z))
-        case .lookIn:
+        case .lookIn, .deepLookIn:
             return SCNVector3(CGFloat(x), CGFloat(z), CGFloat(-y))
-        case .glassBottom:
-            return SCNVector3(CGFloat(x), CGFloat(z), CGFloat(y))
         }
     }
 
@@ -188,6 +362,10 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
     // MARK: cup construction
 
     private func buildCup() {
+        guard concept == .crossSection else {
+            buildPhotoBackedCup()
+            return
+        }
         // Interior wall: open-top tube, lined in deep red felt (real
         // fiber grain via a normal map — see CupSurfaces — not a flat
         // gradient), stitched leather rim above.
@@ -233,76 +411,33 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
         }()
         scene.rootNode.addChildNode(wallNode)
 
-        // Floor: leather for C1/C2, polished glass for C3.
+        // Floor: red felt — where the dice actually rest. crossSection-only
+        // now (lookIn/deepLookIn get an invisible physics floor instead;
+        // see `buildPhotoBackedCup` — their felt is the photo underneath).
         let floor = SCNCylinder(radius: cupInnerRadius + cupWall, height: 0.6)
-        if concept == .glassBottom {
-            let glass = SCNMaterial()
-            // Nearly invisible: the pane must read as a whisper of tint
-            // and a polish streak, never a fog bank between eye and dice.
-            glass.diffuse.contents = UIColor(red: 0.30, green: 0.38, blue: 0.35, alpha: 1)
-            glass.lightingModel = .blinn
-            glass.specular.contents = UIColor.white
-            glass.shininess = 0.95
-            glass.transparency = 0.07 // you're looking THROUGH it
-            glass.fresnelExponent = 1.6
-            glass.isDoubleSided = true
-            floor.materials = [glass]
-        } else {
-            let floorFelt = SCNMaterial()
-            floorFelt.diffuse.contents = CupSurfaces.feltFloorDiffuse()
-            floorFelt.normal.contents = CupSurfaces.feltFloorNormal()
-            CupSurfaces.applyFiltering(floorFelt)
-            floorFelt.lightingModel = .blinn
-            floorFelt.specular.contents = UIColor(white: 0.14, alpha: 1)
-            floorFelt.shininess = 0.06
-            floor.materials = [floorFelt]
-        }
+        let floorFelt = SCNMaterial()
+        floorFelt.diffuse.contents = CupSurfaces.feltFloorDiffuse()
+        floorFelt.normal.contents = CupSurfaces.feltFloorNormal()
+        CupSurfaces.applyFiltering(floorFelt)
+        floorFelt.lightingModel = .blinn
+        floorFelt.specular.contents = UIColor(white: 0.14, alpha: 1)
+        floorFelt.shininess = 0.06
+        floor.materials = [floorFelt]
         let floorNode = SCNNode(geometry: floor)
         floorNode.position = SCNVector3(0, -0.3, 0) // top surface at y = 0
         floorNode.physicsBody = {
             let body = SCNPhysicsBody(
                 type: .static,
                 shape: SCNPhysicsShape(geometry: floor, options: nil))
-            // Felt-lined base (or glass): grippy enough to bite a rolling
-            // die, restitution low so landings THUD and die fast.
+            // Felt-lined base: grippy enough to bite a rolling die,
+            // restitution low so landings THUD and die fast.
             body.friction = 0.62
-            body.restitution = concept == .glassBottom ? 0.34 : 0.26
+            body.restitution = 0.26
             body.categoryBitMask = Dice3D.boundsCategory
             body.collisionBitMask = Dice3D.dieCategory
             return body
         }()
         scene.rootNode.addChildNode(floorNode)
-
-        if concept == .glassBottom {
-            // The base seam: a dark leather ring where glass meets wall,
-            // framing the view from below.
-            let seam = SCNTorus(ringRadius: cupInnerRadius + cupWall / 2, pipeRadius: 0.5)
-            seam.ringSegmentCount = 64
-            let seamLeather = SCNMaterial()
-            seamLeather.diffuse.contents = UIColor(red: 0.22, green: 0.13, blue: 0.07, alpha: 1)
-            seamLeather.lightingModel = .blinn
-            seamLeather.specular.contents = UIColor(white: 0.35, alpha: 1)
-            seam.materials = [seamLeather]
-            let seamNode = SCNNode(geometry: seam)
-            seamNode.position = SCNVector3(0, 0.1, 0)
-            scene.rootNode.addChildNode(seamNode)
-
-            // A faint polish streak ON the glass: a constant-lit arc so the
-            // base reads as a real reflective surface, not a missing floor.
-            let streak = SCNPlane(width: cupInnerRadius * 1.7, height: cupInnerRadius * 0.8)
-            let streakMaterial = SCNMaterial()
-            streakMaterial.diffuse.contents = CupTextures.glassStreak()
-            streakMaterial.emission.contents = CupTextures.glassStreak()
-            streakMaterial.lightingModel = .constant
-            streakMaterial.blendMode = .add
-            streakMaterial.writesToDepthBuffer = false
-            streak.materials = [streakMaterial]
-            let streakNode = SCNNode(geometry: streak)
-            streakNode.position = SCNVector3(-1.1, 0.32, 1.0)
-            streakNode.eulerAngles = SCNVector3(Float.pi / 2, 0, Float.pi * 0.13)
-            streakNode.opacity = 0.5
-            scene.rootNode.addChildNode(streakNode)
-        }
 
         // Rolled rim at the mouth: this is the one real "exterior" surface
         // a player sees, since every camera lives inside the cup — grained,
@@ -348,28 +483,120 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
             position: SCNVector3(0, cupHeight + 1.6, 0)))
     }
 
+    /// lookIn / deepLookIn: the photoreal replacement for the block above.
+    /// No leather/felt/rim/sky geometry gets built at all — the picked
+    /// photo (`CupConcept.photoBackdropImageName`, drawn by
+    /// `DiceCupSceneView`'s UIImageView) IS the cup, visually. All this
+    /// builds is what the PHYSICS still needs: an invisible wall + floor
+    /// sized by `photoContainerRadius` so a die resting at the wall lines
+    /// up with the photo's own rim/interior circle, plus a shadow-catcher
+    /// plane so real dice cast real shadows onto the photo underneath.
+    private func buildPhotoBackedCup() {
+        let radius = photoContainerRadius
+
+        // Invisible wall: same leather-over-wood feel as the tube it
+        // replaces (friction/restitution unchanged) — just nothing here is
+        // ever assigned to `node.geometry`, so there's nothing to render,
+        // matching `DiceScenePhysics.boundsNode`'s own invisible-collider
+        // trick.
+        let wallShape = SCNTube(innerRadius: radius, outerRadius: radius + cupWall, height: cupHeight)
+        let wallNode = SCNNode()
+        wallNode.position = SCNVector3(0, cupHeight / 2, 0)
+        wallNode.physicsBody = {
+            let body = SCNPhysicsBody(
+                type: .static,
+                shape: SCNPhysicsShape(geometry: wallShape,
+                                       options: [.type: SCNPhysicsShape.ShapeType.concavePolyhedron]))
+            body.friction = 0.55
+            body.restitution = 0.28
+            body.categoryBitMask = Dice3D.boundsCategory
+            body.collisionBitMask = Dice3D.dieCategory
+            return body
+        }()
+        scene.rootNode.addChildNode(wallNode)
+
+        // Invisible floor: same felt-ish grip/bounce as the procedural
+        // floor it replaces — the photo's own felt is the visible floor.
+        let floorShape = SCNCylinder(radius: radius + cupWall, height: 0.6)
+        let floorNode = SCNNode()
+        floorNode.position = SCNVector3(0, -0.3, 0) // top surface at y = 0
+        floorNode.physicsBody = {
+            let body = SCNPhysicsBody(
+                type: .static,
+                shape: SCNPhysicsShape(geometry: floorShape, options: nil))
+            body.friction = 0.62
+            body.restitution = 0.26
+            body.categoryBitMask = Dice3D.boundsCategory
+            body.collisionBitMask = Dice3D.dieCategory
+            return body
+        }()
+        scene.rootNode.addChildNode(floorNode)
+
+        // Shadow catcher: a REAL (rendered) plane at floor height, but
+        // with a `.shadowOnly` material (iOS 11+) — every pixel is fully
+        // transparent except where the scene's shadow-casting key light
+        // (see buildLights) says a die's shadow falls, so the only thing
+        // this plane ever draws is a soft shadow landing on the photo.
+        // Verification note: SceneKit shadows don't render in the iOS
+        // Simulator at all (confirmed earlier, wave 3/4, against the
+        // crossSection/lookIn shadow-casters — a Simulator-side limitation,
+        // not a config bug) — this plane compiles and stays fully clear
+        // there either way, which is the correct "no shadow, no crash"
+        // behavior to verify in sim. The shadow itself needs a real device.
+        let shadowPlane = SCNPlane(width: (radius + cupWall) * 2.4,
+                                   height: (radius + cupWall) * 2.4)
+        let shadowMaterial = SCNMaterial()
+        shadowMaterial.lightingModel = .shadowOnly
+        shadowMaterial.isDoubleSided = true
+        shadowMaterial.writesToDepthBuffer = false
+        shadowPlane.materials = [shadowMaterial]
+        let shadowNode = SCNNode(geometry: shadowPlane)
+        shadowNode.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0) // lie flat, facing up
+        shadowNode.position = SCNVector3(0, 0.02, 0) // a hair above the floor body — no z-fighting
+        shadowNode.castsShadow = false
+        scene.rootNode.addChildNode(shadowNode)
+
+        // Invisible lid: same "hard shakes never launch dice out of frame"
+        // job as crossSection's, just widened to comfortably clear this
+        // concept's own (photo-calibrated) wall radius — deepLookIn's is
+        // bigger than the old fixed 30-unit span.
+        let lidSpan = max(30, (radius + cupWall) * 2.4)
+        scene.rootNode.addChildNode(DiceScenePhysics.boundsNode(
+            width: lidSpan, height: 1, length: lidSpan,
+            position: SCNVector3(0, cupHeight + 1.6, 0)))
+    }
+
     private func buildLights() {
         // Dim warm ambient so the cup shades darker away from the mouth.
+        // The deep look-in runs noticeably dimmer ambient than the other
+        // two — with a 34-unit shaft, ambient has to stay out of the way
+        // for the local lights below to actually CREATE the falloff the
+        // concept is built around, instead of ambient flattening it back
+        // out into an evenly-lit tube.
         let ambient = SCNNode()
         ambient.light = {
             let light = SCNLight()
             light.type = .ambient
-            light.intensity = concept == .glassBottom ? 230 : 260
+            light.intensity = concept == .deepLookIn ? 150 : 260
             light.color = UIColor(red: 1.0, green: 0.90, blue: 0.78, alpha: 1)
             return light
         }()
         scene.rootNode.addChildNode(ambient)
 
         // The room lamp beyond the mouth: warm light entering from the
-        // opening, falling off down the cup.
+        // opening, falling off down the cup. For the deep look-in its
+        // range is deliberately SHORT (spent by mid-shaft, nowhere near
+        // reaching the floor 34 units down) — that falloff, not a longer
+        // reach, is what sells the depth; `deepLookIn`'s own floor pool
+        // light (below) handles the "subtle pooling" at the bottom.
         let lamp = SCNNode()
         lamp.light = {
             let light = SCNLight()
             light.type = .omni
-            light.intensity = concept == .glassBottom ? 2400 : 1600
+            light.intensity = concept == .deepLookIn ? 2200 : 1600
             light.color = UIColor(red: 1.0, green: 0.93, blue: 0.80, alpha: 1)
             light.attenuationStartDistance = 6
-            light.attenuationEndDistance = 46
+            light.attenuationEndDistance = concept == .deepLookIn ? 26 : 46
             return light
         }()
         lamp.position = SCNVector3(2.0, cupHeight + 9, -2.0)
@@ -482,22 +709,71 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
             key.eulerAngles = SCNVector3(-Float.pi * 0.46, -0.3, 0)
             scene.rootNode.addChildNode(key)
 
-        case .glassBottom:
-            // Soft warm-neutral fill from BELOW the glass (the viewer's
-            // side) so the faces pressed against it stay readable inside
-            // the warm silhouette from above.
-            let fill = SCNNode()
-            fill.light = {
+        case .deepLookIn:
+            // Rim glow: warm light hugging the camera/rim — the "warm
+            // light from the rim behind the camera" the redesign calls
+            // for. Short attenuation range ON PURPOSE: spent well before
+            // mid-shaft, which is what makes the middle of the tube read
+            // as dim and the depth as real, instead of one evenly-lit
+            // tube with a floor at the bottom of it.
+            let rimGlow = SCNNode()
+            rimGlow.light = {
                 let light = SCNLight()
                 light.type = .omni
-                light.intensity = 240
-                light.color = UIColor(red: 0.98, green: 0.94, blue: 0.86, alpha: 1)
+                light.intensity = 1500
+                light.color = UIColor(red: 1.0, green: 0.90, blue: 0.72, alpha: 1)
                 light.attenuationStartDistance = 2
-                light.attenuationEndDistance = 18
+                light.attenuationEndDistance = 20
                 return light
             }()
-            fill.position = SCNVector3(0, -4.5, 0)
-            scene.rootNode.addChildNode(fill)
+            rimGlow.position = SCNVector3(0, cupHeight + 1.5, 0)
+            scene.rootNode.addChildNode(rimGlow)
+
+            // A dim straight-down key so the floor and the dice resting
+            // on it stay legible at all — much weaker than lookIn's own
+            // (700): its job here is filling in the shadow the rim glow
+            // above leaves in the lower third, not lighting the whole
+            // shaft (that would kill the falloff the concept depends on).
+            // Also the shadow-caster for the photo pass (see
+            // buildPhotoBackedCup's shadowPlane): it's the only directional
+            // light already aimed straight down the cup's own axis, so it
+            // doubles as the one light the shadow-only catcher plane needs
+            // — same shadow tuning as lookIn's own key light below.
+            let key = SCNNode()
+            key.light = {
+                let light = SCNLight()
+                light.type = .directional
+                light.intensity = 260
+                light.color = UIColor(red: 1.0, green: 0.95, blue: 0.88, alpha: 1)
+                light.castsShadow = true
+                light.shadowMode = .forward
+                light.shadowColor = UIColor.black.withAlphaComponent(0.5)
+                light.shadowRadius = 6
+                light.shadowSampleCount = 8
+                light.orthographicScale = photoContainerRadius * 1.1
+                return light
+            }()
+            key.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0)
+            scene.rootNode.addChildNode(key)
+
+            // Floor pool: a small warm light sitting just above the felt
+            // so the bottom of the shaft — where the dice actually live —
+            // gets its own soft pool of light instead of reading as flat
+            // black between the rim glow above and nothing else. This is
+            // the "subtle light pooling on the floor" the redesign calls
+            // for; its short range keeps it from re-lighting the shaft.
+            let floorPool = SCNNode()
+            floorPool.light = {
+                let light = SCNLight()
+                light.type = .omni
+                light.intensity = 420
+                light.color = UIColor(red: 1.0, green: 0.86, blue: 0.62, alpha: 1)
+                light.attenuationStartDistance = 1
+                light.attenuationEndDistance = 9
+                return light
+            }()
+            floorPool.position = SCNVector3(0, 2.4, 0)
+            scene.rootNode.addChildNode(floorPool)
         }
     }
 
@@ -539,13 +815,26 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
             camera.fieldOfView = 76
             cameraNode.position = SCNVector3(0, cupHeight - 1.2, 0)
             cameraNode.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0)
-        case .glassBottom:
-            // Under the cup, an eye's width below the glass, looking
-            // straight up the tube at the glowing mouth. Dice land ON the
-            // lens, effectively.
-            camera.fieldOfView = 80
-            cameraNode.position = SCNVector3(0, -6.0, 0)
-            cameraNode.eulerAngles = SCNVector3(Float.pi / 2, 0, 0)
+        case .deepLookIn:
+            // Straight down, hovering above the rim — far enough back for
+            // the rim to actually land IN frame. The rim torus's outer
+            // extent is ringRadius(cupInnerRadius + cupWall/2) + pipeRadius
+            // ≈ 6.3 (see `buildCup`); at a 100° FOV (50° half-angle) that
+            // needs the camera roughly height/tan(46°) ≈ 6 units above the
+            // rim to sit just inside the frame edge with a hair of margin —
+            // any closer (this used to sit at +2.4) and the rim is simply
+            // OUTSIDE the frustum, invisible, which is what the first pass
+            // at this got wrong. At that height the interior wall spans
+            // roughly 7° (near the distant floor) to ~46° (near the rim) of
+            // the frame, so "the outer circle hugs the screen edges" while
+            // the shaft telescopes down to the floor in the middle (real
+            // dice-cup proportions — see cupHeight). Comfortably clears the
+            // invisible lid (`cupHeight + 1.6`, built in `buildCup()`), so
+            // a hard-shaken die can still get right up near the lens
+            // without ever visually passing through/behind it.
+            camera.fieldOfView = 100
+            cameraNode.position = SCNVector3(0, cupHeight + 6.0, 0)
+            cameraNode.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0)
         }
         scene.rootNode.addChildNode(cameraNode)
         view?.pointOfView = cameraNode
@@ -687,9 +976,20 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
         return CupVector.add(frustum.cameraPosition, offset)
     }
 
-    func setDiceCount(_ count: Int) {
+    /// Whether `-autoCupLoadDemo` is on the launch line (see `attach` and
+    /// `scheduleLoadDemo`).
+    private static var isLoadDemoActive: Bool {
+        CommandLine.arguments.contains("-autoCupLoadDemo")
+    }
+
+    /// Full reseed: clears every die and rebuilds `count` of them from
+    /// scratch at their resting spread. This is the ORIGINAL `setDiceCount`
+    /// body — still what runs for the very first seed (see `attach`) and
+    /// whenever the target count DROPS (chip count changed under us, rare
+    /// enough not to warrant its own animation). Increments no longer come
+    /// through here — see `setDiceCount` below.
+    private func seedDice(count: Int) {
         let clamped = max(0, min(3, count))
-        guard clamped != dice.count else { return }
         dice.forEach { $0.removeFromParentNode() }
         dice = []
         for index in 0..<clamped {
@@ -710,7 +1010,7 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
                 // the fix for the "only one die visible" bug.
                 die.position = point
             } else {
-                // lookIn/glassBottom: the camera sits ON the tube's own
+                // lookIn/deepLookIn: the camera sits ON the tube's own
                 // axis of symmetry and this spread comfortably clears the
                 // tube's inner radius (5.2) either way, so no frustum
                 // math is needed here — unaffected by the bug above.
@@ -723,6 +1023,98 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
                                          CGFloat.random(in: 0..<(2 * .pi)))
             scene.rootNode.addChildNode(die)
             dice.append(die)
+        }
+    }
+
+    /// Called from `updateUIView` whenever the SwiftUI side's target dice
+    /// count changes. During the loading-mirror phase (owner feedback:
+    /// "you should be able to see each die entering the cup") this fires
+    /// once per `loadedDice` broadcast — one real die dragged into the
+    /// table's cup — and a HIGHER target than what's currently in the
+    /// scene means dice arrived: spawn just the new one(s) falling in from
+    /// the mouth (`spawnFromMouth`), leaving every die already resting in
+    /// the cup completely untouched — no rebuild, no flash, same physics
+    /// world throughout. Once `cupReady` flips true the target stops
+    /// changing (it's already at the full count), so this stays silent
+    /// through the rest of the turn. A target that DROPS falls back to a
+    /// full reseed — that direction was never spec'd to animate and is
+    /// rare enough (a chip count changing mid-turn) not to need to.
+    func setDiceCount(_ count: Int) {
+        guard !Self.isLoadDemoActive else { return } // the demo timeline owns dice count
+        let clamped = max(0, min(3, count))
+        if clamped == dice.count { return }
+        if clamped > dice.count {
+            spawnFromMouth(additional: clamped - dice.count)
+        } else {
+            seedDice(count: clamped)
+        }
+    }
+
+    /// Drops `additional` new dice in from the cup's mouth with real
+    /// downward velocity — the loading-mirror's actual "watch it enter the
+    /// cup" moment, and the same beat `-autoCupLoadDemo` exercises. Each
+    /// spawned die is a normal physics body from the instant it appears:
+    /// it falls under the SAME gravity as everything else, and the very
+    /// next contact it makes fires the ordinary rattle audio/haptic
+    /// (`DiceContactThrottle` doesn't know or care how a die got airborne)
+    /// — the "impact" the owner asked for comes for free, not bespoke.
+    private func spawnFromMouth(additional: Int) {
+        guard additional > 0 else { return }
+        for _ in 0..<additional {
+            guard dice.count < 3 else { break }
+            let die = DieNode(lcrDie: dice.count)
+            die.physicsBody?.damping = 0.30
+            die.physicsBody?.angularDamping = 0.45
+            die.physicsBody?.rollingFriction = 0.55
+            die.position = mouthSpawnPoint()
+            die.eulerAngles = SCNVector3(CGFloat.random(in: 0..<(2 * .pi)),
+                                         CGFloat.random(in: 0..<(2 * .pi)),
+                                         CGFloat.random(in: 0..<(2 * .pi)))
+            // "Downward" here means whichever direction gravity actually
+            // pulls in THIS concept's mapping (see `restingGravity`) — a
+            // kick-start in the direction the die was going to fall
+            // anyway, not a hardcoded world axis that could point the
+            // wrong way in the cross-section's tilted frame.
+            let fall = CupVector.normalized(restingGravity())
+            let speed: Float = 6.0
+            die.physicsBody?.velocity = SCNVector3(fall.x * speed + Float.random(in: -0.4...0.4),
+                                                    fall.y * speed,
+                                                    fall.z * speed + Float.random(in: -0.4...0.4))
+            scene.rootNode.addChildNode(die)
+            dice.append(die)
+        }
+    }
+
+    /// Where a newly-loaded die enters, near the mouth. For the
+    /// cross-section this reuses its own frustum helper (near the top of
+    /// the safe cone, i.e. mouth-ward) so the drop is actually IN the
+    /// camera's tight view — a die spawned at the tube's true geometric
+    /// mouth would very likely land outside that concept's narrow frame
+    /// and never be seen entering at all. lookIn/deepLookIn sit on the
+    /// tube's own axis of symmetry, so a simple near-mouth point with a
+    /// little scatter (clearing the 5.2 inner radius easily) is in frame
+    /// by construction.
+    private func mouthSpawnPoint() -> SCNVector3 {
+        if concept == .crossSection,
+           let point = crossSectionSpawnPoint(depth: 6.2, lateralFraction: .random(in: -0.5...0.5),
+                                              verticalFraction: 0.8) {
+            return point
+        }
+        return SCNVector3(CGFloat.random(in: -1.3...1.3), cupHeight - 1.4,
+                          CGFloat.random(in: -1.3...1.3))
+    }
+
+    /// Sim-verify hook for the loading mirror: `-autoCupLoadDemo` starts
+    /// the scene empty (see `attach`) and this fires one `spawnFromMouth`
+    /// every 2s until there are 3 dice in the cup, then stops itself — the
+    /// exact spawn-on-increment path a live `loadedDice` broadcast would
+    /// drive, screenshot-able mid-sequence without needing a real table.
+    private func scheduleLoadDemo() {
+        loadDemoTimer?.invalidate()
+        loadDemoTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            guard self.dice.count < 3 else { timer.invalidate(); return }
+            self.spawnFromMouth(additional: 1)
         }
     }
 
@@ -752,8 +1144,18 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
 
         let hard = magnitude > 1.5
         let lateralScale = Dice3D.mass * min(30, magnitude * 14)
-        let lift = Dice3D.mass * (hard ? CGFloat.random(in: 26...36)
-                                       : min(17, CGFloat(magnitude) * 8.5))
+        // The deep look-in's camera sits at the mouth looking down the
+        // shaft — a shake still needs a touch more lift than the classic
+        // cup for a hard rattle to bring a die up near the lens, but with
+        // the cup back at REAL proportions (~1.33× diameter deep, owner
+        // feedback: the 34-unit first pass was "not physically possible")
+        // the old 1.9× overshot violently into the lid. ~1.25× peaks a
+        // hard shake just under the mouth (v²/2g against
+        // `DiceScenePhysics.cupGravityStrength`). Scoped to `lift` alone:
+        // the lateral/rattle feel elsewhere is unchanged.
+        let axisScale: CGFloat = concept == .deepLookIn ? 1.25 : 1.0
+        let lift = Dice3D.mass * axisScale * (hard ? CGFloat.random(in: 26...36)
+                                              : min(17, CGFloat(magnitude) * 8.5))
         let push = mapToCup(x: -a.x, y: -a.y, z: -a.z)
         for die in dice {
             let jitter: (CGFloat) -> CGFloat = { CGFloat.random(in: -$0...$0) }
@@ -778,8 +1180,8 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
 }
 
 /// Programmatic textures that aren't the felt/leather cup lining (see
-/// CupSurfaces for that) — the room glow through the mouth and the glass
-/// base's polish streak. Generated once, cached.
+/// CupSurfaces for that) — just the room glow through the mouth. Generated
+/// once, cached.
 enum CupTextures {
     private static var cache: [String: UIImage] = [:]
 
@@ -802,26 +1204,6 @@ enum CupTextures {
                     startRadius: 0,
                     endCenter: CGPoint(x: size.width / 2, y: size.height / 2),
                     endRadius: size.width / 2,
-                    options: [])
-            }
-        }
-    }
-
-    /// A soft diagonal polish streak for the glass base (C3): faint white
-    /// wash, brightest along the center line, feathering to nothing.
-    static func glassStreak() -> UIImage {
-        cached("streak") { context, size in
-            let space = CGColorSpaceCreateDeviceRGB()
-            let core = UIColor(white: 1, alpha: 0.35)
-            let clear = UIColor(white: 1, alpha: 0)
-            if let gradient = CGGradient(
-                colorsSpace: space,
-                colors: [clear.cgColor, core.cgColor, clear.cgColor] as CFArray,
-                locations: [0, 0.5, 1]) {
-                context.drawLinearGradient(
-                    gradient,
-                    start: CGPoint(x: 0, y: 0),
-                    end: CGPoint(x: 0, y: size.height),
                     options: [])
             }
         }

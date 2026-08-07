@@ -169,6 +169,7 @@ struct HandView: View {
             .onAppear {
                 motion.start()
                 HandFlickTip.isEligible = showYourTurnBanner && !hand.isEmpty
+                applyDemoGestureIfAsked(size: geo.size)
             }
             .onDisappear { motion.stop() }
             .onChange(of: showYourTurnBanner) { _, newValue in
@@ -326,6 +327,15 @@ struct HandView: View {
                 let arrivalOffset: CGFloat = isArriving
                     ? (motionReduced ? -(size.height * 0.06) : -(size.height * 0.7))
                     : 0
+                // Wide-hand edge cue: fades toward the screen edges instead
+                // of the old mask-based crop (see edgeFadeOpacity's doc
+                // comment for why this replaced it). A card mid-play must
+                // never fade, no matter where it's dragged to.
+                let edgeOpacity = edgeFadeOpacity(displayedX: slot.offset.width,
+                                                   containerWidth: size.width,
+                                                   cardWidth: cardWidth,
+                                                   isWide: layout.isWide,
+                                                   exempt: isSelected)
 
                 CardView(card: card, faceUp: true, elevation: elevation)
                     .frame(width: cardWidth)
@@ -335,7 +345,7 @@ struct HandView: View {
                     .offset(x: slot.offset.width + dragOffset.width + cardParallax.width + fisheye.x,
                             y: slot.offset.height + dragOffset.height + cardParallax.height + fisheye.y + arrivalOffset)
                     .zIndex(isSelected ? 100 : (isArriving ? 95 : slot.zIndex + fisheye.zBoost))
-                    .opacity(departingCardID == card.id ? 0 : 1)
+                    .opacity(departingCardID == card.id ? 0 : edgeOpacity)
                     .gesture(playGesture(for: card, index: index, in: size))
                     .animation(.spring(response: 0.34, dampingFraction: 0.72),
                                value: selectedCardID)
@@ -348,13 +358,6 @@ struct HandView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        // Wide (scrollable) hands: a soft fade at the true screen edges
-        // instead of a hard crop, so the last visible card visibly trails
-        // off rather than looking like an accidental clip — the discoverable
-        // cue that there's more hand to browse to, with no chrome/indicator.
-        // Narrow hands get the identity gradient (opaque throughout), a
-        // no-op mask so nothing changes below the wide threshold.
-        .mask(edgeFadeMask(active: layout.isWide))
         // fan sits slightly into the bottom edge, like held cards, plus
         // the whole-fan parallax shift and a subtle roll from tilting.
         .offset(x: parallaxX, y: 30 + parallaxY)
@@ -369,24 +372,46 @@ struct HandView: View {
         .animation(.spring(response: 0.45, dampingFraction: 0.8), value: hand.count)
     }
 
-    /// Fades the fan to ~30% opacity right at the screen edges rather than
-    /// 0% — a hard fade to nothing would hide the very "there's a card
-    /// here" cue we want; dimming instead of erasing reads as "this
-    /// continues," not "this is cropped." `active: false` is fully opaque
-    /// (a no-op mask) for narrow hands, which never overflow the screen.
-    private func edgeFadeMask(active: Bool) -> some View {
-        LinearGradient(
-            stops: active ? [
-                .init(color: .white.opacity(0.3), location: 0),
-                .init(color: .white, location: 0.08),
-                .init(color: .white, location: 0.92),
-                .init(color: .white.opacity(0.3), location: 1)
-            ] : [
-                .init(color: .white, location: 0),
-                .init(color: .white, location: 1)
-            ],
-            startPoint: .leading, endPoint: .trailing
-        )
+    /// Wide-hand edge cue, per-card opacity — replaces a wave-4 `.mask()`
+    /// on the whole fan ZStack that turned out to be a REGRESSION, not a
+    /// nicety: SwiftUI's `.mask()` doesn't just fade, it clips the masked
+    /// view to its own rendered layer bounds. The fan's frame is only the
+    /// bottom ~42% of the screen (see `fan(in:)`'s call site), so that mask
+    /// cut wing cards off at the bottom AND made a card being swiped up
+    /// toward the play zone vanish the instant it left the fan's frame —
+    /// exactly the "slides under a green layer of felt" the field report
+    /// described. Even the identity (`active: false`) gradient still
+    /// clipped, since a mask forces layer compositing regardless of its
+    /// own content.
+    ///
+    /// Per-card opacity has no such bounds problem — each card's own
+    /// `.opacity()` is independent of every other view's frame, so a card
+    /// can fade near the fan's horizontal edges while still rendering
+    /// full-height all the way up the screen during a play.
+    ///
+    /// `displayedX` is the card's slot offset (pre-drag, pre-parallax,
+    /// pre-fisheye — those are small perturbations that would only add
+    /// jitter to the fade point, not correctness) relative to the fan's
+    /// horizontal center. `containerWidth` is the actual screen width, so
+    /// the ramp targets the true screen edge, not some inner fan boundary.
+    /// Ramps smoothly (smoothstep, matching the fisheye easing elsewhere in
+    /// this file) from fully opaque to ~25% over the outer half a
+    /// card-width, then holds at 25% for anything further off-edge — never
+    /// fully invisible, so the "there's more hand here" cue stays legible.
+    /// Narrow hands never overflow the screen, so they're always opaque.
+    /// A card that's selected/dragged (mid-play) is exempt unconditionally
+    /// — it must never fade, no matter where the gesture carries it.
+    private func edgeFadeOpacity(displayedX: CGFloat, containerWidth: CGFloat,
+                                  cardWidth: CGFloat, isWide: Bool, exempt: Bool) -> Double {
+        guard isWide, !exempt else { return 1 }
+        let halfWidth = containerWidth / 2
+        let rampDistance = max(cardWidth * 0.5, 1)
+        let rampStart = halfWidth - rampDistance
+        let distance = abs(displayedX)
+        guard distance > rampStart else { return 1 }
+        let t = min(1, (distance - rampStart) / rampDistance)
+        let eased = t * t * (3 - 2 * t) // smoothstep
+        return 1 - eased * 0.75 // 1.0 → 0.25
     }
 
     /// Extra separation + lift for cards near the browsing finger, falling
@@ -469,6 +494,34 @@ struct HandView: View {
     }
 
     // MARK: gesture
+
+    /// Sim-verify hook, wave 5: turns `-demoDragProgress <0...1>` (plus the
+    /// optional `-demoDragX <0...1>`, see DemoData) into the exact same
+    /// state a real mid-play drag would leave behind — `selectedCardID` and
+    /// `dragState.translation` — so a screenshot taken any time after
+    /// launch is a frozen, deterministic frame of "a card N% of the way to
+    /// the play zone," no timer or gesture simulation needed. Uses the
+    /// inverse of `CardDragState.playProgress`'s own math (progress =
+    /// -translation.height / (handHeight * 0.26)) so `1.0` really does land
+    /// exactly at the commit threshold, not an eyeballed approximation of
+    /// it. `-demoDragX` picks which card by lateral position rather than
+    /// raw index (0 = leftmost, 1 = rightmost, 0.5 default = the middle
+    /// card) so it stays meaningful across `-demoHandCount` sizes and can
+    /// target a wide hand's edge cards. No-op unless both `-demoHand` and
+    /// `-demoDragProgress` are present — real play never touches this path.
+    private func applyDemoGestureIfAsked(size: CGSize) {
+        guard DemoData.wantsHandDemo,
+              let rawProgress = DemoData.demoDragProgress,
+              !hand.isEmpty else { return }
+        let progress = min(1, max(0, rawProgress))
+        let dragX = min(1, max(0, DemoData.demoDragX))
+        let index = hand.count > 1 ? Int((dragX * Double(hand.count - 1)).rounded()) : 0
+        selectedCardID = hand[index].id
+        dragState = CardDragState()
+        dragState.isDragging = true
+        let threshold = size.height * 0.26
+        dragState.translation = CGSize(width: 0, height: -CGFloat(progress) * threshold)
+    }
 
     /// Gesture arbitration, all in one place: the first ~12pt of a drag
     /// decides its shape. Mostly horizontal (|dx| > |dy|) commits to a

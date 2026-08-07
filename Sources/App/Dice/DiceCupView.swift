@@ -6,13 +6,23 @@ import AVFoundation
 /// runs a dice game (`client.diceState != nil`).
 ///
 /// Your turn: you're looking straight down INSIDE a leather cup (a real
-/// SceneKit interior — DiceCupSceneView). Tilting the phone tilts gravity
-/// and the dice slide around the cup floor; shaking throws real impulses
-/// at them — hard shakes launch them up toward your eye. Every clack is a
-/// physics contact. Shakes bank pour energy; flip the phone face-down (or
-/// swipe down hard) to pour. The pour's intensity (0.3 + banked energy,
-/// clamped to 0.3…1.5) rides the wire to the table and scales the dice
-/// physics there. Not your turn: quiet standings.
+/// SceneKit interior — DiceCupSceneView) from the moment it's your turn,
+/// full stop — manual cup mode no longer swaps in a separate text screen
+/// first (owner feedback: "the visual on the screen when it's your turn
+/// to shake should be the cup already"). While `cupReady` is false the cup
+/// starts empty and fills in as dice are dragged into the table's cup —
+/// each one drops in from the mouth and lands with a real physics
+/// contact, the same beat as a card arriving in the hand — with the "load
+/// your dice" instruction riding as an overlay on top, in the app's
+/// established italic ghost-hint voice, until it flips true. From there
+/// it's the SAME scene instance straight through to shake-and-pour: no
+/// rebuild, no flash. Tilting the phone tilts gravity and the dice slide
+/// around the cup floor; shaking throws real impulses at them — hard
+/// shakes launch them up toward your eye. Every clack is a physics
+/// contact. Shakes bank pour energy; flip the phone face-down (or swipe
+/// down hard) to pour. The pour's intensity (0.3 + banked energy, clamped
+/// to 0.3…1.5) rides the wire to the table and scales the dice physics
+/// there. Not your turn: quiet standings.
 struct DiceCupView: View {
     @Bindable var client: GameClientController
     @State private var model = DiceCupModel()
@@ -32,14 +42,10 @@ struct DiceCupView: View {
                 if state.gameOver {
                     gameOverView(state)
                 } else if state.isMyTurn {
-                    if state.cupReady {
-                        cupStage(state)
-                    } else {
-                        // Manual cup mode: the table wants this player's
-                        // dice dragged into the rail cup before the phone
-                        // can shake-and-pour.
-                        loadDiceView(state)
-                    }
+                    // Always the cup, ready or still loading — see the
+                    // type doc above. `cupStage` itself branches on
+                    // `cupReady` for the overlay/dice-count only.
+                    cupStage(state)
                 } else {
                     standingsView(state)
                 }
@@ -58,13 +64,20 @@ struct DiceCupView: View {
             }
             model.setTurnActive(client.diceState?.isMyTurn == true)
             scheduleAutoPourIfAsked(client.diceState?.isMyTurn == true)
-            DiceCupPourTip.isEligible = client.diceState?.isMyTurn == true
+            updatePourTipEligibility()
         }
         .onDisappear { model.setTurnActive(false) }
         .onChange(of: client.diceState?.isMyTurn) { _, isMyTurn in
             model.setTurnActive(isMyTurn == true)
             scheduleAutoPourIfAsked(isMyTurn == true)
-            DiceCupPourTip.isEligible = isMyTurn == true
+            updatePourTipEligibility()
+        }
+        .onChange(of: client.diceState?.cupReady) { _, _ in
+            // The shake-to-pour tip should only ever appear once there's
+            // actually something to shake — during the loading phase
+            // (cupReady == false) it stays suppressed even though the
+            // scene underneath is already visible.
+            updatePourTipEligibility()
         }
     }
 
@@ -78,26 +91,9 @@ struct DiceCupView: View {
         }
     }
 
-    // MARK: - Your turn, cup not loaded yet (manual cup mode)
-
-    /// The table is waiting for this player's dice to be dragged into the
-    /// rail cup. The phone can't do the loading — it just says where the
-    /// action is, in the same voice as the lobby's "watch the iPad".
-    private func loadDiceView(_ state: DiceClientState) -> some View {
-        VStack(spacing: 14) {
-            Text("Your roll!")
-                .font(.system(.title, design: .serif).weight(.bold))
-                .foregroundStyle(CardStyle.gold)
-            Text("Load your dice into the cup on the table")
-                .font(.system(.title3, design: .serif).italic())
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.white.opacity(0.85))
-            Text("Drag each die into the cup at your seat — then shake your phone.")
-                .font(.footnote)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.white.opacity(0.55))
-        }
-        .padding(.horizontal, 32)
+    private func updatePourTipEligibility() {
+        DiceCupPourTip.isEligible = client.diceState?.isMyTurn == true
+            && client.diceState?.cupReady == true
     }
 
     // MARK: - Your turn: the cup
@@ -111,7 +107,7 @@ struct DiceCupView: View {
                 // to edge, in whichever of the three looks this player
                 // prefers. Dice roll around inside as the phone tilts and
                 // shakes. `.id` rebuilds the scene instantly on toggle.
-                DiceCupSceneView(diceCount: myDiceCount(state), model: model,
+                DiceCupSceneView(diceCount: cupSceneDiceCount(state), model: model,
                                  concept: cupConcept)
                     .id(cupConcept)
                     .ignoresSafeArea()
@@ -137,15 +133,20 @@ struct DiceCupView: View {
                     .padding(.top, 8)
                     .shadow(color: .black.opacity(0.8), radius: 6)
                     Spacer()
-                    VStack(spacing: 10) {
-                        energyMeter
-                        Text("Shake to rattle the dice,\nthen flip your phone over to pour")
-                            .font(.footnote)
-                            .multilineTextAlignment(.center)
-                            .foregroundStyle(.white.opacity(0.7))
-                            .shadow(color: .black.opacity(0.8), radius: 4)
+                    if state.cupReady {
+                        VStack(spacing: 10) {
+                            energyMeter
+                            Text("Shake to rattle the dice,\nthen flip your phone over to pour")
+                                .font(.footnote)
+                                .multilineTextAlignment(.center)
+                                .foregroundStyle(.white.opacity(0.7))
+                                .shadow(color: .black.opacity(0.8), radius: 4)
+                        }
+                        .padding(.bottom, 14)
+                    } else {
+                        loadInstructionOverlay
+                            .padding(.bottom, 14)
                     }
-                    .padding(.bottom, 14)
                 }
                 .allowsHitTesting(false)
 
@@ -186,9 +187,49 @@ struct DiceCupView: View {
         return min(max(state.chips[state.mySeat], 0), 3)
     }
 
+    /// What `DiceCupSceneView` should actually show right now: the full
+    /// required count once `cupReady`, or however many have been loaded
+    /// so far while it isn't (clamped to the required count — a stale/
+    /// racy `loadedDice` should never overfill the cup). This is the
+    /// number that drives the loading mirror: each time the host
+    /// broadcasts one more loaded die, this ticks up by one and the scene
+    /// spawns exactly that one die falling in from the mouth (see
+    /// `DiceCupSceneCoordinator.setDiceCount`) — the SAME scene instance
+    /// the shake-and-pour stage keeps using once ready.
+    private func cupSceneDiceCount(_ state: DiceClientState) -> Int {
+        let required = myDiceCount(state)
+        guard !state.cupReady else { return required }
+        return min(max(state.loadedDice, 0), required)
+    }
+
     private func rollingDiceLabel(_ state: DiceClientState) -> String {
-        let count = myDiceCount(state)
-        return count == 1 ? "Rolling 1 die" : "Rolling \(count) dice"
+        let required = myDiceCount(state)
+        guard state.cupReady else {
+            let loaded = min(max(state.loadedDice, 0), required)
+            return "\(loaded) of \(required) dice loaded"
+        }
+        return required == 1 ? "Rolling 1 die" : "Rolling \(required) dice"
+    }
+
+    /// The "load your dice into the table cup" gate, as an overlay on TOP
+    /// of the same cup scene the shake-and-pour stage uses (owner
+    /// feedback: "the visual on the screen when it's your turn to shake
+    /// should be the cup already" — this used to be a whole separate
+    /// screen; now it's just a hint riding over the real thing). Styled in
+    /// the app's established italic ghost-hint voice — same serif-italic,
+    /// gold-tinted-on-dark voice as `GhostHintTipView`'s tips elsewhere —
+    /// but not built ON TipKit itself: this has to reappear every time
+    /// `cupReady` is false, not just once ever. Vanishes the instant
+    /// `cupReady` flips true; the scene underneath never rebuilds.
+    private var loadInstructionOverlay: some View {
+        Text("Load your dice into the cup on the table")
+            .font(.system(.title3, design: .serif).italic())
+            .multilineTextAlignment(.center)
+            .foregroundStyle(.white.opacity(0.85))
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .background(Capsule().fill(.black.opacity(0.4)))
+            .shadow(color: .black.opacity(0.6), radius: 6)
     }
 
     private var energyMeter: some View {

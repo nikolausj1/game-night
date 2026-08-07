@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Programmatic UNO cards — no image assets, drawn to read as the modern
 /// printed deck at a glance: saturated color field to a thin white
@@ -33,6 +34,18 @@ enum UnoStyle {
     }
 
     static let allFour: [Color] = [red, yellow, green, blue]
+
+    /// `color` mixed toward white by `t` (0...1) — used to punch up the
+    /// called-color glow so it reads as a saturated LED bloom rather than
+    /// the flat print color it's glowing on top of.
+    static func brightened(_ color: Color, by t: CGFloat) -> Color {
+        let ui = UIColor(color)
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        ui.getRed(&r, green: &g, blue: &b, alpha: &a)
+        return Color(red: Double(r + (1 - r) * t),
+                     green: Double(g + (1 - g) * t),
+                     blue: Double(b + (1 - b) * t))
+    }
 }
 
 // MARK: - Active color (discard-top glow)
@@ -62,6 +75,8 @@ struct UnoCardFaceView: View {
     /// Only set by the discard pile's own top-card render — see
     /// `unoActiveColor` above.
     @Environment(\.unoActiveColor) private var activeColor
+    /// Reduce Motion: the called-color glow stays lit but stops breathing.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Drives the called-color glow's slow breathe. Only ever animated when
     /// this face is actually a wild sitting on top with a color called, so
     /// idle hand cards and buried discards never pay for a repeating timer.
@@ -89,11 +104,29 @@ struct UnoCardFaceView: View {
             }
         }
         .aspectRatio(CardStyle.aspectRatio, contentMode: .fit)
-        .onAppear {
-            guard isWildFace, activeColor != nil else { return }
-            withAnimation(.easeInOut(duration: 1.3).repeatForever(autoreverses: true)) {
-                glowPulse = true
-            }
+        .onAppear { updateGlow() }
+        // The discard top's view instance persists while a wild sits there
+        // waiting for its color — `onAppear` alone would miss the moment
+        // the color actually gets called, so re-evaluate on that change too.
+        .onChange(of: activeColor) { _, _ in updateGlow() }
+    }
+
+    /// Starts (or stops) the called-color breathing glow. Gated so the
+    /// repeating animation only ever runs on a wild face that's actually
+    /// showing a called color — everything else pays nothing. Under Reduce
+    /// Motion the glow snaps straight to its lit state and stays there,
+    /// steady, with no breathing.
+    private func updateGlow() {
+        guard isWildFace, activeColor != nil else {
+            glowPulse = false
+            return
+        }
+        guard !reduceMotion else {
+            glowPulse = true
+            return
+        }
+        withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
+            glowPulse = true
         }
     }
 
@@ -116,17 +149,48 @@ struct UnoCardFaceView: View {
         let ellipseH = w * 0.62
         if case .wild = symbol {
             ZStack {
-                // The called-color halo: a soft blurred gold ellipse sitting
-                // BEHIND the wheel, outside its clip shape, so it reads as
-                // light bleeding out from under the card art rather than a
-                // hard-edged ring trapped inside the ellipse.
-                if activeColor != nil {
-                    Ellipse()
-                        .fill(CardStyle.gold.opacity(glowPulse ? 0.55 : 0.22))
-                        .frame(width: ellipseW * 1.1, height: ellipseH * 1.1)
-                        .blur(radius: w * 0.045)
+                // The called-color bloom: the CALLED QUADRANT'S OWN wedge
+                // shape (not a generic halo around the whole wheel) redrawn
+                // oversized, blurred, and clipped to progressively larger
+                // ellipses — three passes at increasing radius/opacity fake
+                // a soft falloff instead of one flat blob. Sitting behind
+                // the wheel, outside its clip, so it reads as light
+                // bleeding out from under that ONE piece of the pie —
+                // exactly the design element the owner wants glowing —
+                // never as a wash over the whole card.
+                if let activeColor {
+                    let glowColor = UnoStyle.field(for: activeColor)
+                    let angles = WildWheel.quadrant(for: activeColor)
+                    let pulseOpacity: Double = glowPulse ? 1.0 : 0.55
+                    ZStack {
+                        PieSlice(startAngle: angles.0, endAngle: angles.1)
+                            .fill(glowColor)
+                            .frame(width: ellipseW * 1.55, height: ellipseH * 1.55)
+                            .clipShape(Ellipse())
+                            .blur(radius: w * 0.11)
+                            .opacity(0.40 * pulseOpacity)
+                        PieSlice(startAngle: angles.0, endAngle: angles.1)
+                            .fill(glowColor)
+                            .frame(width: ellipseW * 1.30, height: ellipseH * 1.30)
+                            .clipShape(Ellipse())
+                            .blur(radius: w * 0.065)
+                            .opacity(0.60 * pulseOpacity)
+                        PieSlice(startAngle: angles.0, endAngle: angles.1)
+                            .fill(UnoStyle.brightened(glowColor, by: 0.3))
+                            .frame(width: ellipseW * 1.12, height: ellipseH * 1.12)
+                            .clipShape(Ellipse())
+                            .blur(radius: w * 0.03)
+                            .opacity(0.80 * pulseOpacity)
+                    }
+                    // The whole bloom stack breathes outward slightly —
+                    // the closest safe stand-in for "enlarging the called
+                    // quadrant": the wedge fill itself is already clipped
+                    // flush to the card edge with no room to grow, but the
+                    // glow around it visibly swells, reading as the same
+                    // "popping proud" cue.
+                    .scaleEffect(glowPulse ? 1.08 : 1.0)
                 }
-                WildWheel(activeColor: activeColor)
+                WildWheel(activeColor: activeColor, pulse: glowPulse)
                     .frame(width: ellipseW, height: ellipseH)
                     .overlay(
                         Ellipse()
@@ -206,6 +270,7 @@ struct UnoCardFaceView: View {
         return ZStack {
             ForEach(Array(layout.enumerated()), id: \.offset) { _, spec in
                 let isCalled = activeColor != nil && spec.uno == activeColor
+                let dim = activeColor != nil && !isCalled
                 RoundedRectangle(cornerRadius: cardW * 0.16, style: .continuous)
                     .fill(spec.color)
                     .overlay(
@@ -213,18 +278,34 @@ struct UnoCardFaceView: View {
                             .strokeBorder(.black, lineWidth: outline)
                     )
                     .overlay(
-                        // A thin gold ring on the called panel itself, on
-                        // top of the black print outline.
+                        // A bright ring on the called panel itself, IN ITS
+                        // OWN COLOR (not gold) — on top of the black print
+                        // outline.
                         RoundedRectangle(cornerRadius: cardW * 0.16, style: .continuous)
-                            .strokeBorder(CardStyle.gold, lineWidth: isCalled ? outline * 0.55 : 0)
+                            .strokeBorder(UnoStyle.brightened(spec.color, by: 0.4),
+                                          lineWidth: isCalled ? outline * (glowPulse ? 0.75 : 0.5) : 0)
                     )
                     .frame(width: cardW, height: cardH)
+                    // The other three panels dim slightly once a color's
+                    // called, so the called one visibly owns the stack.
+                    .opacity(dim ? 0.75 : 1)
                     .rotationEffect(.degrees(spec.angle))
                     .offset(x: spec.dx * w * 0.16, y: spec.dy * w * 0.16)
-                    // Soft gold-tinged halo, pulsing gently — tasteful, not
-                    // a strobe. Only the called panel casts it.
-                    .shadow(color: isCalled ? CardStyle.gold.opacity(glowPulse ? 0.85 : 0.35) : .clear,
+                    // A gentle pop off the stack — the called mini-card
+                    // physically stands proud of the others, breathing
+                    // with the rest of the glow.
+                    .scaleEffect(isCalled ? (glowPulse ? 1.12 : 1.05) : 1.0)
+                    // Layered colored bloom — three passes at increasing
+                    // radius/opacity, in the panel's OWN color, so the
+                    // called card visibly glows rather than just outlines.
+                    // Only the called panel casts it; pulses gently, not a
+                    // strobe.
+                    .shadow(color: isCalled ? spec.color.opacity(glowPulse ? 0.9 : 0.5) : .clear,
+                            radius: isCalled ? cardW * (glowPulse ? 0.20 : 0.12) : 0)
+                    .shadow(color: isCalled ? spec.color.opacity(glowPulse ? 0.6 : 0.3) : .clear,
                             radius: isCalled ? cardW * (glowPulse ? 0.42 : 0.26) : 0)
+                    .shadow(color: isCalled ? spec.color.opacity(glowPulse ? 0.35 : 0.15) : .clear,
+                            radius: isCalled ? cardW * (glowPulse ? 0.75 : 0.50) : 0)
             }
         }
     }
@@ -322,25 +403,44 @@ private struct PieSlice: Shape {
 
 private struct WildWheel: View {
     /// The called color, when this wheel is the discard top and a color's
-    /// been picked — traces its quadrant in gold on top of the print.
+    /// been picked — traces its quadrant in ITS OWN color on top of the
+    /// print, and dims the other three so the called one owns the card.
     var activeColor: UnoColor? = nil
+    /// Shared breathe state from the face view — keeps the rim's pulse in
+    /// lockstep with the bloom halo drawn behind this wheel.
+    var pulse: Bool = false
 
     var body: some View {
         ZStack {
-            PieSlice(startAngle: .degrees(180), endAngle: .degrees(270)).fill(UnoStyle.red)     // top-left
-            PieSlice(startAngle: .degrees(270), endAngle: .degrees(360)).fill(UnoStyle.blue)     // top-right
-            PieSlice(startAngle: .degrees(90), endAngle: .degrees(180)).fill(UnoStyle.yellow)    // bottom-left
-            PieSlice(startAngle: .degrees(0), endAngle: .degrees(90)).fill(UnoStyle.green)       // bottom-right
+            PieSlice(startAngle: .degrees(180), endAngle: .degrees(270)).fill(quadrantFill(.red))     // top-left
+            PieSlice(startAngle: .degrees(270), endAngle: .degrees(360)).fill(quadrantFill(.blue))     // top-right
+            PieSlice(startAngle: .degrees(90), endAngle: .degrees(180)).fill(quadrantFill(.yellow))    // bottom-left
+            PieSlice(startAngle: .degrees(0), endAngle: .degrees(90)).fill(quadrantFill(.green))       // bottom-right
             if let activeColor {
+                // The rim: a thick, bright stroke traced on the called
+                // quadrant's own boundary, IN ITS OWN COLOR — the glow
+                // comes from the design element itself, not a decoration
+                // laid over it. Breathes with the rest of the effect.
                 let angles = Self.quadrant(for: activeColor)
+                let rimColor = UnoStyle.brightened(UnoStyle.field(for: activeColor), by: 0.45)
                 PieSlice(startAngle: angles.0, endAngle: angles.1)
-                    .stroke(CardStyle.gold, lineWidth: 2)
+                    .stroke(rimColor, lineWidth: pulse ? 5 : 3.5)
+                    .shadow(color: UnoStyle.field(for: activeColor), radius: pulse ? 4 : 2)
             }
         }
         .clipShape(Ellipse())
     }
 
-    private static func quadrant(for color: UnoColor) -> (Angle, Angle) {
+    /// The called quadrant prints at full strength; once a color's been
+    /// called, the other three dim (~80% brightness) so they read as
+    /// background instead of competing for attention.
+    private func quadrantFill(_ color: UnoColor) -> Color {
+        let base = UnoStyle.field(for: color)
+        guard let activeColor, activeColor != color else { return base }
+        return base.opacity(0.8)
+    }
+
+    static func quadrant(for color: UnoColor) -> (Angle, Angle) {
         switch color {
         case .red: return (.degrees(180), .degrees(270))
         case .blue: return (.degrees(270), .degrees(360))

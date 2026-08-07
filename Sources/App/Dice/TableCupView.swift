@@ -49,17 +49,33 @@ struct TableCupView: View {
     private let bodyWidth: CGFloat = 172
     private var bodyHeight: CGFloat { bodyWidth * (968.0 / 879.0) }
 
+    /// The `TableCup` photograph itself bakes in a slight rightward lean —
+    /// shot at an angle, not straight down the mouth's own axis — so drawn
+    /// at 0° rotation the mouth reads as aimed up-and-right instead of
+    /// straight up (owner feedback: "tilting off to the right a little
+    /// bit... let's make it look perfect"). This counter-rotates the IMAGE
+    /// ONLY, before `edge.rotation` carries the (now-straightened) cup to
+    /// each rail, so the mouth axis points at the table center for every
+    /// seat instead of consistently drifting right. Picked by eye against
+    /// screenshots, in the owner-suggested −10°…−15° range: negative
+    /// (SwiftUI's rotationEffect is clockwise-positive) cancels a
+    /// clockwise/rightward bake. `mouthOffset`'s secondary "tilt" term
+    /// shrinks to match — it doesn't hit zero because a 2D rotation can
+    /// only approximate undoing a photographed 3D object's own perspective
+    /// tilt, so a small residual keeps the drop zone honest.
+    private let assetTiltCorrection: Angle = .degrees(-13.5)
+
     /// Where the mouth sits relative to wherever the caller `.position()`s
     /// this view, ALREADY rotated for `edge` — callers (DiceTableView's
-    /// cup layer AND the SceneKit drag-drop layer) aim there without
-    /// needing to know the cup's internal layout. The photo's mouth sits
-    /// in the upper third of the frame with a slight rightward tilt; the
+    /// cup layer, FreePlayDiceLayer, AND the SceneKit drag-drop layer) aim
+    /// there without needing to know the cup's internal layout. The
     /// dominant "toward table center" component matches the old vector
     /// cup's per-edge geometry (so table placement math didn't need to
-    /// change), with a small secondary offset for that tilt.
+    /// change), with a small secondary offset for the residual tilt
+    /// `assetTiltCorrection` doesn't fully cancel.
     static func mouthOffset(for edge: RailEdge) -> CGVector {
         let distance: CGFloat = 58
-        let tilt: CGFloat = 14
+        let tilt: CGFloat = 2
         switch edge {
         case .bottom: return CGVector(dx: tilt, dy: -distance)
         case .top: return CGVector(dx: -tilt, dy: distance)
@@ -75,6 +91,7 @@ struct TableCupView: View {
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(width: bodyWidth, height: bodyHeight)
+                .rotationEffect(assetTiltCorrection)
                 .shadow(color: .black.opacity(0.55), radius: 12, y: 8)
         }
         .rotationEffect(edge.rotation)

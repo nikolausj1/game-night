@@ -40,7 +40,10 @@ struct TableGameView: View {
     @State private var motionJitter: CGSize = .zero
 
     /// Sandbox dice in free play — a physics toy, no rules attached.
-    @State private var freePlayDiceOn = false
+    /// `-demoFreePlayDice` (sim-verify hook): starts with the dice toy on,
+    /// so the cup-by-the-plate flow is screenshot-testable — simctl can't
+    /// tap the tray toggle.
+    @State private var freePlayDiceOn = CommandLine.arguments.contains("-demoFreePlayDice")
     @State private var freePlayCoinsOn = false
     @State private var freePlayRoll: DiceGameController.Roll?
     @State private var freePlayRollCounter = 10_000 // clear of LCR roll ids
@@ -116,11 +119,23 @@ struct TableGameView: View {
                             .zIndex(2) // above the rail (1): live drag feedback stays under the finger
                         // Sandbox dice: a pure physics toy layered on the felt.
                         if freePlayDiceOn {
-                            DiceTableSceneView(roll: freePlayRoll,
-                                               anchor: CGPoint(x: 0.5, y: 0.94),
-                                               onResult: { _, _ in freePlayRoll = nil })
-                                .allowsHitTesting(false)
+                            // The full cup experience, sandbox edition:
+                            // FreePlayDiceLayer wires the cup at seat 0's
+                            // plate, manual loading, and touch-through —
+                            // the old bare DiceTableSceneView mount had
+                            // hit-testing disabled, so dice could never
+                            // be picked up ("I can't use DICE on free
+                            // play").
+                            FreePlayDiceLayer(host: host, size: geo.size,
+                                              roll: freePlayRoll,
+                                              onResult: { _, _ in freePlayRoll = nil })
+                                // Above the rail (1): the cup mounts at
+                                // seat 0's plate, and the rail-hand card
+                                // backs would otherwise paint right over
+                                // it (they did — screenshot-caught).
+                                .zIndex(1.5)
                             Button {
+                                guard host.freePlayCanRoll else { return }
                                 Haptics.arm()
                                 freePlayRollCounter += 1
                                 freePlayRoll = DiceGameController.Roll(
@@ -129,12 +144,14 @@ struct TableGameView: View {
                             } label: {
                                 Label("Roll", systemImage: "dice.fill")
                                     .font(.system(.subheadline, design: .serif).weight(.semibold))
-                                    .foregroundStyle(CardStyle.gold)
+                                    .foregroundStyle(host.freePlayCanRoll
+                                        ? CardStyle.gold : CardStyle.gold.opacity(0.4))
                                     .padding(.horizontal, 16)
                                     .padding(.vertical, 10)
                                     .background(Capsule().fill(.black.opacity(0.4)))
                             }
                             .buttonStyle(.plain)
+                            .disabled(!host.freePlayCanRoll)
                             .position(x: geo.size.width - 130, y: geo.size.height - 96)
                         }
                         // Sandbox coins: draggable toy chips, no rules.
@@ -198,24 +215,11 @@ struct TableGameView: View {
                     // paint over a banner or a control.
                     phaseOverlay(state: state)
                         .zIndex(10)
-                    // MOUNT(signage): color chip overlay here — direction arc
-                    // and event callouts are gone per owner feedback (arrow
-                    // was noise on top of the plate glow; the felt already
-                    // says who's up, and the color chip only needs to speak
-                    // for wilds — see the wild-only guard below).
-                    if state.gameKind == .uno,
-                       case .uno(nil, _)? = state.discardPile.last?.kind,
-                       let declared = state.round?.trumpSuit?.unoColor {
-                        // A non-wild top card already shows its own printed
-                        // color on the card face — the chip would just be
-                        // noise. Only a wild (which carries no color of its
-                        // own) needs the declared color spelled out.
-                        ActiveColorChip(color: declared)
-                            .position(x: 0.52 * geo.size.width,
-                                      y: 0.34 * geo.size.height)
-                            .allowsHitTesting(false)
-                            .zIndex(9)
-                    }
+                    // The ActiveColorChip overlay is gone per owner feedback:
+                    // the wild card's own panel glow (UnoCardViews, wired via
+                    // the `.unoActiveColor` environment key set in shedPile)
+                    // is now the sole "what color is live" indicator — a
+                    // second badge floating above it was redundant noise.
                     if !isSpectator {
                         GameHUD(title: state.gameKind.displayName,
                                 onExit: { onClose?() },
@@ -253,6 +257,7 @@ struct TableGameView: View {
                     seenCardIDs.formIntersection(current)
                     rotationByCard = rotationByCard.filter { current.contains($0.key) }
                     deckStackCardIDs.formIntersection(current)
+                    pileDropProgress = pileDropProgress.filter { current.contains($0.key) }
                 }
                 .onChange(of: state.round?.roundNumber) { _, newRound in
                     // Auto-deal only: manual dealing IS its own animation.
@@ -615,6 +620,14 @@ struct TableGameView: View {
     @State private var slidingCards: Set<String> = []
     /// Free play, dev-toggle "arc" throws: height above felt (see shedPile).
     @State private var fpLifts: [String: CGFloat] = [:]
+    /// Free play "arc" throws in flight: one progress scalar per card,
+    /// same single-progress treatment as the shed pile (see
+    /// `PileTossCardView`/`FeltPhysics.evaluate`) — no separate lift/
+    /// position/rotation animations to fall out of step with each other.
+    /// Present only while a pile-drop card is airborne; removed on landing,
+    /// at which point `host.freePlayLayout`/`rotationByCard` (the normal
+    /// felt-card state) take back over.
+    @State private var pileDropProgress: [String: CGFloat] = [:]
     /// 3D flip angle per card while a flip is in motion.
     @State private var flipAngle: [String: Double] = [:]
     /// Free play: card ids about to arrive via tap-the-deck (`flipTopCard`),
@@ -641,10 +654,50 @@ struct TableGameView: View {
         }
     }
 
+    /// The deterministic toss geometry for a free-play "arc" throw (dev
+    /// sandbox toggle) — same solve the shed pile uses, just landing at a
+    /// slightly-jittered center point instead of the discard pile. `nil`
+    /// unless this card actually arrived via `host.pileDropCards`.
+    private func pileDropToss(for cardID: String, state: GameState, size: CGSize) -> FeltPhysics.PileToss? {
+        guard host.pileDropCards.contains(cardID) else { return nil }
+        let anchors = effectiveAnchors(state)
+        let seat = host.seatByPlayedCard[cardID]
+        let anchor = seat.flatMap { anchors.indices.contains($0) ? anchors[$0] : nil }
+        let restPoint = CGPoint(x: 0.52 + Double(TableGeometry.jitterDegrees(cardID: cardID)) * 0.0004,
+                                y: 0.47 + Double(TableGeometry.jitterDegrees(cardID: cardID + "y")) * 0.0003)
+        return FeltPhysics.pileToss(cardID: cardID, seatAnchor: anchor, restPoint: restPoint, tableSize: size)
+    }
+
     /// One free-play card on the felt. (Its own function — inlined in the
     /// ForEach the expression blew the type-checker's budget.)
+    ///
+    /// While a card is mid-flight on an "arc" pile-drop throw, this renders
+    /// through `PileTossCardView` instead of the normal drag/flip pipeline
+    /// below — same single-progress mechanism the shed pile uses, so the
+    /// two-part "slide then drop" bug can't happen here either. It swaps
+    /// back to the normal rendering the instant the throw lands (see
+    /// `animateArrivalIfNew`, which clears `pileDropProgress` on touchdown).
+    @ViewBuilder
     private func freePlayCard(card: Card, index: Int, state: GameState,
                               size: CGSize) -> some View {
+        if let toss = pileDropToss(for: card.id, state: state, size: size),
+           let progress = pileDropProgress[card.id], progress < 1 {
+            PileTossCardView(progress: progress, card: card, toss: toss,
+                             cardWidth: TableGeometry.tableCardWidth(for: size),
+                             tableSize: size, groundZIndex: Double(index))
+                .transition(.opacity)
+                .onAppear { animateArrivalIfNew(card: card, state: state, size: size) }
+        } else {
+            freePlayRestingCard(card: card, index: index, state: state, size: size)
+        }
+    }
+
+    /// The normal, interactive free-play card: draggable, flippable, and
+    /// grounded (or mid friction-slide — see `slidingCards`). Split out of
+    /// `freePlayCard` so the in-flight pile-drop branch above can bypass it
+    /// entirely rather than fighting it for the same position state.
+    private func freePlayRestingCard(card: Card, index: Int, state: GameState,
+                                     size: CGSize) -> some View {
         let cardWidth = TableGeometry.tableCardWidth(for: size)
         let jitter = TableGeometry.jitterDegrees(cardID: card.id)
         let dx = TableGeometry.jitterDegrees(cardID: String(card.id.reversed())) / 90.0
@@ -773,156 +826,99 @@ struct TableGameView: View {
     }
 
     /// UNO / Crazy Eights: the discard is the heart of the table. Every
-    /// play travels the whole way — off the thrower's edge, across the
-    /// felt, then PLACED on top of the pile: it overshoots a touch high
-    /// and drops flat like a hand letting go of a card.
-    /// Explicit two-phase animation (never a SwiftUI transition — those
-    /// proved unreliable for network-driven insertions).
-    @State private var shedPoses: [String: CGPoint] = [:]      // ground-track position
-    @State private var shedRotations: [String: Double] = [:]
-    /// Height above the felt in points. The card renders LIFTED above its
-    /// ground position and casts a SEPARATED shadow at ground level — the
-    /// gap between card and shadow is what reads as "flying".
-    @State private var shedLifts: [String: CGFloat] = [:]
+    /// play travels the whole way — off the thrower's edge, onto the pile —
+    /// in ONE continuous motion (see `FeltPhysics.PileToss`). `shedProgress`
+    /// is the ONLY thing animated: a single scalar per card, driving
+    /// `PileTossCardView` below, which derives position/height/rotation/
+    /// scale/shadow from it every frame. That's the whole fix for "two-part
+    /// motion" — there is structurally only one motion left to desync from.
+    @State private var shedProgress: [String: CGFloat] = [:]
     @State private var shedSeen: Set<String> = []
+
+    /// Where a shed-pile card comes to rest: near table center, jittered
+    /// per-card so the pile doesn't perfectly overlap. Normalized (0…1).
+    private func shedRestPoint(cardID: String, size: CGSize) -> CGPoint {
+        CGPoint(x: 0.52 + CGFloat(TableGeometry.jitterDegrees(cardID: cardID)) * 0.35 / size.width,
+               y: 0.47 + CGFloat(TableGeometry.jitterDegrees(cardID: cardID + "y")) * 0.3 / size.height)
+    }
 
     private func shedPile(state: GameState, size: CGSize) -> some View {
         let recent = state.discardPile.suffix(4)
         let cardWidth = TableGeometry.tableCardWidth(for: size)
+        let anchors = effectiveAnchors(state)
         return ForEach(Array(recent.enumerated()), id: \.element.id) { index, card in
-            let jitter = TableGeometry.jitterDegrees(cardID: card.id)
-            let restPos = CGPoint(
-                x: 0.52 * size.width + CGFloat(jitter) * 0.35,
-                y: 0.47 * size.height + CGFloat(TableGeometry.jitterDegrees(cardID: card.id + "y")) * 0.3)
-            let ground = shedPoses[card.id] ?? restPos
-            let lift = shedLifts[card.id] ?? 0
+            let seat = host.seatByPlayedCard[card.id]
+            let seatAnchor = seat.flatMap { anchors.indices.contains($0) ? anchors[$0] : nil }
+            let toss = FeltPhysics.pileToss(cardID: card.id, seatAnchor: seatAnchor,
+                                            restPoint: shedRestPoint(cardID: card.id, size: size),
+                                            tableSize: size)
+            // Cards not yet tracked default to fully home (1) — only a
+            // genuinely new arrival (see animateShedArrival) starts at 0.
+            let progress = shedProgress[card.id] ?? 1
 
-            ZStack {
-                // The ground shadow: lives ON the felt while the card is in
-                // the air. Softer, wider, and fainter the higher the card;
-                // it merges into a contact shadow exactly at touchdown.
-                if lift > 0.5 {
-                    Ellipse()
-                        .fill(.black.opacity(0.30 - Double(lift) * 0.0016))
-                        .frame(width: cardWidth * (0.92 - lift * 0.0022),
-                               height: cardWidth * 0.62 * (0.92 - lift * 0.0022))
-                        .blur(radius: 3 + lift * 0.16)
-                        .position(ground)
-                }
-                // The card itself: lifted above its ground track, bigger
-                // when higher (closer to your eyes), spinning down to rest.
-                CardView(card: card, faceUp: true, elevation: 0)
-                    .frame(width: cardWidth)
-                    .rotationEffect(.degrees(shedRotations[card.id] ?? jitter * 1.8))
-                    .scaleEffect(1 + lift * 0.0032)
-                    .position(x: ground.x, y: ground.y - lift)
-                    .shadow(color: .black.opacity(lift > 0.5 ? 0 : 0.28),
-                            radius: 2, y: 1) // contact shadow only when down
-            }
-            .zIndex(lift > 0.5 ? 400 : Double(index))
-            // Top card only: a called wild color makes the wild's own
-            // panel glow (UnoCardViews). Scoped here so hands never glow.
-            .environment(\.unoActiveColor,
-                         (state.gameKind == .uno && index == recent.count - 1)
-                             ? (state.discardPile.last?.unoColor
-                                 ?? state.round?.trumpSuit?.unoColor)
-                             : nil)
-            .onAppear { animateShedArrival(card: card, restPos: restPos,
-                                           restRotation: jitter * 1.8,
-                                           state: state, size: size) }
+            PileTossCardView(progress: progress, card: card, toss: toss,
+                             cardWidth: cardWidth, tableSize: size, groundZIndex: Double(index))
+                // Top card only: a called wild color makes the wild's own
+                // panel glow (UnoCardViews). Scoped here so hands never glow.
+                .environment(\.unoActiveColor,
+                             (state.gameKind == .uno && index == recent.count - 1)
+                                 ? (state.discardPile.last?.unoColor
+                                     ?? state.round?.trumpSuit?.unoColor)
+                                 : nil)
+                .onAppear { animateShedArrival(card: card, toss: toss, state: state) }
         }
         .onChange(of: state.discardPile.count) { _, _ in
             let current = Set(state.discardPile.map(\.id))
             shedSeen.formIntersection(current)
-            shedPoses = shedPoses.filter { current.contains($0.key) }
-            shedRotations = shedRotations.filter { current.contains($0.key) }
-            shedLifts = shedLifts.filter { current.contains($0.key) }
+            shedProgress = shedProgress.filter { current.contains($0.key) }
         }
     }
 
     /// The airborne throw: the card leaves the thrower's edge already in
-    /// flight, ARCS over the table — rising, growing (closer to your
-    /// eyes), its shadow racing along the felt beneath it — then descends
-    /// onto the pile in one continuous motion (see FeltPhysics.pileDropArc)
-    /// and settles with a crisp landing.
-    private func animateShedArrival(card: Card, restPos: CGPoint,
-                                    restRotation: Double,
-                                    state: GameState, size: CGSize) {
+    /// flight and lands on the pile in ONE motion — one `progress` scalar,
+    /// one `withAnimation` call. Position, height, rotation, scale, and the
+    /// separated ground shadow are all derived from that single scalar
+    /// inside `PileTossCardView` (see `FeltPhysics.evaluate`), so there is
+    /// no second animation left to fall out of step with the first.
+    private func animateShedArrival(card: Card, toss: FeltPhysics.PileToss, state: GameState) {
         guard !shedSeen.contains(card.id) else { return }
         shedSeen.insert(card.id)
         // Cards already down when this view appeared (resume, rejoin)
         // don't replay their landing.
         guard card.id == state.discardPile.last?.id else {
-            shedPoses[card.id] = restPos
-            shedRotations[card.id] = restRotation
+            shedProgress[card.id] = 1
             return
         }
 
-        let anchors = effectiveAnchors(state)
-        let seat = host.seatByPlayedCard[card.id]
-        let seatAnchor = seat.flatMap { anchors.indices.contains($0) ? anchors[$0] : nil }
-        let restNorm = CGPoint(x: restPos.x / size.width, y: restPos.y / size.height)
-        let arc = FeltPhysics.pileDropArc(cardID: card.id, seatAnchor: seatAnchor,
-                                          restPoint: restNorm, tableSize: size)
-        func toPoints(_ n: CGPoint) -> CGPoint { CGPoint(x: n.x * size.width, y: n.y * size.height) }
-        let entryPt = toPoints(arc.entry)
-        let touchdownPt = toPoints(arc.touchdown)
-        let restPt = toPoints(arc.rest)
-        let settleTwist = TableGeometry.jitterDegrees(cardID: card.id) >= 0 ? 2.4 : -2.4
-
         if motionReduced {
-            // Reduce Motion: no rising/falling arc — a quick, short, flat
-            // slide straight onto the pile instead.
-            shedPoses[card.id] = entryPt
-            shedRotations[card.id] = restRotation
-            shedLifts[card.id] = 0
+            // Reduce Motion: the same single-progress path, just flattened
+            // to a quick, short, flat slide — no rising/falling arc.
+            let flat = FeltPhysics.flatSlide(toss)
+            shedProgress[card.id] = 0
             DispatchQueue.main.async {
                 if !isSpectator {
                     TableSFX.shared.play(.cardSlide, intensity: 0.6)
                 }
-                withAnimation(.easeOut(duration: 0.15)) {
-                    shedPoses[card.id] = restPt
-                    shedRotations[card.id] = restRotation
+                withAnimation(.easeOut(duration: flat.duration)) {
+                    shedProgress[card.id] = 1
                 }
             }
             return
         }
 
         // Leave the hand already airborne at the table's edge.
-        shedPoses[card.id] = entryPt
-        shedRotations[card.id] = restRotation - TableGeometry.jitterDegrees(cardID: card.id) * 3.0
-        shedLifts[card.id] = arc.apex * 0.5
+        shedProgress[card.id] = 0
 
-        // ONE continuous motion, no phase seams: the ground track glides
-        // entry → pile on a guaranteed-monotonic decelerating curve (it
-        // keeps advancing all the way to touchdown — never finishes
-        // early and hovers); the lift rises and falls in two halves that
-        // MEET AT ZERO VELOCITY at the apex (easeOut up, easeIn down =
-        // C1-continuous). Both share the same duration, so they touch
-        // down on the same frame.
         DispatchQueue.main.async {
-            withAnimation(.easeOut(duration: arc.duration)) {
-                shedPoses[card.id] = touchdownPt
-                shedRotations[card.id] = restRotation - settleTwist
+            withAnimation(.timingCurve(0.25, 0.10, 0.30, 1.0, duration: toss.duration)) {
+                shedProgress[card.id] = 1
             }
-            withAnimation(.easeOut(duration: arc.duration * 0.46)) {
-                shedLifts[card.id] = arc.apex
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + arc.duration * 0.46) {
-                withAnimation(.easeIn(duration: arc.duration * 0.54)) {
-                    shedLifts[card.id] = 0
-                }
-            }
-            // Contact settle: a tiny 2–4pt skid-with-rotation onto the
-            // pile's top surface — the ground shadow (tied to this same
-            // position) converges onto the card exactly here.
-            DispatchQueue.main.asyncAfter(deadline: .now() + arc.duration) {
+            // The contact sound, timed to when the card actually meets the
+            // felt (touchdown, not the trailing skid) — cosmetic, not part
+            // of the animation itself, so it's fine as a plain timer.
+            DispatchQueue.main.asyncAfter(deadline: .now() + toss.duration * Double(toss.touchdownFraction)) {
                 if !isSpectator {
-                    TableSFX.shared.play(.cardSlide, intensity: 0.6 + Double(arc.apex) / 90.0 * 0.9)
-                }
-                withAnimation(.easeOut(duration: FeltPhysics.PileDropArc.settleDuration)) {
-                    shedPoses[card.id] = restPt
-                    shedRotations[card.id] = restRotation
+                    TableSFX.shared.play(.cardSlide, intensity: 0.6 + Double(toss.apex) / 90.0 * 0.9)
                 }
             }
         }
@@ -1020,52 +1016,32 @@ struct TableGameView: View {
         let seat = host.seatByPlayedCard[card.id]
         let anchor = seat.flatMap { anchors.indices.contains($0) ? anchors[$0] : nil }
 
-        if host.pileDropCards.contains(card.id) {
-            // ARC: one continuous descending throw onto the pile — see
-            // FeltPhysics.pileDropArc for why this replaced the old
-            // two-phase (fly in, hang above the pile, then drop) version.
-            let restPoint = CGPoint(x: 0.52 + Double(TableGeometry.jitterDegrees(cardID: card.id)) * 0.0004,
-                                    y: 0.47 + Double(TableGeometry.jitterDegrees(cardID: card.id + "y")) * 0.0003)
-            let arc = FeltPhysics.pileDropArc(cardID: card.id, seatAnchor: anchor,
-                                              restPoint: restPoint, tableSize: size)
-            let settleTwist = TableGeometry.jitterDegrees(cardID: card.id) >= 0 ? 2.4 : -2.4
-
-            host.freePlayLayout[card.id] = arc.entry
-            rotationByCard[card.id] = arc.entryRotation
-            fpLifts[card.id] = arc.apex * 0.5
+        if let toss = pileDropToss(for: card.id, state: state, size: size) {
+            // ARC: one continuous throw onto the pile, ONE progress scalar
+            // driving everything (see FeltPhysics.evaluate / PileTossCardView)
+            // — the same single-progress mechanism as the shed pile,
+            // replacing the old three-dictionary (position/rotation/lift)
+            // version that could desync into "slide, then drop."
+            host.freePlayLayout[card.id] = toss.entry
+            rotationByCard[card.id] = toss.entryRotation
+            pileDropProgress[card.id] = 0
             DispatchQueue.main.async {
-                // The ground track decelerates smoothly all the way to
-                // touchdown (a guaranteed-monotonic easeOut — the old
-                // hand-rolled bezier's out-of-order control points let it
-                // "finish" early and hover); the lift rises and falls in
-                // two halves meeting at zero velocity at the apex. Both
-                // span the SAME duration, so they touch down on the same
-                // frame — no seam, no hang.
-                withAnimation(.easeOut(duration: arc.duration)) {
-                    host.freePlayLayout[card.id] = arc.touchdown
-                    rotationByCard[card.id] = arc.restRotation - settleTwist
+                withAnimation(.timingCurve(0.25, 0.10, 0.30, 1.0, duration: toss.duration)) {
+                    pileDropProgress[card.id] = 1
                 }
-                withAnimation(.easeOut(duration: arc.duration * 0.46)) {
-                    fpLifts[card.id] = arc.apex
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + arc.duration * 0.46) {
-                    withAnimation(.easeIn(duration: arc.duration * 0.54)) {
-                        fpLifts[card.id] = 0
-                    }
-                }
-                // Contact settle: a tiny 2–4pt skid-with-rotation into its
-                // final resting spot ON the pile — sells the landing
-                // instead of a dead stop. The ground shadow (tied to this
-                // same position) converges onto the card exactly here,
-                // since lift is already back to 0 by touchdown.
-                DispatchQueue.main.asyncAfter(deadline: .now() + arc.duration) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + toss.duration * Double(toss.touchdownFraction)) {
                     if !isSpectator {
-                        TableSFX.shared.play(.cardSlide, intensity: 0.55 + Double(arc.apex) / 96.0 * 0.6)
+                        TableSFX.shared.play(.cardSlide, intensity: 0.55 + Double(toss.apex) / 96.0 * 0.6)
                     }
-                    withAnimation(.easeOut(duration: FeltPhysics.PileDropArc.settleDuration)) {
-                        host.freePlayLayout[card.id] = arc.rest
-                        rotationByCard[card.id] = arc.restRotation
-                    }
+                }
+                // Landing: hand position/rotation back to the normal felt-card
+                // state (`host.freePlayLayout`/`rotationByCard`) and drop the
+                // progress entry, which swaps `freePlayCard` back to the
+                // interactive rendering — draggable, flippable, done flying.
+                DispatchQueue.main.asyncAfter(deadline: .now() + toss.duration) {
+                    host.freePlayLayout[card.id] = toss.rest
+                    rotationByCard[card.id] = toss.restRotation
+                    pileDropProgress[card.id] = nil
                 }
             }
             return
@@ -1097,6 +1073,55 @@ struct TableGameView: View {
             }
         }
     }
+
+/// One pile-toss card, in flight or at rest. `progress` IS its
+/// `animatableData`: SwiftUI tweens this single scalar across the
+/// transaction and re-invokes `body` at every intermediate frame, so
+/// position, height, rotation, scale, and the separated ground shadow are
+/// all read from `FeltPhysics.evaluate` at the SAME instant, every time.
+/// That's the structural fix for "two-part motion" — there's only one
+/// thing left to animate, so it can't fall out of step with itself.
+struct PileTossCardView: View, Animatable {
+    var progress: CGFloat
+    let card: Card
+    let toss: FeltPhysics.PileToss
+    let cardWidth: CGFloat
+    let tableSize: CGSize
+    let groundZIndex: Double
+
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    var body: some View {
+        let frame = FeltPhysics.evaluate(toss, progress: progress, tableSize: tableSize)
+        let airborne = frame.heightPoints > 0.5
+        ZStack {
+            // The ground shadow: lives ON the felt while the card is in the
+            // air. Softer, wider, and fainter the higher the card; it
+            // merges into a contact shadow exactly at touchdown (p = 1).
+            if airborne {
+                Ellipse()
+                    .fill(.black.opacity(frame.shadowAlpha))
+                    .frame(width: cardWidth * frame.shadowScale,
+                           height: cardWidth * 0.62 * frame.shadowScale)
+                    .blur(radius: frame.shadowBlur)
+                    .position(frame.position)
+            }
+            // The card itself: lifted above its ground track, bigger when
+            // higher (closer to your eyes), spinning down to rest.
+            CardView(card: card, faceUp: true, elevation: 0)
+                .frame(width: cardWidth)
+                .rotationEffect(.degrees(frame.rotation))
+                .scaleEffect(frame.scale)
+                .position(x: frame.position.x, y: frame.position.y - frame.heightPoints)
+                .shadow(color: .black.opacity(airborne ? 0 : 0.28),
+                        radius: 2, y: 1) // contact shadow only when down
+        }
+        .zIndex(airborne ? 400 : groundZIndex)
+    }
+}
 
 /// Press-and-hold exit: a timer ring fills while you hold; release early
 /// and nothing happens. Accidental elbow-proof, kid-resistant.

@@ -79,40 +79,60 @@ enum FeltPhysics {
 
     /// A thrown card landing on a neat pile: "as if you threw the card from
     /// your hand and it lands perfectly on the discard stack" — ONE smooth
-    /// descending arc, never a fly-in-then-drop. The previous version drove
-    /// the ground track and the lift as separate `withAnimation` calls
-    /// keyed to a hand-rolled bezier (`.timingCurve(0.30, 0.0, 0.18, 1.0,
-    /// …)`) whose control points aren't x-monotonic — SwiftUI's easing
-    /// solver stalls the horizontal motion early and holds near the target
-    /// while the (correctly-timed) vertical fall keeps going, which reads
-    /// exactly as "flies in, hangs above the pile, then drops."
+    /// motion, never a fly-in-then-drop.
     ///
-    /// The fix: the ground track uses a plain, guaranteed-monotonic
-    /// deceleration (`.easeOut`) that keeps advancing all the way to the
-    /// full animation duration — it never finishes early — while the lift
-    /// still rises and falls in two C1-continuous halves (easeOut up,
-    /// easeIn down, meeting at zero velocity at the apex, matching the
-    /// shed pile's proven "trick-slide" landing). Because both now span
-    /// the identical `duration`, they touch down on the same frame:
-    /// decelerating horizontally right up to contact, never hovering.
-    struct PileDropArc {
-        let entry: CGPoint        // normalized, just outside the felt
-        let touchdown: CGPoint    // normalized, where the arc actually lands
-        let rest: CGPoint         // normalized, touchdown + the tiny contact settle
-        let restRotation: Double  // degrees, final settle angle
+    /// The previous two attempts both decomposed the throw into a ground
+    /// track (x/y) plus a separate lift (height), each driven by its OWN
+    /// `withAnimation` call against its own `@State` dictionary. SwiftUI
+    /// gives no lockstep guarantee between independent animations — they
+    /// can start on different commits and visibly desync under real-device
+    /// frame pressure — so the eye reads "slide, then drop" no matter how
+    /// the individual curves are tuned. Curve tweaks can't fix a
+    /// synchronization problem.
+    ///
+    /// The fix: `PileToss` is solved ONCE (pure geometry, no timing state),
+    /// and `evaluate(_:progress:tableSize:)` is a pure function of a SINGLE
+    /// scalar `progress` — position, height, scale, rotation, and the
+    /// separated ground shadow all come out of that one input. The caller
+    /// drives `progress` with exactly one `withAnimation` call on exactly
+    /// one `@State` value, rendered through a custom `Animatable` view
+    /// (`PileTossCardView` in TableGameView) whose `animatableData` IS that
+    /// progress — SwiftUI re-invokes its `body` at every intermediate tick
+    /// of the SAME transaction, so every quantity is always read at the
+    /// same instant. Desync is structurally impossible: there's only one
+    /// thing being animated.
+    struct PileToss {
+        let entry: CGPoint        // normalized, just outside the felt: where the card leaves the hand
+        let control: CGPoint      // normalized bezier control point: bows the path like a real toss
+        let touchdown: CGPoint    // normalized, where the card first contacts the pile
+        let rest: CGPoint         // normalized, touchdown + the tiny landing skid
         let entryRotation: Double // degrees, spin at launch
-        let apex: CGFloat         // peak lift in points
-        let duration: Double      // the arc itself (excludes the settle)
-        /// The settle: a real card doesn't stop dead on contact — it skids
-        /// a couple points and finishes its spin as it grips the felt.
-        static let settleDuration = 0.06
+        let restRotation: Double  // degrees, final settle angle
+        let settleTwist: Double   // degrees of rotational overshoot right at touchdown, eased out during the skid
+        let apex: CGFloat         // peak lift in points, mid-flight
+        let duration: Double      // the WHOLE throw, launch through settle — one span, one animation
+        /// Fraction of `duration` spent airborne before the card is
+        /// grounded; the remainder is the landing skid (see `evaluate`).
+        let touchdownFraction: CGFloat
     }
 
-    /// Solve a pile-drop arc for a card entering from a seat's edge (or the
+    /// Every visual quantity of a pile toss, at one instant, in points.
+    struct PileTossFrame {
+        let position: CGPoint    // ground track, in points — the shadow lives here
+        let heightPoints: CGFloat
+        let rotation: Double     // degrees
+        let scale: CGFloat
+        let shadowAlpha: Double
+        let shadowScale: CGFloat
+        let shadowBlur: CGFloat
+    }
+
+    /// Solve a pile toss for a card entering from a seat's edge (or the
     /// table's own edge when the seat is unknown, e.g. a deck-sourced card)
-    /// and landing on the pile at `restPoint`.
-    static func pileDropArc(cardID: String, seatAnchor: CGPoint?,
-                            restPoint: CGPoint, tableSize: CGSize) -> PileDropArc {
+    /// and landing on the pile at `restPoint`. Pure geometry — no `Date`,
+    /// no timers, safe to recompute every render.
+    static func pileToss(cardID: String, seatAnchor: CGPoint?,
+                         restPoint: CGPoint, tableSize: CGSize) -> PileToss {
         let hash = TableGeometry.jitterDegrees(cardID: cardID)
         let anchor = seatAnchor ?? CGPoint(x: 0.5, y: 1.0)
         let entry = CGPoint(x: 0.5 + (anchor.x - 0.5) * 1.22,
@@ -120,11 +140,14 @@ enum FeltPhysics {
         let entryPt = CGPoint(x: entry.x * tableSize.width, y: entry.y * tableSize.height)
         let restPt = CGPoint(x: restPoint.x * tableSize.width, y: restPoint.y * tableSize.height)
         let travel = hypot(restPt.x - entryPt.x, restPt.y - entryPt.y)
-        let duration = 0.30 + Double(travel / tableSize.width) * 0.24
+        let flightDuration = 0.30 + Double(travel / tableSize.width) * 0.24
+        let settleDuration = 0.06
         let apex = min(96, 52 + travel * 0.10)
 
-        // The settle: a tiny 2–4pt skid past touchdown, along the same
-        // heading, so contact reads as a landing, not a teleport-stop.
+        // The landing skid: a tiny 2–4pt continuation past touchdown, along
+        // the same heading, so contact reads as a landing, not a
+        // teleport-stop. `touchdown` is where the card actually meets the
+        // felt; `rest` (the caller's target) is a hair past it.
         let dx = restPt.x - entryPt.x, dy = restPt.y - entryPt.y
         let dirLen = max(0.0001, hypot(dx, dy))
         let settleDist: CGFloat = 3
@@ -132,8 +155,81 @@ enum FeltPhysics {
                              y: dy / dirLen * settleDist / tableSize.height)
         let touchdown = CGPoint(x: restPoint.x - settle.x, y: restPoint.y - settle.y)
 
-        return PileDropArc(entry: entry, touchdown: touchdown, rest: restPoint,
-                           restRotation: hash * 1.8, entryRotation: hash * 1.8 - hash * 3.0,
-                           apex: apex, duration: duration)
+        // Control point: pulled toward the table's center and "up" along
+        // the throw direction, so the entry→touchdown line bows into a real
+        // arc instead of a ruler-straight glide.
+        let midX = (entry.x + touchdown.x) / 2
+        let midY = (entry.y + touchdown.y) / 2
+        let bow = CGPoint(x: (0.5 - midX) * 0.5, y: (0.47 - midY) * 0.35)
+        let control = CGPoint(x: midX + bow.x, y: midY + bow.y)
+
+        let restRotation = hash * 1.8
+        let entryRotation = restRotation - hash * 3.0
+        let settleTwist: Double = hash >= 0 ? 2.4 : -2.4
+        let duration = flightDuration + settleDuration
+
+        return PileToss(entry: entry, control: control, touchdown: touchdown, rest: restPoint,
+                        entryRotation: entryRotation, restRotation: restRotation,
+                        settleTwist: settleTwist, apex: apex, duration: duration,
+                        touchdownFraction: CGFloat(flightDuration / duration))
+    }
+
+    /// Reduce Motion: the same card, flattened to a short, low, straight
+    /// slide — no rising arc — matching the rest of the felt's short/no-op
+    /// a11y treatment. Still driven through the identical single-progress
+    /// path, just with the physics dialed to (almost) nothing.
+    static func flatSlide(_ toss: PileToss) -> PileToss {
+        let straight = CGPoint(x: (toss.entry.x + toss.touchdown.x) / 2,
+                               y: (toss.entry.y + toss.touchdown.y) / 2)
+        return PileToss(entry: toss.entry, control: straight, touchdown: toss.touchdown,
+                        rest: toss.rest, entryRotation: toss.restRotation,
+                        restRotation: toss.restRotation, settleTwist: 0, apex: 0,
+                        duration: 0.15, touchdownFraction: 0.85)
+    }
+
+    /// Pure function: every visual quantity of a pile toss, at ONE instant,
+    /// derived from a single `progress` scalar (0…1). No other state feeds
+    /// this — position is a quadratic bezier entry→control→touchdown for
+    /// the airborne fraction of `progress`, then a straight lerp
+    /// touchdown→rest for the trailing landing skid; height follows a
+    /// ballistic 4·p·(1−p) profile over the airborne fraction (naturally
+    /// zero at both liftoff and touchdown, peaking at `apex` mid-flight);
+    /// rotation interpolates entry→(rest∓settleTwist)→rest to match.
+    static func evaluate(_ toss: PileToss, progress: CGFloat, tableSize: CGSize) -> PileTossFrame {
+        let p = min(1, max(0, progress))
+        let touchdownRotation = toss.restRotation - toss.settleTwist
+
+        let normPosition: CGPoint
+        let heightFrac: CGFloat
+        let rotation: Double
+        if p <= toss.touchdownFraction {
+            let t = toss.touchdownFraction > 0 ? p / toss.touchdownFraction : 1
+            normPosition = quadraticBezier(toss.entry, toss.control, toss.touchdown, t)
+            heightFrac = 4 * t * (1 - t)
+            rotation = toss.entryRotation + (touchdownRotation - toss.entryRotation) * Double(t)
+        } else {
+            let remaining = 1 - toss.touchdownFraction
+            let t = remaining > 0 ? (p - toss.touchdownFraction) / remaining : 1
+            normPosition = CGPoint(x: toss.touchdown.x + (toss.rest.x - toss.touchdown.x) * t,
+                                   y: toss.touchdown.y + (toss.rest.y - toss.touchdown.y) * t)
+            heightFrac = 0
+            rotation = touchdownRotation + (toss.restRotation - touchdownRotation) * Double(t)
+        }
+
+        let position = CGPoint(x: normPosition.x * tableSize.width, y: normPosition.y * tableSize.height)
+        let heightPoints = heightFrac * toss.apex
+
+        return PileTossFrame(
+            position: position, heightPoints: heightPoints, rotation: rotation,
+            scale: 1 + heightPoints * 0.0032,
+            shadowAlpha: 0.30 - Double(heightPoints) * 0.0016,
+            shadowScale: 0.92 - heightPoints * 0.0022,
+            shadowBlur: 3 + heightPoints * 0.16)
+    }
+
+    private static func quadraticBezier(_ p0: CGPoint, _ p1: CGPoint, _ p2: CGPoint, _ t: CGFloat) -> CGPoint {
+        let u = 1 - t
+        return CGPoint(x: u * u * p0.x + 2 * u * t * p1.x + t * t * p2.x,
+                       y: u * u * p0.y + 2 * u * t * p1.y + t * t * p2.y)
     }
 }

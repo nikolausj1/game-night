@@ -447,7 +447,8 @@ final class DiceGameController {
             isMyTurn: !gameOver && !rollInFlight && pendingTransfers.isEmpty
                 && turnSeat == seatID,
             gameOver: gameOver, winnerSeat: winnerSeat,
-            cupReady: canRoll(seat: seatID))
+            cupReady: canRoll(seat: seatID),
+            loadedDice: seatID == turnSeat ? loadedDiceCount : 0)
     }
 
     /// Re-push the current state to one device (reconnect / re-hello).

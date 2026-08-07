@@ -63,8 +63,11 @@ final class DiceSCNView: SCNView {
     var onLayout: ((CGSize) -> Void)?
     /// Returns whether `point` (in this view's own coordinate space)
     /// should be handled here at all. `nil`/false → `hitTest` returns nil,
-    /// so UIKit keeps looking at whatever's behind this view.
-    var hitTestProbe: ((CGPoint) -> Bool)?
+    /// so UIKit keeps looking at whatever's behind this view. `phase` is
+    /// the touch's own phase (when derivable) — passed through so the
+    /// coordinator can throttle its expensive SceneKit ray-cast to fresh
+    /// touches only (see `DiceTableSceneCoordinator.shouldClaim`).
+    var hitTestProbe: ((CGPoint, UITouch.Phase?) -> Bool)?
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -72,7 +75,8 @@ final class DiceSCNView: SCNView {
     }
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        guard hitTestProbe?(point) == true else { return nil }
+        let phase = event?.allTouches?.first?.phase
+        guard hitTestProbe?(point, phase) == true else { return nil }
         return super.hitTest(point, with: event)
     }
 }
@@ -105,6 +109,14 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     private var pool: [DieNode] = []
     private var poolStates: [PoolDieState] = []
     private var poolShadows: [DieShadowNode] = []
+    /// Per-pool-index last world position `trackAllShadows` actually
+    /// re-solved a shadow transform for — lets it detect "this die hasn't
+    /// moved since last frame" (a table nudge/jolt can set a `.resting` die
+    /// drifting again without changing its `PoolDieState`, so this checks
+    /// real motion rather than trusting the category). See
+    /// `trackAllShadows`'s perf doc. `.greatestFiniteMagnitude` sentinel so
+    /// a freshly spawned die's first frame always tracks.
+    private var lastShadowPosition: [simd_float3] = []
 
     /// The subset of `pool` actually in flight for the CURRENT roll (by
     /// pool index) — settle detection, resistance tiers, and face-reading
@@ -240,7 +252,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         view.rendersContinuously = false
         view.delegate = self
         view.onLayout = { [weak self] size in self?.rebuildWorld(for: size) }
-        view.hitTestProbe = { [weak self] point in self?.shouldClaim(point) ?? false }
+        view.hitTestProbe = { [weak self] point, phase in self?.shouldClaim(point, phase: phase) ?? false }
 
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         pan.maximumNumberOfTouches = 1
@@ -347,6 +359,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
             let shadow = DieShadowNode()
             scene.rootNode.addChildNode(shadow)
             poolShadows.append(shadow)
+            lastShadowPosition.append(simd_float3(repeating: .greatestFiniteMagnitude))
         }
         // Freshly spawned above the floor — needs a moment of real physics
         // ticks to actually fall and settle (see beginSettleWindow's doc).
@@ -375,18 +388,49 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         updateRenderingContinuity()
     }
 
+    /// Cache for `shouldClaim`'s throttle: the last touch's verdict, and
+    /// whether it was actually computed from a real ray-cast (vs. just
+    /// carried over). See `shouldClaim`'s perf doc.
+    private var lastProbeComputed = false
+    private var lastProbeResult = false
+
     /// Whether `point` (view-local) should be handled by this view at all:
     /// either a drag is already underway (keep routing it here through
     /// `.changed`/`.ended`) or it's landing fresh on a currently-draggable
     /// resting die. Anything else — dead felt, a plate, a coin — is
     /// waved through to whatever's behind this view.
-    private func shouldClaim(_ point: CGPoint) -> Bool {
+    ///
+    /// While a cup is open (`dragSeat != nil`) this transparent view covers
+    /// the ENTIRE felt, so UIKit/SwiftUI's own hit-test probing — which can
+    /// fire more than once per touch while gesture recognizers compete,
+    /// not just once at touch-down — ran a full `SCNView.hitTest` (a
+    /// ray-cast against the whole scene graph: walls, floor, every pool
+    /// die) on EVERY probe, for every touch anywhere on the table: a dead-
+    /// felt tap, a plate tap, another seat's coin drag. That's the
+    /// intermittent cup-loading stutter reported ("not all the time, but
+    /// sometimes" — exactly what you'd expect from a cost that scales with
+    /// how much else is happening on screen at once, not with the cup
+    /// itself). Fix: only run the real ray-cast on a fresh `.began` touch;
+    /// every other phase of that SAME touch reuses its cached verdict, and
+    /// `.ended`/`.cancelled` clears the cache so the NEXT touch is fresh.
+    private func shouldClaim(_ point: CGPoint, phase: UITouch.Phase?) -> Bool {
         if draggingIndex != nil { return true }
         guard dragSeat != nil, let view else { return false }
+        switch phase {
+        case .ended, .cancelled:
+            lastProbeComputed = false
+        case .began, .none:
+            break // always recompute — a fresh (or unidentifiable) touch needs the real test
+        default:
+            if lastProbeComputed { return lastProbeResult }
+        }
         let hits = view.hitTest(point, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
-        guard let hit = hits.first,
-              let index = pool.firstIndex(where: { $0 === hit.node }) else { return false }
-        return poolStates[index] == .resting
+        let result = hits.first
+            .flatMap { hit in pool.firstIndex(where: { $0 === hit.node }) }
+            .map { poolStates[$0] == .resting } ?? false
+        lastProbeComputed = true
+        lastProbeResult = result
+        return result
     }
 
     @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
@@ -802,9 +846,22 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         }
     }
 
-    /// Every pool die's contact shadow, tracked every frame it's visible —
+    /// Every pool die's contact shadow, tracked while it's visible —
     /// resting dice sit on the felt permanently now (not just mid-roll),
-    /// and a dragged die's shadow needs to follow the finger too.
+    /// and a dragged/flying die's shadow needs to follow it every frame.
+    /// A STILL die, though, isn't moving — `renderer(_:updateAtTime:)`
+    /// (which calls this) runs on every rendered frame, and during a cup
+    /// load (`rendersContinuously` forced on for the load animation, see
+    /// `updateRenderingContinuity`) that's a real frame rate, not an
+    /// occasional one — so re-solving a shadow's transform for dice that
+    /// haven't budged was pure waste stacking up with everything else
+    /// competing for that frame (see `shouldClaim`'s perf doc for the
+    /// other half of the same "sometimes slow" report). Fix: skip the
+    /// `track()` call (position/scale/opacity writes) for any die that
+    /// hasn't actually moved since the last frame — driven by real
+    /// position deltas rather than `PoolDieState`, so a table nudge/jolt
+    /// waking a `.resting` die back up (its state never changes) still
+    /// gets its shadow updated correctly.
     private func trackAllShadows() {
         let floorY = Float(Dice3D.side / 2)
         for index in pool.indices where poolShadows.indices.contains(index) {
@@ -812,6 +869,11 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
             let shadow = poolShadows[index]
             shadow.isHidden = die.isHidden
             guard !die.isHidden else { continue }
+            let position = die.presentation.simdWorldPosition
+            if index < lastShadowPosition.count {
+                guard simd_distance(position, lastShadowPosition[index]) > 0.006 else { continue }
+                lastShadowPosition[index] = position
+            }
             shadow.track(die, floorY: floorY)
         }
     }

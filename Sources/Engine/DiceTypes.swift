@@ -3,8 +3,20 @@ import Foundation
 /// Dice games live OUTSIDE the card engine: the iPad-side
 /// `DiceGameController` (App layer) owns all rules state, and phones are
 /// dice cups. These are the pure Codable wire types only — no rules here.
+///
+/// Platform-wave note: this is the WIRE tag riding inside
+/// `DiceClientState.kind` (see that struct's doc for how it differs from
+/// the app-layer `DiceKind` config-lookup key). `.yahtzee`/`.zilch`/
+/// `.shutTheBox` added alongside LCR so all three new controllers can ride
+/// the same `DiceClientState` broadcast shape as LCR does — each game's own
+/// controller fills the generalized `statusLine`/`rollsLeft`/
+/// `standingsLines` fields below rather than the game inventing its own
+/// wire type.
 public enum DiceGameKind: String, Codable, Sendable {
-    case leftRightCenter // Farkle / Liar's Dice / Yahtzee later
+    case leftRightCenter
+    case yahtzee
+    case zilch
+    case shutTheBox
 }
 
 /// One LCR die face. A physical LCR die has six sides: three dots, one L,
@@ -21,6 +33,17 @@ public struct DiceClientState: Codable, Sendable, Equatable {
     public var kind: DiceGameKind
     public var mySeat: Int
     public var seatNames: [String]
+    /// LCR: literal chip counts. Non-LCR games are free to repurpose this
+    /// slot rather than send an unused all-zero array — `DiceCupView`
+    /// (the only reader that treats it generically, via `myDiceCount`)
+    /// only ever asks "how many dice does `chips[mySeat]` say I'm about to
+    /// roll," clamped against that kind's `DiceGameConfig.diceCount`
+    /// instead of LCR's hardcoded 3. `YahtzeeController` sets
+    /// `chips[turnSeat]` to how many of the 5 pool dice are still unheld
+    /// (the ones actually about to fly on the next roll) and leaves every
+    /// other seat at the game's full dice count, since only the roller's
+    /// entry is ever read. A future kind with no dice-count concept at all
+    /// can just leave this at the config's constant `diceCount` everywhere.
     public var chips: [Int]
     public var centerPot: Int
     public var turnSeat: Int
@@ -52,11 +75,35 @@ public struct DiceClientState: Codable, Sendable, Equatable {
     /// instant `cupReady` flipped true — this field simply wasn't consulted
     /// yet).
     public var loadedDice: Int
+    /// Free-text status the remote shows under "Your roll!" in place of the
+    /// LCR-specific "Rolling N dice" line — e.g. Yahtzee's "Tap dice on the
+    /// table to keep, then shake for roll 2 of 3." Each non-LCR controller
+    /// fills this every broadcast; LCR never sets it (stays `nil`), so
+    /// `DiceCupView` keeps showing its own `rollingDiceLabel` for LCR and
+    /// only swaps to `statusLine` when a game actually provides one.
+    /// `nil` on decode for any peer that predates this field.
+    public var statusLine: String?
+    /// How many rolls remain this turn (Yahtzee: 3 minus rolls used, 0 once
+    /// a category must be picked instead of rolling again). Informational —
+    /// no current view reads it directly, but it rides the wire so a game's
+    /// own phone UI (or a future one) can show a roll counter without
+    /// re-deriving it from `statusLine` text. `nil` for LCR and on decode
+    /// for any peer that predates this field.
+    public var rollsLeft: Int?
+    /// Free-text standings for the "not your turn" screen, one line per
+    /// seat (same order as `seatNames`) — e.g. Yahtzee's "Hank: 145". Lets
+    /// `DiceCupView`'s generalized standings panel show a non-LCR game's
+    /// running scores without that panel needing to know each game's own
+    /// scoring rules. LCR never sets it (keeps its own chip-dots/pot UI);
+    /// `nil` on decode for any peer that predates this field.
+    public var standingsLines: [String]?
 
     public init(kind: DiceGameKind, mySeat: Int, seatNames: [String],
                 chips: [Int], centerPot: Int, turnSeat: Int,
                 isMyTurn: Bool, gameOver: Bool, winnerSeat: Int?,
-                cupReady: Bool = true, loadedDice: Int = 0) {
+                cupReady: Bool = true, loadedDice: Int = 0,
+                statusLine: String? = nil, rollsLeft: Int? = nil,
+                standingsLines: [String]? = nil) {
         self.kind = kind
         self.mySeat = mySeat
         self.seatNames = seatNames
@@ -68,14 +115,18 @@ public struct DiceClientState: Codable, Sendable, Equatable {
         self.winnerSeat = winnerSeat
         self.cupReady = cupReady
         self.loadedDice = loadedDice
+        self.statusLine = statusLine
+        self.rollsLeft = rollsLeft
+        self.standingsLines = standingsLines
     }
 
-    /// `cupReady`/`loadedDice` postdate the first wire format —
-    /// decodeIfPresent so an older peer's encode (or a message caught
-    /// mid-rollout) still parses instead of dropping the connection over a
-    /// new field.
+    /// `cupReady`/`loadedDice`/`statusLine`/`rollsLeft`/`standingsLines`
+    /// all postdate the first wire format — decodeIfPresent so an older
+    /// peer's encode (or a message caught mid-rollout) still parses instead
+    /// of dropping the connection over a new field.
     private enum CodingKeys: String, CodingKey {
         case kind, mySeat, seatNames, chips, centerPot, turnSeat, isMyTurn, gameOver, winnerSeat, cupReady, loadedDice
+        case statusLine, rollsLeft, standingsLines
     }
 
     public init(from decoder: Decoder) throws {
@@ -91,5 +142,8 @@ public struct DiceClientState: Codable, Sendable, Equatable {
         winnerSeat = try container.decodeIfPresent(Int.self, forKey: .winnerSeat)
         cupReady = try container.decodeIfPresent(Bool.self, forKey: .cupReady) ?? true
         loadedDice = try container.decodeIfPresent(Int.self, forKey: .loadedDice) ?? 0
+        statusLine = try container.decodeIfPresent(String.self, forKey: .statusLine)
+        rollsLeft = try container.decodeIfPresent(Int.self, forKey: .rollsLeft)
+        standingsLines = try container.decodeIfPresent([String].self, forKey: .standingsLines)
     }
 }

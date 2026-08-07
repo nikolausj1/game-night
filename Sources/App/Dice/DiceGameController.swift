@@ -11,21 +11,77 @@ import Observation
 ///
 /// MenuView calls `start(host:seats:)` from its deal button; `end()` sends
 /// every phone the "dice closed" sentinel and returns the table to the menu.
+/// The one live dice game, whichever kind it is. Each case wraps that
+/// game's own controller type — they share a shape (`init(host:seats:)`,
+/// `end()`, broadcast-on-mutate) by convention, not by protocol, because
+/// their public surfaces differ everywhere it matters (scorecards, tiles,
+/// turn totals) and TableRootView needs the concrete type per branch
+/// anyway.
+enum ActiveDiceGame {
+    case lcr(DiceGameController)
+    case yahtzee(YahtzeeController)
+    case zilch(ZilchController)
+    case shutBox(ShutBoxController)
+
+    func end() {
+        switch self {
+        case .lcr(let c): c.end()
+        case .yahtzee(let c): c.end()
+        case .zilch(let c): c.end()
+        case .shutBox(let c): c.end()
+        }
+    }
+}
+
 @Observable
 final class DiceLauncher {
     static let shared = DiceLauncher()
-    private(set) var controller: DiceGameController?
+    private(set) var game: ActiveDiceGame?
+
+    /// Back-compat accessor for the LCR-era call sites (MenuView's deal
+    /// button and harness hooks read this to know "a dice game is live").
+    var controller: DiceGameController? {
+        if case .lcr(let c) = game { return c }
+        return nil
+    }
 
     private init() {}
 
-    func start(host: GameHostController, seats: [SeatSpec]) {
-        guard controller == nil else { return }
-        controller = DiceGameController(host: host, seats: seats)
+    /// Routing seam for the dice games landing alongside LCR tonight
+    /// (Yahtzee, Zilch, Shut the Box): `kind` picks which
+    /// `DiceGameConfig.config(for:)` recipe — and, below, which concrete
+    /// controller — a table run uses. Only `.lcr` actually builds a
+    /// controller today; the other three fall through to a logged no-op
+    /// until their own worker adds a `case` here for their controller,
+    /// the exact same one-line shape as `.lcr`'s. `kind` defaults to
+    /// `.lcr` so every EXISTING call site — `start(host:seats:)`, still
+    /// how MenuView's `-autoStartLcr`/`-autoStartLcrHuman`/
+    /// `-autoStartLcrRemote` hooks and its real deal button call this —
+    /// keeps compiling and behaving byte-identically without touching
+    /// MenuView.swift/TableRootView.swift.
+    ///
+    /// NOTE for whoever wires in the first non-LCR controller: `controller`
+    /// above is typed `DiceGameController?` (LCR's own controller type) —
+    /// broadening that (a protocol, an enum of controllers, whatever fits)
+    /// is part of THAT integration, not done here, since no second
+    /// controller type exists yet to design against.
+    func start(kind: DiceKind = .lcr, host: GameHostController, seats: [SeatSpec]) {
+        guard game == nil else { return }
+        switch kind {
+        case .lcr:
+            game = .lcr(DiceGameController(host: host, seats: seats))
+        case .yahtzee:
+            game = .yahtzee(YahtzeeController(host: host, seats: seats))
+        case .zilch:
+            game = .zilch(ZilchController(host: host, seats: seats))
+        case .shutTheBox:
+            game = .shutBox(ShutBoxController(host: host, seats: seats))
+        }
     }
 
     func end() {
-        controller?.end()
-        controller = nil
+        game?.end()
+        game = nil
     }
 }
 

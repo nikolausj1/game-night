@@ -180,6 +180,30 @@ final class GameHostController {
     var freePlayLayout: [String: CGPoint] = [:]
     var faceDownCards: Set<String> = []
 
+    // MARK: - Cribbage (lives outside the card engine, same coexistence
+    // rule as dice — see `startCribbage`)
+
+    private(set) var cribbageEngine: CribbageEngine?
+    /// Seats (always 0/1) driven by CribbageBot instead of a phone.
+    private(set) var cribbageBotSeats: Set<Int> = []
+    /// deviceID → seat, the cribbage-mode twin of `seatByDevice`. Kept
+    /// separate so a cribbage table never shares routing with a card game
+    /// (mirrors `diceSeatByDevice`'s separation from `seatByDevice`).
+    private(set) var cribbageSeatByDevice: [String: Int] = [:]
+    /// Display names by seat — `CribbageState` itself carries no names
+    /// (it's a bare 2-seat reducer, unlike `Seat.playerName`), so the table
+    /// UI reads them here instead.
+    private(set) var cribbageSeatNames: [Int: String] = [:]
+    /// The events the last `cribbageEmit` produced — the table UI's hook
+    /// for one-shot reactions (starter flip, GO/31 callouts, the show
+    /// walkthrough), mirroring `GameClientController.recentEvents`.
+    private(set) var cribbageRecentEvents: [CribbageEvent] = []
+    private var cribbageBotTimer: Timer?
+    private var cribbageBotRNG = SeededGenerator(seed: 0)
+    /// Remembered for "Play again" after a cribbage game ends — same seats,
+    /// fresh seed.
+    private var lastCribbageSeats: [SeatSpec] = []
+
     /// Monotonic bump on EVERY engine mutation. The engine itself is not
     /// @Observable, so this is what guarantees the table redraws the
     /// instant a card lands — views read it, Observation tracks it.
@@ -228,7 +252,90 @@ final class GameHostController {
         throwVelocityByCard = [:]
         freePlayLayout = [:]
         faceDownCards = []
+        // Cribbage and the card engine are mutually exclusive (like dice) —
+        // clearing both here, unconditionally, is the defensive half of
+        // that rule: whichever one was actually running, this always
+        // leaves neither running.
+        cribbageEngine = nil
+        cribbageBotSeats = []
+        cribbageSeatByDevice = [:]
+        cribbageSeatNames = [:]
+        cribbageRecentEvents = []
+        cribbageBotTimer?.invalidate()
+        cribbageBotTimer = nil
         stateVersion += 1
+    }
+
+    // MARK: cribbage lifecycle (driven by the table UI)
+
+    /// Cribbage hosting entry point: fixed 2 seats, humans mapped onto
+    /// connected lobby players in lobby order exactly like
+    /// `startGame(kind:rules:seats:)`, bots driven by `CribbageBot` on a
+    /// humanlike pacing timer (see `scheduleCribbageBotIfNeeded`).
+    /// Coexistence with `HostEngine` mode is enforced the same way dice
+    /// mode is: `TableRootView` checks `cribbageEngine` before `host.state`,
+    /// so nothing ever routes to both a card table and a cribbage table at
+    /// once — this entry point doesn't need to tear a card game down first.
+    func startCribbage(seats specs: [SeatSpec], seed: UInt64) {
+        guard specs.count == 2 else { return } // CribbageEngine is fixed 2-player
+        lastCribbageSeats = specs
+
+        var deviceMap: [String: Int] = [:]
+        var names: [Int: String] = [:]
+        var bots: Set<Int> = []
+        var humanIndex = 0
+        for spec in specs {
+            if spec.isBot {
+                names[spec.id] = spec.name
+                bots.insert(spec.id)
+            } else if humanIndex < lobbyPlayers.count {
+                let player = lobbyPlayers[humanIndex]
+                humanIndex += 1
+                let name = spec.name.isEmpty ? player.name : spec.name
+                names[spec.id] = name
+                deviceMap[player.deviceID] = spec.id
+            } else {
+                // Seat without a phone: mirrors startGame's own fallback —
+                // the seat exists but nothing can currently claim it.
+                names[spec.id] = spec.name
+            }
+        }
+
+        cribbageSeatByDevice = deviceMap
+        cribbageSeatNames = names
+        cribbageBotSeats = bots
+        cribbageBotRNG = SeededGenerator(seed: seed ^ 0x5EED_5EED_5EED_5EED)
+
+        // Every remote sheds whatever it was showing before it's reseated —
+        // same "shed before reseat" rule startGame follows.
+        session.broadcast(.tableReset)
+        let engine = CribbageEngine(seed: seed)
+        cribbageEngine = engine
+        for (deviceID, seat) in deviceMap {
+            for (peer, device) in deviceByPeer where device == deviceID {
+                session.send(.welcome(seat: seat), to: [peer])
+            }
+        }
+        stateVersion += 1
+        pushCribbageSnapshots()
+        scheduleCribbageBotIfNeeded()
+    }
+
+    /// Fresh cribbage game, same two seats, new seed — the "Play again"
+    /// button on the game-over overlay.
+    func restartCribbage() {
+        guard !lastCribbageSeats.isEmpty else { return }
+        startCribbage(seats: lastCribbageSeats, seed: UInt64.random(in: UInt64.min...UInt64.max))
+    }
+
+    /// The table itself drives `.advance` (deal the next hand) once the
+    /// show has finished walking the breakdown — same "table taps onward"
+    /// shape as `tableAction(.nextRound)` for card games.
+    /// `CribbageEngine.handleAdvance` never inspects the seat argument
+    /// (only the phase), so `from: 0` is a formality, not a claim.
+    func cribbageAdvance() {
+        guard let cribbageEngine else { return }
+        cribbageEmit(cribbageEngine.apply(.advance, from: 0))
     }
 
     // MARK: game lifecycle (driven by table UI)
@@ -353,6 +460,11 @@ final class GameHostController {
                 // path a returning phone takes — `onDiceHello` (below)
                 // never fires here. No-ops unless free-play dice is on.
                 sendFreePlayDiceState(toDevice: deviceID)
+            } else if let seat = cribbageSeatByDevice[deviceID], let cribbageEngine {
+                // Cribbage reclaim: same device returns mid-hand → same
+                // seat, exact hand — mirrors the card-engine branch above.
+                session.send(.welcome(seat: seat), to: [peer])
+                session.send(.cribbageSnapshot(cribbageEngine.state.snapshot(for: seat)), to: [peer])
             } else if engine == nil {
                 if !lobbyPlayers.contains(where: { $0.deviceID == deviceID }) {
                     lobbyPlayers.append((deviceID, name))
@@ -425,6 +537,19 @@ final class GameHostController {
             if freePlayDiceEnabled, seat == 0, !freePlayCanRoll { return }
             onDicePour?(seat, intensity)
 
+        case .cribbageAction(let action):
+            guard let cribbageEngine,
+                  let deviceID = deviceByPeer[peer],
+                  let seat = cribbageSeatByDevice[deviceID] else {
+                // Same "can't route it, say so" hygiene as `.action` above.
+                session.send(.tableReset, to: [peer])
+                return
+            }
+            cribbageEmit(cribbageEngine.apply(action, from: seat))
+
+        case .cribbageEvents, .cribbageSnapshot:
+            break // host-outbound only
+
         case .seatClaim, .heartbeat:
             break // lobby order is claim order in v1; heartbeats unused (MCSession states suffice)
 
@@ -471,6 +596,86 @@ final class GameHostController {
         for (peer, deviceID) in deviceByPeer {
             guard let seat = seatByDevice[deviceID] else { continue }
             session.send(.snapshot(engine.state.snapshot(for: seat)), to: [peer])
+        }
+    }
+
+    // MARK: - Cribbage outbound + bot pacing
+
+    /// After every cribbage mutation: events to everyone, then each seat
+    /// its own redacted snapshot, then re-check whether a bot is now on
+    /// the hook. Mirrors `emit`/`pushSnapshots` above.
+    private func cribbageEmit(_ events: [CribbageEvent]) {
+        guard cribbageEngine != nil else { return }
+        stateVersion += 1
+        if !events.isEmpty {
+            cribbageRecentEvents = events
+            session.broadcast(.cribbageEvents(events))
+        }
+        pushCribbageSnapshots()
+        scheduleCribbageBotIfNeeded()
+    }
+
+    private func pushCribbageSnapshots() {
+        guard let cribbageEngine else { return }
+        for (peer, deviceID) in deviceByPeer {
+            guard let seat = cribbageSeatByDevice[deviceID] else { continue }
+            session.send(.cribbageSnapshot(cribbageEngine.state.snapshot(for: seat)), to: [peer])
+        }
+    }
+
+    /// Which bot seat (if any) currently owes a decision — a discard not
+    /// yet submitted, or its turn to peg. `nil` covers handComplete/
+    /// gameOver (table-driven, see `cribbageAdvance`) and the case where
+    /// it's a human's move.
+    private func cribbageBotPendingSeat() -> Int? {
+        guard let cribbageEngine else { return nil }
+        let state = cribbageEngine.state
+        switch state.phase {
+        case .discarding:
+            return cribbageBotSeats.first { !state.discardsSubmitted.contains($0) }
+        case .pegging:
+            guard let turn = state.pegging?.turnSeat, cribbageBotSeats.contains(turn) else { return nil }
+            return turn
+        case .handComplete, .gameOver:
+            return nil
+        }
+    }
+
+    /// Humanlike pause before a bot's discard or peg play, same rhythm as
+    /// `BotDirector`/`DiceGameController`. Re-checked at fire time so a
+    /// stale schedule (the human moved first, a new hand was dealt)
+    /// fizzles instead of firing into a world that's moved on.
+    private func scheduleCribbageBotIfNeeded() {
+        cribbageBotTimer?.invalidate()
+        cribbageBotTimer = nil
+        guard let seat = cribbageBotPendingSeat() else { return }
+        let timer = Timer(timeInterval: .random(in: 0.9...2.0), repeats: false) { [weak self] _ in
+            self?.fireCribbageBot(expectedSeat: seat)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        cribbageBotTimer = timer
+    }
+
+    private func fireCribbageBot(expectedSeat: Int) {
+        guard let cribbageEngine, cribbageBotPendingSeat() == expectedSeat else {
+            scheduleCribbageBotIfNeeded() // the world moved on; maybe a different bot is up now
+            return
+        }
+        let state = cribbageEngine.state
+        switch state.phase {
+        case .discarding:
+            guard let hand = state.hands[expectedSeat] else { return }
+            let discard = CribbageBot.discard(hand: hand, isDealer: expectedSeat == state.dealerSeat,
+                                              rng: &cribbageBotRNG)
+            cribbageEmit(cribbageEngine.apply(.discardToCrib(cards: discard.map(\.id)), from: expectedSeat))
+        case .pegging:
+            guard let hand = state.hands[expectedSeat], let pegging = state.pegging,
+                  let card = CribbageBot.pegPlay(hand: hand, sequence: pegging.sequence.map(\.card),
+                                                 count: pegging.count, rng: &cribbageBotRNG)
+            else { return }
+            cribbageEmit(cribbageEngine.apply(.playCard(cardID: card.id), from: expectedSeat))
+        case .handComplete, .gameOver:
+            break
         }
     }
 }

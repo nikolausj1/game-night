@@ -13,8 +13,22 @@ struct TableRootView: View {
     var body: some View {
         ZStack {
             TableSurface()
-            if let dice = diceLauncher.controller {
-                DiceTableView(controller: dice, onClose: { diceLauncher.end() })
+            if let game = diceLauncher.game {
+                switch game {
+                case .lcr(let c):
+                    DiceTableView(controller: c, onClose: { diceLauncher.end() })
+                case .yahtzee(let c):
+                    YahtzeeTableView(controller: c, onClose: { diceLauncher.end() })
+                case .zilch(let c):
+                    ZilchTableView(controller: c, onClose: { diceLauncher.end() })
+                case .shutBox(let c):
+                    ShutBoxTableView(controller: c, onClose: { diceLauncher.end() })
+                }
+            } else if host.cribbageEngine != nil {
+                // Cribbage lives outside the card engine, same coexistence
+                // rule as dice above: `host.state` stays nil the whole
+                // time, so this branch has to come before the menu check.
+                CribbageTableView(host: host, onClose: { host.closeTable() })
             } else if host.state == nil {
                 MenuView(host: host)
             } else {
@@ -46,6 +60,20 @@ struct TableRootView: View {
                 if let first = host.state?.discardPile.first {
                     host.faceDownCards.insert(first.id)
                 }
+            }
+            // Sim-verify hook, cribbage wave: an all-bot cribbage game that
+            // plays itself, reachable without MenuView (which doesn't have
+            // a cribbage launch button yet — see BotRoster for the two
+            // names). Mirrors MenuView's own `-autoStartLcr`/`-autoStartUno`
+            // hooks; lives here instead since MenuView isn't this wave's
+            // file to edit.
+            if CommandLine.arguments.contains("-autoStartCribbage"),
+               host.state == nil, host.cribbageEngine == nil {
+                let bots = BotRoster.random(count: 2)
+                let seats = bots.enumerated().map {
+                    SeatSpec(id: $0.offset, name: $0.element.name, isBot: true)
+                }
+                host.startCribbage(seats: seats, seed: UInt64.random(in: UInt64.min...UInt64.max))
             }
         }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }

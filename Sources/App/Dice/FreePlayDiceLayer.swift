@@ -66,7 +66,17 @@ struct FreePlayDiceLayer: View {
                     loadedDice = min(requiredCount, loadedDice + 1)
                     host.setFreePlayLoadedDice(loadedDice)
                 }
-            ) { rollID, faces in
+            ) { rollID, results in
+                // Free play never sets `diceCount`/`faceStyle` either (see
+                // DiceTableView's own call site) — every result is `.lcr`;
+                // this keeps `FreePlayDiceLayer.onResult`'s own external
+                // contract (still `[LcrFace]`, read by TableGameView)
+                // unchanged while the platform layer underneath it now
+                // speaks the general `DieResult`.
+                let faces = results.compactMap { result -> LcrFace? in
+                    if case .lcr(let face) = result { return face }
+                    return nil
+                }
                 onResult(rollID, faces)
             }
             TableCupView(edge: .bottom, loadedCount: loadedDice, requiredCount: requiredCount)

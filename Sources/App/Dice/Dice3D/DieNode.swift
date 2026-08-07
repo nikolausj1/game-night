@@ -33,11 +33,26 @@ enum Dice3D {
 /// One physical die: a chamfered SCNBox with six independently textured
 /// faces and a dynamic physics body. The face on each local axis is
 /// recorded so DieFaceReader can turn a settled orientation back into a
-/// game result.
+/// game result. Two face styles share this same geometry/physics recipe
+/// (see the private `build` helper below) — only the six face images and
+/// which axis-data array is meaningful differ between them:
+///  - `.lcr` (`init(lcrDie:)`): LCR's three letters + dot, read back via
+///    `axisFaces`/`DieFaceReader.upFace`.
+///  - `.pips` (`init(pipDie:)`): a standard 1-6 pip die for Yahtzee/Zilch/
+///    Shut the Box, read back via `axisPipValues`/`DieFaceReader.upPipValue`.
 final class DieNode: SCNNode {
+    /// Which face style this instance actually is — lets DieFaceReader (or
+    /// anything else) branch without guessing from the axis arrays.
+    let faceStyle: DieFaceStyle
     /// Which LcrFace lives on each local axis, ordered
     /// [+X, −X, +Y, −Y, +Z, −Z] — the order DieFaceReader indexes by.
+    /// Meaningful only when `faceStyle == .lcr`; a `.pips` die carries an
+    /// unused all-`.dot` placeholder here so this stays non-optional.
     let axisFaces: [LcrFace]
+    /// Which 1-6 value lives on each local axis, same [+X, −X, +Y, −Y,
+    /// +Z, −Z] order. Meaningful only when `faceStyle == .pips`; an
+    /// `.lcr` die carries an unused all-zero placeholder here.
+    let axisPipValues: [Int]
 
     /// A standard LCR die: three dot sides, one L, one R, one C. Physics
     /// rolls a fair 1/6 per face, so the classic 1/2-dot distribution
@@ -45,11 +60,9 @@ final class DieNode: SCNNode {
     init(lcrDie index: Int) {
         // +X: L   −X: R   +Y: dot   −Y: dot   +Z: C   −Z: dot
         axisFaces = [.left, .right, .dot, .dot, .center, .dot]
+        axisPipValues = Array(repeating: 0, count: 6) // unused for .lcr dice
+        faceStyle = .lcr
         super.init()
-
-        let box = SCNBox(width: Dice3D.side, height: Dice3D.side,
-                         length: Dice3D.side, chamferRadius: Dice3D.chamfer)
-        box.chamferSegmentCount = 6
 
         // SCNBox material order: front(+Z), right(+X), back(−Z), left(−X),
         // top(+Y), bottom(−Y).
@@ -61,6 +74,45 @@ final class DieNode: SCNNode {
             DieFaceTextures.pip(),         // +Y
             DieFaceTextures.pip(),         // −Y
         ]
+        Self.build(self, images: images, index: index)
+    }
+
+    /// A standard 1-6 pip die for the roll-and-score games (Yahtzee,
+    /// Zilch, Shut the Box): opposite faces sum to 7, the universal
+    /// Western/casino convention. Physics rolls a fair 1/6 per face
+    /// exactly like the LCR die above — only the face art and
+    /// DieFaceReader's mapping differ.
+    init(pipDie index: Int) {
+        // +X: 2   −X: 5   +Y: 3   −Y: 4   +Z: 1   −Z: 6  (each pair sums to 7)
+        axisPipValues = [2, 5, 3, 4, 1, 6]
+        axisFaces = Array(repeating: .dot, count: 6) // unused for .pips dice
+        faceStyle = .pips
+        super.init()
+
+        // Same SCNBox material order as the LCR die above.
+        let images: [UIImage] = [
+            DieFaceTextures.standard(1), // +Z
+            DieFaceTextures.standard(2), // +X
+            DieFaceTextures.standard(6), // −Z
+            DieFaceTextures.standard(5), // −X
+            DieFaceTextures.standard(3), // +Y
+            DieFaceTextures.standard(4), // −Y
+        ]
+        Self.build(self, images: images, index: index)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) unsupported") }
+
+    /// Shared geometry + physics-body construction for both face styles —
+    /// called after `super.init()` once each initializer above has set its
+    /// own axis data; only the six face `images` (and the die's own random
+    /// jitter, re-rolled per instance either way) differ from here on.
+    private static func build(_ node: DieNode, images: [UIImage], index: Int) {
+        let box = SCNBox(width: Dice3D.side, height: Dice3D.side,
+                         length: Dice3D.side, chamferRadius: Dice3D.chamfer)
+        box.chamferSegmentCount = 6
+
         // Slight per-die warmth jitter so a spilled handful doesn't look
         // like clones of one die.
         let tint = UIColor(hue: 0.115,
@@ -77,8 +129,8 @@ final class DieNode: SCNNode {
             material.diffuse.mipFilter = .linear
             return material
         }
-        geometry = box
-        name = "die\(index)"
+        node.geometry = box
+        node.name = "die\(index)"
 
         let body = SCNPhysicsBody(
             type: .dynamic,
@@ -99,11 +151,8 @@ final class DieNode: SCNNode {
         body.categoryBitMask = Dice3D.dieCategory
         body.collisionBitMask = Dice3D.dieCategory | Dice3D.boundsCategory
         body.contactTestBitMask = Dice3D.dieCategory | Dice3D.boundsCategory
-        physicsBody = body
+        node.physicsBody = body
     }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) unsupported") }
 }
 
 /// Programmatic 512px face textures: warm ivory stock with edge shading,
@@ -129,7 +178,9 @@ enum DieFaceTextures {
         }
     }
 
-    /// Standard casino pip layouts, 1–6, for future dice games.
+    /// Standard casino pip layouts, 1–6 — the roll-and-score games'
+    /// (Yahtzee/Zilch/Shut the Box) face art, built on the same ivory
+    /// stock/inked-pip pipeline as LCR's own dot face.
     static func standard(_ value: Int) -> UIImage {
         cached("std-\(value)") { context in
             drawIvoryBase(context)
@@ -146,11 +197,18 @@ enum DieFaceTextures {
                     CGPoint(x: lo, y: mid), CGPoint(x: hi, y: mid),
                     CGPoint(x: lo, y: hi), CGPoint(x: hi, y: hi)],
             ]
+            // Classic casino/craps convention: every pip is inked black
+            // except the lone center pip on the 1 face, which is red — the
+            // one splash of color a real pip die carries.
+            let color = value == 1 ? Self.redPip : Self.blackPip
             for point in layouts[max(1, min(6, value))] ?? [] {
-                drawPip(at: point, context: context, radius: size * 0.075)
+                drawPip(at: point, context: context, radius: size * 0.075, color: color)
             }
         }
     }
+
+    private static let blackPip = UIColor(red: 0.06, green: 0.05, blue: 0.05, alpha: 1)
+    private static let redPip = UIColor(red: 0.72, green: 0.09, blue: 0.09, alpha: 1)
 
     // MARK: drawing
 
@@ -226,19 +284,23 @@ enum DieFaceTextures {
     }
 
     /// Inked pip with a concave shading gradient and a small catch light.
+    /// `color` is the pip's own ink (near-black by default — the LCR dot
+    /// face and every non-1 pip on a standard die; `standard(_:)` passes
+    /// red in for the 1 face's lone center pip, the classic casino tell).
     private static func drawPip(at point: CGPoint, context: CGContext,
-                                radius: CGFloat = 0) {
+                                radius: CGFloat = 0, color: UIColor = blackPip) {
         let r = radius > 0 ? radius : size * 0.105
         let space = CGColorSpaceCreateDeviceRGB()
         // Recess shadow ring just outside the pip.
         context.setFillColor(UIColor(white: 1, alpha: 0.55).cgColor)
         context.fillEllipse(in: CGRect(x: point.x - r, y: point.y - r + r * 0.14,
                                        width: r * 2, height: r * 2))
-        // Pip body: near-black with a slightly lighter bottom (light bounce).
-        let dark = UIColor(red: 0.06, green: 0.05, blue: 0.05, alpha: 1)
-        let lift = UIColor(red: 0.22, green: 0.19, blue: 0.17, alpha: 1)
+        // Pip body: `color` (near-black, or red for the 1's center pip)
+        // with a slightly lighter bottom (light bounce) — same shading
+        // recipe either way, just tinted.
+        let lift = lightened(color, by: 0.16)
         if let gradient = CGGradient(colorsSpace: space,
-                                     colors: [dark.cgColor, lift.cgColor] as CFArray,
+                                     colors: [color.cgColor, lift.cgColor] as CFArray,
                                      locations: [0, 1]) {
             context.saveGState()
             context.addEllipse(in: CGRect(x: point.x - r, y: point.y - r,
@@ -254,5 +316,16 @@ enum DieFaceTextures {
         context.setFillColor(UIColor(white: 1, alpha: 0.22).cgColor)
         context.fillEllipse(in: CGRect(x: point.x - r * 0.38, y: point.y - r * 0.55,
                                        width: r * 0.5, height: r * 0.35))
+    }
+
+    /// `color` blended `fraction` of the way toward white — used to derive
+    /// a pip's "light bounce" bottom stop from whatever ink color it's
+    /// drawn in (near-black normally, red for the 1's center pip) instead
+    /// of hardcoding a second color per ink.
+    private static func lightened(_ color: UIColor, by fraction: CGFloat) -> UIColor {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.getRed(&r, green: &g, blue: &b, alpha: &a)
+        return UIColor(red: r + (1 - r) * fraction, green: g + (1 - g) * fraction,
+                       blue: b + (1 - b) * fraction, alpha: a)
     }
 }

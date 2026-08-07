@@ -1386,6 +1386,1205 @@ let cardDealtEvents: [GameEvent] = [.cardDealt(seat: 2)]
 check((try! JSONDecoder().decode([GameEvent].self, from: try! JSONEncoder().encode(cardDealtEvents))) == cardDealtEvents,
       "cardDealt round-trips through JSON")
 
+// MARK: - Solitaire: rank remapping
+
+check(card("s14").solitaireRank == 1, "Ace remaps to Klondike rank 1")
+check(card("s13").solitaireRank == 13, "King stays Klondike rank 13")
+check(card("s2").solitaireRank == 2, "low ranks pass through unchanged")
+check(card("s11").solitaireRank == 11, "Jack stays 11")
+
+// MARK: - Solitaire: seeded deal shape & determinism
+
+let solA1 = SolitaireEngine(seed: 777)
+let solA2 = SolitaireEngine(seed: 777)
+let solB = SolitaireEngine(seed: 778)
+check(solA1.state == solA2.state, "same seed -> identical solitaire deal")
+check(solA1.state != solB.state, "different seed -> different solitaire deal")
+check(solA1.state.tableau.map(\.count) == [1, 2, 3, 4, 5, 6, 7], "tableau column sizes are 1...7")
+check(solA1.state.tableau.enumerated().allSatisfy { i, pile in
+    pile.dropLast().allSatisfy { !$0.faceUp } && pile.last!.faceUp
+}, "only the top card of each column deals face-up")
+check(solA1.state.stock.count == 24, "24 cards left in the stock after dealing 28")
+check(solA1.state.waste.isEmpty && solA1.state.foundations.values.allSatisfy(\.isEmpty),
+      "waste and foundations start empty")
+check(Set(solA1.state.tableau.flatMap { $0.map { $0.card.id } } + solA1.state.stock.map(\.id)).count == 52,
+      "every dealt id is unique and the full 52 is accounted for")
+check(solA1.state.drawMode == .drawOne, "default draw mode is draw-1")
+
+// MARK: - Solitaire: tableau legality
+
+func solitaireColumn(_ cards: [Card], faceUp: [Bool]? = nil) -> [SolitaireCard] {
+    cards.enumerated().map { i, c in SolitaireCard(card: c, faceUp: faceUp?[i] ?? true) }
+}
+func emptySolitaireFoundations() -> [Suit: [Card]] {
+    Dictionary(uniqueKeysWithValues: Suit.allCases.map { ($0, []) })
+}
+func solitaireState(tableau: [[SolitaireCard]], foundations: [Suit: [Card]] = emptySolitaireFoundations(),
+                    stock: [Card] = [], waste: [Card] = [], drawMode: SolitaireDrawMode = .drawOne) -> SolitaireState {
+    var full = tableau
+    while full.count < 7 { full.append([]) }
+    return SolitaireState(tableau: full, foundations: foundations, stock: stock, waste: waste,
+                          drawMode: drawMode, seed: 1)
+}
+
+// Black 7 onto red 8: legal (descending, alternating).
+let legalTableauState = solitaireState(tableau: [
+    solitaireColumn([card("h8")]),
+    solitaireColumn([card("s7")]),
+])
+let legalTableauEngine = SolitaireEngine(state: legalTableauState)
+check(legalTableauEngine.legalMove(from: .tableau(column: 1, cardID: "s7"), to: .tableau(column: 0)),
+      "black 7 onto red 8 is legal")
+
+// Red 7 onto red 8: same color, illegal.
+let sameColorState = solitaireState(tableau: [
+    solitaireColumn([card("h8")]),
+    solitaireColumn([card("d7")]),
+])
+check(!SolitaireEngine(state: sameColorState).legalMove(from: .tableau(column: 1, cardID: "d7"), to: .tableau(column: 0)),
+      "red 7 onto red 8 (same color) is illegal")
+
+// Black 5 onto red 8: wrong rank gap, illegal.
+let wrongGapState = solitaireState(tableau: [
+    solitaireColumn([card("h8")]),
+    solitaireColumn([card("s5")]),
+])
+check(!SolitaireEngine(state: wrongGapState).legalMove(from: .tableau(column: 1, cardID: "s5"), to: .tableau(column: 0)),
+      "black 5 onto red 8 (wrong rank) is illegal")
+
+// King onto an empty column: legal. Queen onto an empty column: illegal.
+let emptyColumnState = solitaireState(tableau: [
+    [],
+    solitaireColumn([card("s13")]),
+    solitaireColumn([card("h12")]),
+])
+let emptyColumnEngine = SolitaireEngine(state: emptyColumnState)
+check(emptyColumnEngine.legalMove(from: .tableau(column: 1, cardID: "s13"), to: .tableau(column: 0)),
+      "King onto an empty column is legal")
+check(!emptyColumnEngine.legalMove(from: .tableau(column: 2, cardID: "h12"), to: .tableau(column: 0)),
+      "Queen onto an empty column is illegal")
+
+// Moving a run onto its own column is a no-op, not a move.
+check(!emptyColumnEngine.legalMove(from: .tableau(column: 1, cardID: "s13"), to: .tableau(column: 1)),
+      "moving a run onto its own column is illegal")
+
+// A face-down card can't be picked up, even as the base of an otherwise-legal run.
+let faceDownBaseState = solitaireState(tableau: [
+    solitaireColumn([card("h8")]),
+    solitaireColumn([card("s7")], faceUp: [false]),
+])
+check(!SolitaireEngine(state: faceDownBaseState).legalMove(from: .tableau(column: 1, cardID: "s7"), to: .tableau(column: 0)),
+      "a face-down card can't be moved")
+
+// A multi-card run that's genuinely a valid alternating descending sequence
+// moves together.
+let validRunState = solitaireState(tableau: [
+    solitaireColumn([card("h8")]),
+    solitaireColumn([card("s7"), card("h6")]),
+])
+let validRunEngine = SolitaireEngine(state: validRunState)
+check(validRunEngine.legalMove(from: .tableau(column: 1, cardID: "s7"), to: .tableau(column: 0)),
+      "a valid black7-red6 run moves as one unit")
+_ = validRunEngine.attemptMove(from: .tableau(column: 1, cardID: "s7"), to: .tableau(column: 0))
+check(validRunEngine.state.tableau[0].map(\.id) == ["h8", "s7", "h6"], "the whole run landed together, in order")
+check(validRunEngine.state.tableau[1].isEmpty, "the source column is now empty")
+
+// A "run" that isn't actually a valid sequence (hand-constructed, can't
+// arise from legal play) can't be picked up as a unit — the defensive
+// check in isMovableRun, not something the UI can trigger normally.
+let brokenRunState = solitaireState(tableau: [
+    solitaireColumn([card("h8")]),
+    solitaireColumn([card("s7"), card("s6")]), // same color back-to-back
+])
+check(!SolitaireEngine(state: brokenRunState).legalMove(from: .tableau(column: 1, cardID: "s7"), to: .tableau(column: 0)),
+      "a same-color 'run' can't be moved as a unit")
+
+// MARK: - Solitaire: foundation legality
+
+// Ace onto an empty foundation: legal. Two onto an empty foundation: illegal.
+let foundationStartState = solitaireState(tableau: [
+    solitaireColumn([card("h14")]),
+    solitaireColumn([card("h2")]),
+])
+let foundationStartEngine = SolitaireEngine(state: foundationStartState)
+check(foundationStartEngine.legalMove(from: .tableau(column: 0, cardID: "h14"), to: .foundation(.hearts)),
+      "Ace onto an empty foundation is legal")
+check(!foundationStartEngine.legalMove(from: .tableau(column: 1, cardID: "h2"), to: .foundation(.hearts)),
+      "Two onto an empty foundation is illegal")
+
+// Sequential same-suit build: legal. Wrong suit / skipped rank: illegal.
+let foundationBuildState = solitaireState(
+    tableau: [solitaireColumn([card("h2")]), solitaireColumn([card("d2")]), solitaireColumn([card("h4")])],
+    foundations: {
+        var f = emptySolitaireFoundations(); f[.hearts] = [card("h14")]; return f
+    }())
+let foundationBuildEngine = SolitaireEngine(state: foundationBuildState)
+check(foundationBuildEngine.legalMove(from: .tableau(column: 0, cardID: "h2"), to: .foundation(.hearts)),
+      "hearts 2 onto a hearts-Ace foundation is legal")
+check(!foundationBuildEngine.legalMove(from: .tableau(column: 1, cardID: "d2"), to: .foundation(.hearts)),
+      "diamonds 2 onto a hearts foundation (wrong suit) is illegal")
+check(!foundationBuildEngine.legalMove(from: .tableau(column: 2, cardID: "h4"), to: .foundation(.hearts)),
+      "hearts 4 onto a hearts-Ace foundation (skipped rank) is illegal")
+
+// A foundation card can rescue back onto a legal tableau spot.
+let foundationRescueState = solitaireState(
+    tableau: [solitaireColumn([card("s8")])],
+    foundations: { var f = emptySolitaireFoundations(); f[.hearts] = [card("h14"), card("h2"), card("h3"), card("h4"),
+                                                                       card("h5"), card("h6"), card("h7")]; return f }())
+let foundationRescueEngine = SolitaireEngine(state: foundationRescueState)
+check(foundationRescueEngine.legalMove(from: .foundation(.hearts), to: .tableau(column: 0)),
+      "hearts 7 off the foundation onto a black 8 is legal")
+_ = foundationRescueEngine.attemptMove(from: .foundation(.hearts), to: .tableau(column: 0))
+check(foundationRescueEngine.state.foundations[.hearts]?.count == 6, "the foundation lost its top card")
+check(foundationRescueEngine.state.tableau[0].last?.id == "h7", "and the tableau gained it")
+
+// Double-tap auto-foundation: reports the right suit when playable, nil otherwise.
+check(foundationStartEngine.autoFoundationSuit(for: .tableau(column: 0, cardID: "h14")) == .hearts,
+      "double-tap on a playable Ace reports its foundation suit")
+check(foundationStartEngine.autoFoundationSuit(for: .tableau(column: 1, cardID: "h2")) == nil,
+      "double-tap on an unplayable card reports nil")
+
+// MARK: - Solitaire: draw / redeal
+
+let drawEngine = SolitaireEngine(seed: 9001, drawMode: .drawOne)
+let stockBefore = drawEngine.state.stock.count
+check(drawEngine.draw(), "draw-1 pulls a card")
+check(drawEngine.state.waste.count == 1 && drawEngine.state.stock.count == stockBefore - 1,
+      "draw-1 moves exactly one stock card to the waste")
+
+let draw3Engine = SolitaireEngine(seed: 9002, drawMode: .drawThree)
+_ = draw3Engine.draw()
+check(draw3Engine.state.waste.count == 3 && draw3Engine.state.stock.count == 21,
+      "draw-3 moves three stock cards to the waste")
+
+// Exhaust the stock, then redeal, then confirm the cycle can repeat.
+while draw3Engine.state.stock.count > 0 { _ = draw3Engine.draw() }
+let wasteAtEmptyStock = draw3Engine.state.waste.count
+check(draw3Engine.state.stock.isEmpty && wasteAtEmptyStock == 24, "the whole stock ends up in the waste")
+check(draw3Engine.draw(), "drawing with an empty stock redeals instead of failing")
+check(draw3Engine.state.stock.count == wasteAtEmptyStock && draw3Engine.state.waste.isEmpty,
+      "redeal moves the entire waste back into the stock, unlimited")
+_ = draw3Engine.draw() // prove the redealt stock is drawable again
+check(!draw3Engine.state.waste.isEmpty, "the redealt stock draws normally")
+
+let bothEmptyState = solitaireState(tableau: [], stock: [], waste: [])
+check(!SolitaireEngine(state: bothEmptyState).draw(), "drawing with stock AND waste both empty fails")
+
+// MARK: - Solitaire: auto-flip on exposure
+
+let autoFlipState = solitaireState(
+    tableau: [solitaireColumn([card("s5"), card("h6")], faceUp: [false, true])],
+    foundations: { var f = emptySolitaireFoundations()
+        f[.hearts] = [card("h14"), card("h2"), card("h3"), card("h4"), card("h5")]; return f }())
+let autoFlipEngine = SolitaireEngine(state: autoFlipState)
+check(!autoFlipEngine.state.tableau[0][0].faceUp, "the buried card starts face-down")
+check(autoFlipEngine.attemptMove(from: .tableau(column: 0, cardID: "h6"), to: .foundation(.hearts)),
+      "hearts 6 walks home, exposing the buried card")
+check(autoFlipEngine.state.tableau[0][0].faceUp, "the newly-exposed card auto-flips face-up")
+
+// MARK: - Solitaire: undo round-trip
+
+let undoState = solitaireState(tableau: [
+    solitaireColumn([card("h8")]),
+    solitaireColumn([card("s7")]),
+])
+let undoEngine = SolitaireEngine(state: undoState)
+check(!undoEngine.canUndo, "a fresh engine has nothing to undo")
+let beforeMove = undoEngine.state
+_ = undoEngine.attemptMove(from: .tableau(column: 1, cardID: "s7"), to: .tableau(column: 0))
+check(undoEngine.state != beforeMove, "the move actually changed the state")
+check(undoEngine.canUndo, "canUndo flips on after a move")
+check(undoEngine.undo(), "undo succeeds")
+check(undoEngine.state == beforeMove, "undo restores the exact prior state, move count included")
+check(!undoEngine.canUndo, "undo stack is empty again after one undo")
+check(!undoEngine.undo(), "undoing with nothing left to undo fails cleanly")
+
+// Multiple moves, multiple undos: walk back to the start.
+let multiUndoEngine = SolitaireEngine(seed: 55)
+let multiUndoStart = multiUndoEngine.state
+_ = multiUndoEngine.draw()
+_ = multiUndoEngine.draw()
+check(multiUndoEngine.state != multiUndoStart, "two draws changed the state")
+_ = multiUndoEngine.undo()
+_ = multiUndoEngine.undo()
+check(multiUndoEngine.state == multiUndoStart, "two undos walk all the way back to the start")
+
+// New deal wipes undo history — nothing sensible to undo INTO a different deal.
+let wipeEngine = SolitaireEngine(seed: 60)
+_ = wipeEngine.draw()
+check(wipeEngine.canUndo, "a draw leaves something to undo")
+wipeEngine.newDeal(seed: 61)
+check(!wipeEngine.canUndo, "a new deal clears the undo stack")
+
+// MARK: - Solitaire: win detection & autocompletability
+
+func suitFoundationRun(_ suit: Suit, throughKlondikeRank topRank: Int) -> [Card] {
+    let prefix = String(suit.rawValue.first!)
+    // Klondike order Ace(1)...topRank, mapped back onto Card.rank (Ace = 14).
+    return (1...topRank).map { klondikeRank in
+        let cardRank = klondikeRank == 1 ? 14 : klondikeRank
+        return Card(id: "\(prefix)\(cardRank)", kind: .standard(suit: suit, rank: cardRank))
+    }
+}
+var almostWonFoundations: [Suit: [Card]] = [:]
+for suit in Suit.allCases {
+    // Every suit home through King (13), except hearts, one card short.
+    almostWonFoundations[suit] = suitFoundationRun(suit, throughKlondikeRank: suit == .hearts ? 12 : 13)
+}
+let almostWonState = solitaireState(tableau: [], foundations: almostWonFoundations)
+check(!almostWonState.isWon, "51 of 52 home isn't a win yet")
+var justWonFoundations = almostWonFoundations
+justWonFoundations[.hearts]!.append(card("h13"))
+check(solitaireState(tableau: [], foundations: justWonFoundations).isWon, "all 52 home is a win")
+
+let notAutoCompletableStock = solitaireState(tableau: [solitaireColumn([card("s2")])], stock: [card("s3")])
+check(!notAutoCompletableStock.isAutoCompletable, "a non-empty stock blocks autocompletability")
+let notAutoCompletableWaste = solitaireState(tableau: [solitaireColumn([card("s2")])], waste: [card("s3")])
+check(!notAutoCompletableWaste.isAutoCompletable, "a non-empty waste blocks autocompletability")
+let notAutoCompletableFaceDown = solitaireState(tableau: [solitaireColumn([card("s2"), card("h3")], faceUp: [false, true])])
+check(!notAutoCompletableFaceDown.isAutoCompletable, "a face-down tableau card blocks autocompletability")
+let readyToAutoComplete = solitaireState(tableau: [solitaireColumn([card("s2"), card("h3")])])
+check(readyToAutoComplete.isAutoCompletable, "all face-up, stock and waste empty -> autocompletable")
+
+// MARK: - Solitaire: Codable save / resume round-trip
+
+let saveEngine = SolitaireEngine(seed: 4242)
+_ = saveEngine.draw()
+guard let savedData = saveEngine.encodedState, let resumedEngine = SolitaireEngine(encodedState: savedData) else {
+    check(false, "solitaire save/resume round-trip")
+    fatalError("unreachable")
+}
+check(resumedEngine.state == saveEngine.state, "resuming from encoded state reproduces the exact table")
+
+// MARK: - Solitaire: a scripted winnable game, played to completion
+
+// Hand-craft a fully face-up, fully solvable table: each of 4 columns holds
+// one whole suit already in home-run order (King buried at the bottom,
+// Ace exposed on top), 3 columns stand empty, stock/waste/foundations
+// start clean. `autoCompleteStep()` — the same primitive the trophy-moment
+// cascade animation drives — walks every card home one at a time with no
+// human input at all.
+func fullSuitColumn(_ suit: Suit) -> [SolitaireCard] {
+    let prefix = String(suit.rawValue.first!)
+    // Bottom (index 0) -> top (last index): King down to Ace, i.e. Card.rank
+    // 13,12,...,2, then 14 (Ace) last, since Ace's *solitaireRank* (1) is
+    // what needs to end up on top.
+    let ranksBottomToTop = Array((2...13).reversed()) + [14]
+    return ranksBottomToTop.map { rank in
+        SolitaireCard(card: Card(id: "\(prefix)\(rank)", kind: .standard(suit: suit, rank: rank)), faceUp: true)
+    }
+}
+let solvableState = solitaireState(tableau: Suit.allCases.map(fullSuitColumn))
+let solvableEngine = SolitaireEngine(state: solvableState)
+check(solvableEngine.state.isAutoCompletable, "the hand-crafted table is immediately autocompletable")
+var autocompleteSteps = 0
+for _ in 0..<60 { // hard cap so a runaway loop fails loudly instead of hanging
+    guard solvableEngine.autoCompleteStep() != nil else { break }
+    autocompleteSteps += 1
+}
+check(autocompleteSteps == 52, "exactly 52 cards walked home, one at a time, and autocomplete terminates")
+check(solvableEngine.state.isWon, "the scripted game reaches a real win")
+check(solvableEngine.state.tableau.allSatisfy(\.isEmpty), "every tableau column is empty at the end")
+check(solvableEngine.state.moveCount == 52, "move count matches the 52 winning moves")
+check(Suit.allCases.allSatisfy { suit in
+    solvableEngine.state.foundations[suit]?.map(\.solitaireRank) == Array(1...13)
+}, "every foundation ends Ace...King, in order")
+
+// MARK: - Dots & Boxes: geometry
+
+func makeDABPlayers(_ n: Int, bots: Bool = false) -> [DotsAndBoxesPlayer] {
+    (0..<n).map { DotsAndBoxesPlayer(name: "P\($0)", colorIndex: $0, isBot: bots) }
+}
+
+// Every edge a grid of `gridSize` can hold, built the same way the engine's
+// private `allEdges()` does — duplicated here (not exposed publicly) so
+// tests can hand-craft exact board states via `DotsAndBoxesEngine(restoring:)`.
+func dabAllEdges(gridSize: Int) -> [DotsAndBoxesEdge] {
+    var edges: [DotsAndBoxesEdge] = []
+    for row in 0...gridSize {
+        for col in 0..<gridSize { edges.append(DotsAndBoxesEdge(orientation: .horizontal, row: row, col: col)) }
+    }
+    for row in 0..<gridSize {
+        for col in 0...gridSize { edges.append(DotsAndBoxesEdge(orientation: .vertical, row: row, col: col)) }
+    }
+    return edges
+}
+
+let dabBox = DotsAndBoxesBox(row: 2, col: 3)
+check(dabBox.edges() == [
+    DotsAndBoxesEdge(orientation: .horizontal, row: 2, col: 3),  // top
+    DotsAndBoxesEdge(orientation: .horizontal, row: 3, col: 3),  // bottom
+    DotsAndBoxesEdge(orientation: .vertical, row: 2, col: 3),    // left
+    DotsAndBoxesEdge(orientation: .vertical, row: 2, col: 4),    // right
+], "box edges() returns top/bottom/left/right in order")
+
+let dab4x4Engine = DotsAndBoxesEngine(gridSize: 4, players: makeDABPlayers(2), seed: 1)
+check(dab4x4Engine.state.totalEdgeCount == 40, "4x4-box grid has 40 edges (2*4*5)")
+check(dab4x4Engine.state.totalBoxCount == 16, "4x4-box grid has 16 boxes")
+check(dab4x4Engine.legalEdges().count == 40, "every edge legal on a fresh board")
+check(Set(dabAllEdges(gridSize: 4)).count == 40, "dabAllEdges matches totalEdgeCount for 4x4")
+
+// MARK: - Dots & Boxes: turn order and legality
+
+let dabTurnEngine = DotsAndBoxesEngine(gridSize: 1, players: makeDABPlayers(2), seed: 1)
+let dabOffGrid = dabTurnEngine.claimEdge(DotsAndBoxesEdge(orientation: .horizontal, row: 3, col: 0), by: 0)
+check(dabOffGrid == [.illegalAttempt(reason: "That's not a line on this grid")], "off-grid edge rejected")
+check(dabTurnEngine.state.claimedBy.isEmpty, "rejected off-grid attempt claims nothing")
+
+let dabWrongTurn = dabTurnEngine.claimEdge(DotsAndBoxesEdge(orientation: .horizontal, row: 0, col: 0), by: 1)
+check(dabWrongTurn == [.illegalAttempt(reason: "Not your turn")], "out-of-turn claim rejected")
+
+_ = dabTurnEngine.claimEdge(DotsAndBoxesEdge(orientation: .horizontal, row: 0, col: 0), by: 0)
+check(dabTurnEngine.state.turnIndex == 1, "turn passes on a non-completing move")
+let dabReclaim = dabTurnEngine.claimEdge(DotsAndBoxesEdge(orientation: .horizontal, row: 0, col: 0), by: 1)
+check(dabReclaim == [.illegalAttempt(reason: "That line is already drawn")], "an already-drawn line can't be redrawn")
+
+// MARK: - Dots & Boxes: box completion, extra turn, and game over
+
+let dab1x1Engine = DotsAndBoxesEngine(gridSize: 1, players: makeDABPlayers(2), seed: 1)
+// The lone box's 4 edges: top h(0,0), bottom h(1,0), left v(0,0), right v(0,1).
+_ = dab1x1Engine.claimEdge(DotsAndBoxesEdge(orientation: .horizontal, row: 0, col: 0), by: 0)
+check(dab1x1Engine.state.turnIndex == 1, "turn 1: passes to player 1")
+_ = dab1x1Engine.claimEdge(DotsAndBoxesEdge(orientation: .horizontal, row: 1, col: 0), by: 1)
+check(dab1x1Engine.state.turnIndex == 0, "turn 2: passes back to player 0")
+_ = dab1x1Engine.claimEdge(DotsAndBoxesEdge(orientation: .vertical, row: 0, col: 0), by: 0)
+check(dab1x1Engine.state.turnIndex == 1, "turn 3: passes to player 1 (box still at 3 sides)")
+let dabFinishEvents = dab1x1Engine.claimEdge(DotsAndBoxesEdge(orientation: .vertical, row: 0, col: 1), by: 1)
+check(dabFinishEvents.contains(.boxCompleted(box: DotsAndBoxesBox(row: 0, col: 0), by: 1)),
+      "completing the 4th side fires boxCompleted")
+check(dab1x1Engine.state.players[1].score == 1, "the completer's score increments")
+check(dab1x1Engine.state.isGameOver, "a 1x1 board is over the moment its one box completes")
+check(dabFinishEvents.contains(.gameOver(winners: [1])), "gameOver event names the sole winner")
+check(dab1x1Engine.state.turnIndex == 1, "turnIndex is left on the winner, not advanced past game over")
+
+// A 1x2 board: claiming a box grants an EXTRA turn (same player goes again)
+// instead of passing to the opponent.
+let dab1x2Engine = DotsAndBoxesEngine(gridSize: 2, players: makeDABPlayers(2), seed: 1)
+_ = dab1x2Engine.claimEdge(DotsAndBoxesEdge(orientation: .horizontal, row: 0, col: 0), by: 0) // top of (0,0)
+_ = dab1x2Engine.claimEdge(DotsAndBoxesEdge(orientation: .horizontal, row: 1, col: 0), by: 1) // bottom of (0,0)
+_ = dab1x2Engine.claimEdge(DotsAndBoxesEdge(orientation: .vertical, row: 0, col: 0), by: 0)   // left of (0,0)
+check(dab1x2Engine.state.turnIndex == 1, "still alternating before any box completes")
+let dabExtraTurnEvents = dab1x2Engine.claimEdge(DotsAndBoxesEdge(orientation: .vertical, row: 0, col: 1), by: 1) // right of (0,0)
+check(dabExtraTurnEvents.contains(.extraTurn(playerIndex: 1)), "completing a box fires extraTurn")
+check(dab1x2Engine.state.turnIndex == 1, "the completer's turn does NOT advance")
+check(!dab1x2Engine.state.isGameOver, "one box down, one still open on a 1x2 board")
+
+// MARK: - Dots & Boxes: a single shared edge completing TWO boxes at once
+
+let dabDoubleEngine = DotsAndBoxesEngine(gridSize: 2, players: makeDABPlayers(2), seed: 1)
+let dabDoubleSetup: [DotsAndBoxesEdge] = [
+    DotsAndBoxesEdge(orientation: .horizontal, row: 0, col: 0), // top of (0,0)
+    DotsAndBoxesEdge(orientation: .horizontal, row: 1, col: 0), // bottom of (0,0)
+    DotsAndBoxesEdge(orientation: .vertical, row: 0, col: 0),   // left of (0,0)
+    DotsAndBoxesEdge(orientation: .horizontal, row: 0, col: 1), // top of (0,1)
+    DotsAndBoxesEdge(orientation: .horizontal, row: 1, col: 1), // bottom of (0,1)
+    DotsAndBoxesEdge(orientation: .vertical, row: 0, col: 2),   // right of (0,1)
+]
+for edge in dabDoubleSetup {
+    let mover = dabDoubleEngine.state.turnIndex
+    _ = dabDoubleEngine.claimEdge(edge, by: mover)
+}
+check(dabDoubleEngine.state.claimedBy.count == 6, "six of the eight edges around the (0,0)/(0,1) pocket are drawn")
+let dabSharedEdge = DotsAndBoxesEdge(orientation: .vertical, row: 0, col: 1) // between (0,0) and (0,1)
+let dabDoubleEvents = dabDoubleEngine.claimEdge(dabSharedEdge, by: dabDoubleEngine.state.turnIndex)
+let dabDoubleBoxEvents = dabDoubleEvents.filter { if case .boxCompleted = $0 { return true }; return false }
+check(dabDoubleBoxEvents.count == 2, "the shared last edge completes BOTH boxes in one stroke")
+check(!dabDoubleEngine.state.isGameOver, "row 1's two boxes are untouched — the 2x2 board isn't finished yet")
+check(dabDoubleEngine.state.players.reduce(0) { $0 + $1.score } == 2, "exactly the two row-0 boxes are scored so far")
+
+// MARK: - Dots & Boxes: a tied final score names every co-leader
+
+// 2x2-box board, one box left to claim: player 0 already holds 2 boxes,
+// player 1 holds 1. Player 1 draws the last line, taking the 4th box and
+// leveling the score 2-2 — `winners` should name BOTH players.
+var dabTieState = DotsAndBoxesState(gridSize: 2, players: makeDABPlayers(2), seed: 1)
+let dabTieLastEdge = DotsAndBoxesEdge(orientation: .vertical, row: 1, col: 2) // right border of box (1,1)
+dabTieState.claimedBy = Dictionary(uniqueKeysWithValues: dabAllEdges(gridSize: 2)
+    .filter { $0 != dabTieLastEdge }
+    .map { ($0, 0) })
+dabTieState.boxOwner = [[0, 0], [1, nil]]
+dabTieState.players[0].score = 2
+dabTieState.players[1].score = 1
+dabTieState.turnIndex = 1
+let dabTieEngine = DotsAndBoxesEngine(restoring: dabTieState)
+let dabTieEvents = dabTieEngine.claimEdge(dabTieLastEdge, by: 1)
+check(dabTieEvents.contains(.boxCompleted(box: DotsAndBoxesBox(row: 1, col: 1), by: 1)),
+      "player 1 completes the last box")
+check(dabTieEngine.state.players[0].score == 2 && dabTieEngine.state.players[1].score == 2,
+      "the final box levels the score 2-2")
+check(dabTieEngine.state.isGameOver, "the 2x2 board is complete")
+check(dabTieEvents.contains(.gameOver(winners: [0, 1])), "a tied final score names BOTH co-leaders as winners")
+
+// MARK: - Dots & Boxes: bot never gifts a box when a safe move exists
+
+func dabAdjacentBoxes(_ edge: DotsAndBoxesEdge, gridSize: Int) -> [DotsAndBoxesBox] {
+    switch edge.orientation {
+    case .horizontal:
+        var boxes: [DotsAndBoxesBox] = []
+        if edge.row - 1 >= 0 { boxes.append(DotsAndBoxesBox(row: edge.row - 1, col: edge.col)) }
+        if edge.row < gridSize { boxes.append(DotsAndBoxesBox(row: edge.row, col: edge.col)) }
+        return boxes
+    case .vertical:
+        var boxes: [DotsAndBoxesBox] = []
+        if edge.col - 1 >= 0 { boxes.append(DotsAndBoxesBox(row: edge.row, col: edge.col - 1)) }
+        if edge.col < gridSize { boxes.append(DotsAndBoxesBox(row: edge.row, col: edge.col)) }
+        return boxes
+    }
+}
+
+for dabSeed: UInt64 in [1, 2, 3, 42, 999] {
+    let engine = DotsAndBoxesEngine(gridSize: 4, players: makeDABPlayers(2, bots: true), seed: dabSeed)
+    var guardCount = 0
+    while !engine.state.isGameOver && guardCount < 500 {
+        guardCount += 1
+        let mover = engine.state.turnIndex
+        guard let edge = engine.chooseBotEdge(for: mover) else { break }
+        let claimed = engine.state.claimedBy
+        func filled(_ box: DotsAndBoxesBox) -> Int { box.edges().filter { claimed[$0] != nil }.count }
+        func isSafe(_ e: DotsAndBoxesEdge) -> Bool { !dabAdjacentBoxes(e, gridSize: 4).contains { filled($0) == 2 } }
+        func completes(_ e: DotsAndBoxesEdge) -> Bool { dabAdjacentBoxes(e, gridSize: 4).contains { filled($0) == 3 } }
+        let anySafeExists = engine.legalEdges().contains { isSafe($0) && !completes($0) }
+        if anySafeExists && !completes(edge) {
+            check(isSafe(edge), "seed \(dabSeed) move \(guardCount): bot never gifts a box while a safe move exists")
+        }
+        _ = engine.claimEdge(edge, by: mover)
+    }
+    check(engine.state.isGameOver, "seed \(dabSeed): bot-vs-bot 4x4 game reaches game over")
+    let totalScore = engine.state.players.reduce(0) { $0 + $1.score }
+    check(totalScore == 16, "seed \(dabSeed): all 16 boxes claimed by someone")
+}
+
+// MARK: - Dots & Boxes: forced to sacrifice, prefers the SHORTEST chain
+
+// Hand-build a 4x4-box board where every remaining legal move is unsafe,
+// with two sacrifices on offer: a lone 1-box pocket (top-left corner) and a
+// full 4-box chain running the length of the bottom row. A sound bot must
+// open the 1-box pocket, not the 4-box chain — the classic "least-bad
+// sacrifice" call.
+var dabChainState = DotsAndBoxesState(gridSize: 4, players: makeDABPlayers(2, bots: true), seed: 7)
+var dabChainClaims: [DotsAndBoxesEdge: Int] = Dictionary(uniqueKeysWithValues: dabAllEdges(gridSize: 4).map { ($0, 0) })
+var dabChainOwners: [[Int?]] = Array(repeating: Array(repeating: 0, count: 4), count: 4)
+
+// Trap A — box (0,0): only its top/left border edges are open (2 filled
+// already via the shared bottom/right edges), so opening EITHER one gives
+// away exactly that one box (its neighbors (1,0) and (0,1) stay fully
+// resolved either way, so the "capture" can't cascade further).
+let dabTrapAEdges = [
+    DotsAndBoxesEdge(orientation: .horizontal, row: 0, col: 0), // top border
+    DotsAndBoxesEdge(orientation: .vertical, row: 0, col: 0),   // left border
+]
+for e in dabTrapAEdges { dabChainClaims[e] = nil }
+dabChainOwners[0][0] = nil
+
+// Trap B — the entire bottom row (boxes (3,0)...(3,3)): every box in the
+// row keeps its top/bottom claimed and BOTH verticals open, forming one
+// continuous chain from the left border to the right border. Opening
+// either end sweeps all four boxes.
+let dabTrapBEdges = (0...4).map { DotsAndBoxesEdge(orientation: .vertical, row: 3, col: $0) }
+for e in dabTrapBEdges { dabChainClaims[e] = nil }
+for col in 0..<4 { dabChainOwners[3][col] = nil }
+
+dabChainState.claimedBy = dabChainClaims
+dabChainState.boxOwner = dabChainOwners
+dabChainState.turnIndex = 0
+
+let dabChainEngine = DotsAndBoxesEngine(restoring: dabChainState)
+check(dabChainEngine.legalEdges().count == dabTrapAEdges.count + dabTrapBEdges.count,
+      "only the two traps' edges remain legal")
+guard let dabChainChoice = dabChainEngine.chooseBotEdge(for: 0) else {
+    check(false, "bot found a move in the forced scenario")
+    fatalError("unreachable")
+}
+check(dabTrapAEdges.contains(dabChainChoice),
+      "forced to sacrifice, the bot opens the 1-box pocket (sweep 1) over the 4-box chain (sweep 4)")
+
+// MARK: - Dots & Boxes: determinism under seed
+
+func dabPlayThrough(seed: UInt64, gridSize: Int, playerCount: Int) -> DotsAndBoxesState {
+    let engine = DotsAndBoxesEngine(gridSize: gridSize, players: makeDABPlayers(playerCount, bots: true), seed: seed)
+    var guardCount = 0
+    while !engine.state.isGameOver && guardCount < engine.state.totalEdgeCount + 5 {
+        guardCount += 1
+        _ = engine.performBotMove(for: engine.state.turnIndex)
+    }
+    return engine.state
+}
+let dabReplayA = dabPlayThrough(seed: 20260806, gridSize: 6, playerCount: 3)
+let dabReplayB = dabPlayThrough(seed: 20260806, gridSize: 6, playerCount: 3)
+check(dabReplayA == dabReplayB, "the same seed replays the exact same bot-vs-bot game")
+let dabReplayDifferentSeed = dabPlayThrough(seed: 4, gridSize: 6, playerCount: 3)
+check(dabReplayA.claimedBy != dabReplayDifferentSeed.claimedBy || dabReplayA.players.map(\.score) != dabReplayDifferentSeed.players.map(\.score),
+      "a different seed plays a different game (sanity check the seed is actually wired in)")
+
+// MARK: - Dots & Boxes: full seeded bot-vs-bot games terminate legally on every grid size
+
+for gridSize in DotsAndBoxesEngine.allowedGridSizes {
+    for dabSeed: UInt64 in [7, 1234, 55555] {
+        for playerCount in [2, 3, 4] {
+            let engine = DotsAndBoxesEngine(gridSize: gridSize, players: makeDABPlayers(playerCount, bots: true), seed: dabSeed)
+            var guardCount = 0
+            let maxSteps = engine.state.totalEdgeCount + 5
+            while !engine.state.isGameOver && guardCount < maxSteps {
+                guardCount += 1
+                let events = engine.performBotMove(for: engine.state.turnIndex)
+                check(!events.isEmpty, "grid \(gridSize)x\(gridSize) seed \(dabSeed) players \(playerCount): every bot turn produces an event")
+            }
+            check(engine.state.isGameOver,
+                  "grid \(gridSize)x\(gridSize) seed \(dabSeed) players \(playerCount): game terminates legally")
+            check(engine.state.claimedBy.count == engine.state.totalEdgeCount,
+                  "grid \(gridSize)x\(gridSize) seed \(dabSeed) players \(playerCount): every line on the sheet got drawn")
+            let totalScore = engine.state.players.reduce(0) { $0 + $1.score }
+            check(totalScore == engine.state.totalBoxCount,
+                  "grid \(gridSize)x\(gridSize) seed \(dabSeed) players \(playerCount): every box has an owner")
+            let winners = engine.state.players.indices.filter { engine.state.players[$0].score == engine.state.players.map(\.score).max() }
+            check(!winners.isEmpty, "grid \(gridSize)x\(gridSize) seed \(dabSeed) players \(playerCount): at least one winner/tie-holder")
+        }
+    }
+}
+
+// MARK: - Quarto
+
+func isIllegal2(_ events: [QuartoEvent]) -> Bool {
+    events.contains { if case .illegalAttempt = $0 { return true }; return false }
+}
+
+// MARK: - Quarto: piece bit-packing
+
+check(QuartoPiece.all.count == 16, "16 unique Quarto pieces")
+check(Set(QuartoPiece.all.map(\.id)).count == 16, "piece ids are unique")
+check(QuartoPiece.all.filter(\.isTall).count == 8 && QuartoPiece.all.filter(\.isDark).count == 8
+      && QuartoPiece.all.filter(\.isRound).count == 8 && QuartoPiece.all.filter(\.isHollow).count == 8,
+      "each attribute splits the 16 pieces exactly 8/8")
+// Every attribute combination exists exactly once.
+var quartoSeenCombos = Set<[Bool]>()
+for piece in QuartoPiece.all { quartoSeenCombos.insert([piece.isTall, piece.isDark, piece.isRound, piece.isHollow]) }
+check(quartoSeenCombos.count == 16, "all 16 attribute combinations are represented, none duplicated")
+
+// MARK: - Quarto: win detection, every line type and every attribute
+
+func quartoBoard(_ placements: [Int: Int]) -> [Int?] {
+    var board = [Int?](repeating: nil, count: 16)
+    for (cell, piece) in placements { board[cell] = piece }
+    return board
+}
+
+// Row 0 (cells 0,1,2,3): four tall pieces (odd ids share bit0).
+let rowWin = quartoBoard([0: 1, 1: 3, 2: 5, 3: 7])
+check(QuartoRules.winningLine(board: rowWin, includeSquares: false)?.attributes.contains(.height) == true,
+      "a full row sharing 'tall' is detected as a win")
+
+// Column 0 (cells 0,4,8,12): four dark pieces (bit1 set: 2,3,6,7).
+let colWin = quartoBoard([0: 2, 4: 3, 8: 6, 12: 7])
+check(QuartoRules.winningLine(board: colWin, includeSquares: false)?.attributes.contains(.shade) == true,
+      "a full column sharing 'dark' is detected as a win")
+
+// Main diagonal (0,5,10,15): four round pieces (bit2 set: 4,5,6,7).
+let diagWin = quartoBoard([0: 4, 5: 5, 10: 6, 15: 7])
+check(QuartoRules.winningLine(board: diagWin, includeSquares: false)?.attributes.contains(.shape) == true,
+      "the main diagonal sharing 'round' is detected as a win")
+
+// Anti-diagonal (3,6,9,12): four hollow pieces (bit3 set: 8,9,10,11).
+let antiDiagWin = quartoBoard([3: 8, 6: 9, 9: 10, 12: 11])
+check(QuartoRules.winningLine(board: antiDiagWin, includeSquares: false)?.attributes.contains(.fill) == true,
+      "the anti-diagonal sharing 'hollow' is detected as a win")
+
+// A line that's full but shares NOTHING is not a win.
+// Each piece has exactly one distinct bit set, so every one of the four
+// attributes is a 3-0 split (mixed) across the line — nothing is shared.
+let noShareLine = quartoBoard([0: 1, 1: 2, 2: 4, 3: 8]) // 0001,0010,0100,1000
+check(QuartoRules.winningLine(board: noShareLine, includeSquares: false) == nil,
+      "a full row sharing no attribute is not a win")
+
+// A line with an empty cell is never a win, no matter what's filled.
+let incompleteLine = quartoBoard([0: 1, 1: 3, 2: 5]) // cell 3 empty
+check(QuartoRules.winningLine(board: incompleteLine, includeSquares: false) == nil,
+      "a line with an empty cell is never a win")
+
+// 2x2 square variant: off by default (a would-be square win is invisible
+// unless the variant is on), on when asked.
+let squareWin = quartoBoard([0: 1, 1: 3, 4: 5, 5: 7]) // top-left 2x2, all tall
+check(QuartoRules.winningLine(board: squareWin, includeSquares: false) == nil,
+      "a 2x2 square win is invisible with the variant off")
+check(QuartoRules.winningLine(board: squareWin, includeSquares: true)?.attributes.contains(.height) == true,
+      "the same 2x2 square wins once the variant is turned on")
+
+// A line can share MORE than one attribute at once (e.g. every piece both
+// tall AND dark): the winner announces every shared attribute. Four
+// distinct pieces, all with bits 0/1 (tall, dark) set, bits 2/3 varied.
+let multiAttrBoard = quartoBoard([0: 3, 1: 3 ^ 0b0100, 2: 3 ^ 0b1000, 3: 3 ^ 0b1100])
+check(QuartoRules.winningLine(board: multiAttrBoard, includeSquares: false)?.attributes.sorted(by: { $0.rawValue < $1.rawValue }) == [.height, .shade],
+      "a line can win on multiple shared attributes at once, and all are reported")
+check(QuartoRules.winCallout(attributes: [.height, .shade], line: [0, 1, 2, 3], board: multiAttrBoard) == "Four tall, four dark!",
+      "the win callout names every shared attribute using the actual winning piece's values")
+
+// MARK: - Quarto: the classic trap (giving a losing piece)
+
+// Row 0 has three tall pieces placed and one empty cell — ANY remaining
+// tall piece handed over next lets the opponent complete it immediately.
+let trapBoard = quartoBoard([0: 1, 1: 3, 2: 5]) // cell 3 empty, all tall so far
+let trapUnsafe = QuartoRules.winningPlacements(piece: 7, board: trapBoard, includeSquares: false) // 7 is tall
+check(trapUnsafe == [3], "handing over a piece that completes the open line is flagged as unsafe at exactly that cell")
+// Among {1,3,5} (0001,0011,0101) two attributes are already alive: bit0
+// (all tall) and bit3 (all solid) — bits 1/2 already disagree among the
+// three, so no 4th piece could ever complete those. Piece 8 (1000: short,
+// hollow) breaks BOTH live threats at once and is genuinely safe.
+let trapSafe = QuartoRules.winningPlacements(piece: 8, board: trapBoard, includeSquares: false)
+check(trapSafe.isEmpty, "a piece that does NOT complete the line is safe to hand over")
+
+// MARK: - Quarto: engine turn flow (select -> place -> select..., illegal rejects)
+
+let qPlayers = [QuartoPlayer(name: "Justin", isBot: false), QuartoPlayer(name: "Sarah", isBot: false)]
+let qEngine = QuartoEngine(players: qPlayers, use2x2Variant: false, firstPlayer: 0)
+check(qEngine.state.phase == .selecting && qEngine.state.currentPlayer == 0,
+      "a fresh Quarto game opens on player 0 selecting (nothing to place yet)")
+check(isIllegal2(qEngine.apply(.placePiece(0, at: 0), from: 0)), "placing before any piece is held is rejected")
+check(isIllegal2(qEngine.apply(.selectPiece(0), from: 1)), "selecting out of turn is rejected")
+
+let openEvents = qEngine.apply(.selectPiece(5), from: 0)
+check(openEvents == [.pieceSelected(by: 0, piece: 5)], "opening select emits pieceSelected")
+check(qEngine.state.phase == .placing && qEngine.state.currentPlayer == 1 && qEngine.state.heldPiece == 5,
+      "the opponent now holds the given piece and owes a placement")
+check(!qEngine.state.remainingPieces.contains(5), "the held piece left the remaining pool")
+
+check(isIllegal2(qEngine.apply(.selectPiece(1), from: 1)), "can't select while a placement is owed")
+check(isIllegal2(qEngine.apply(.placePiece(3, at: 0), from: 1)), "placing the wrong piece id is rejected")
+check(isIllegal2(qEngine.apply(.placePiece(5, at: 0), from: 0)), "placing out of turn (wrong seat) is rejected")
+
+let placeEvents = qEngine.apply(.placePiece(5, at: 0), from: 1)
+check(placeEvents == [.piecePlaced(by: 1, piece: 5, cell: 0)], "a non-winning placement emits just piecePlaced")
+check(qEngine.state.board[0] == 5, "the piece landed on the board")
+check(qEngine.state.phase == .selecting && qEngine.state.currentPlayer == 1,
+      "after placing (no win), the SAME player now owes the next selection")
+check(isIllegal2(qEngine.apply(.placePiece(1, at: 1), from: 1)), "can't place while a selection is owed")
+
+let occupiedCellEvents = qEngine.apply(.selectPiece(2), from: 1)
+check(occupiedCellEvents == [.pieceSelected(by: 1, piece: 2)], "second select accepted")
+check(isIllegal2(qEngine.apply(.placePiece(2, at: 0), from: 0)), "placing on an occupied cell is rejected")
+check(qEngine.state.board[0] == 5, "the occupied-cell reject changed nothing")
+
+// MARK: - Quarto: a full engine-driven win, with the announced attribute
+
+let winSetupState = QuartoState(players: qPlayers, use2x2Variant: false, firstPlayer: 0)
+var winState = winSetupState
+winState.board = quartoBoard([0: 1, 1: 3, 2: 5])
+winState.remainingPieces = Array(0..<16).filter { ![1, 3, 5].contains($0) }
+winState.heldPiece = 7
+winState.phase = .placing
+winState.currentPlayer = 0
+let winEngine = QuartoEngine(restoring: winState)
+let winEvents = winEngine.apply(.placePiece(7, at: 3), from: 0)
+check(winEvents.count == 2, "a winning placement emits piecePlaced then gameWon")
+if case .gameWon(let seat, let line, let attrs) = winEvents.last {
+    check(seat == 0, "gameWon credits the player who PLACED the winning piece")
+    check(Set(line) == Set([0, 1, 2, 3]), "gameWon carries the actual winning line")
+    check(attrs.contains(.height), "gameWon carries the shared attribute (tall)")
+} else {
+    check(false, "last event after a winning placement is gameWon")
+}
+check(winEngine.state.phase == .gameOver && winEngine.state.winner == 0, "engine state reflects the win")
+check(isIllegal2(winEngine.apply(.selectPiece(2), from: 0)), "no further actions are accepted once the game is over")
+
+// MARK: - Quarto: draw (board fills, no line ever shares an attribute)
+
+// Two players who only ever hand over "safe" pieces will sometimes fill
+// the whole board with no winner — find one such seeded bot-vs-bot game
+// (deterministic, so this is a stable regression once found) and confirm
+// the engine reaches .gameOver with winner == nil and a genuinely full,
+// line-free board.
+func driveQuartoBotGame(seed: UInt64, use2x2Variant: Bool = false) -> QuartoEngine {
+    let engine = QuartoEngine(players: qPlayers, use2x2Variant: use2x2Variant, firstPlayer: 0)
+    var guardCount = 0
+    while engine.state.phase != .gameOver, guardCount < 40 {
+        guardCount += 1
+        let action = QuartoBot.decide(state: engine.state, seed: seed, timeLimit: 0.2)
+        _ = engine.apply(action, from: engine.state.currentPlayer)
+    }
+    return engine
+}
+
+var foundQuartoDraw = false
+for seed: UInt64 in 0..<40 {
+    let engine = driveQuartoBotGame(seed: seed)
+    guard engine.state.phase == .gameOver, engine.state.winner == nil else { continue }
+    foundQuartoDraw = true
+    check(engine.state.isBoardFull, "a drawn game fills every cell")
+    check(QuartoRules.winningLine(board: engine.state.board, includeSquares: false) == nil,
+          "a drawn game's final board genuinely has no winning line")
+    check(engine.state.moveCount == 16, "a drawn game places all 16 pieces")
+    break
+}
+check(foundQuartoDraw, "found at least one seeded bot-vs-bot game that ends in a draw")
+
+// MARK: - Quarto bot: never gives an immediately-winning piece unless forced
+
+// Same trap board as above: pieces 1,3,5 (all tall) on row 0, cell 3 open.
+// Piece 7 (tall) is the ONLY unsafe remaining piece the bot could be asked
+// to hand over; every other remaining piece is safe. The bot must never
+// select 7 here.
+var trapSelectState = QuartoState(players: qPlayers, use2x2Variant: false, firstPlayer: 0)
+trapSelectState.board = quartoBoard([0: 1, 1: 3, 2: 5])
+trapSelectState.remainingPieces = Array(0..<16).filter { ![1, 3, 5].contains($0) }
+trapSelectState.heldPiece = nil
+trapSelectState.phase = .selecting
+trapSelectState.currentPlayer = 0
+var quartoBotAvoidedTrap = true
+for seed: UInt64 in 0..<25 {
+    let action = QuartoBot.decide(state: trapSelectState, seed: seed, timeLimit: 0.3)
+    if case .selectPiece(7) = action { quartoBotAvoidedTrap = false }
+}
+check(quartoBotAvoidedTrap, "the bot never hands over the one piece that immediately completes the open line")
+
+// Forced case: EVERY remaining piece is unsafe (three lines each one piece
+// from winning on a different attribute) — the bot must still return a
+// legal action rather than crash or stall.
+var forcedLossState = QuartoState(players: qPlayers, use2x2Variant: false, firstPlayer: 0)
+forcedLossState.board = quartoBoard([0: 1, 1: 3, 2: 5]) // row 0: tall, cell 3 open
+forcedLossState.remainingPieces = [7, 15] // both tall -> both unsafe (only two left, for a fast test)
+forcedLossState.heldPiece = nil
+forcedLossState.phase = .selecting
+forcedLossState.currentPlayer = 0
+let forcedAction = QuartoBot.decide(state: forcedLossState, seed: 1, timeLimit: 0.3)
+if case .selectPiece(let piece) = forcedAction {
+    check([7, 15].contains(piece), "forced to hand over a losing piece, the bot still returns a legal selection")
+} else {
+    check(false, "forced-loss decide() returns a selectPiece action")
+}
+
+// MARK: - Quarto bot: determinism under seed
+
+let determinismState = trapSelectState
+let det1 = QuartoBot.decide(state: determinismState, seed: 12345, timeLimit: 0.3)
+let det2 = QuartoBot.decide(state: determinismState, seed: 12345, timeLimit: 0.3)
+check(det1 == det2, "the same state + seed always yields the same bot move")
+
+// MARK: - Quarto bot: seeded bot-vs-bot always terminates, and quickly
+
+var quartoMaxDecisionTime: Double = 0
+var quartoGamesTerminated = 0
+for seed: UInt64 in 0..<8 {
+    let engine = QuartoEngine(players: qPlayers, use2x2Variant: seed % 2 == 0, firstPlayer: Int(seed % 2))
+    var guardCount = 0
+    while engine.state.phase != .gameOver, guardCount < 40 {
+        guardCount += 1
+        let stepStart = Date()
+        let action = QuartoBot.decide(state: engine.state, seed: seed, timeLimit: QuartoBot.defaultTimeLimit)
+        quartoMaxDecisionTime = max(quartoMaxDecisionTime, Date().timeIntervalSince(stepStart))
+        let events = engine.apply(action, from: engine.state.currentPlayer)
+        check(!isIllegal2(events), "seed \(seed): every bot move is legal (no illegalAttempt)")
+    }
+    check(engine.state.phase == .gameOver, "seed \(seed): bot-vs-bot game reaches gameOver within 40 actions")
+    quartoGamesTerminated += 1
+}
+check(quartoGamesTerminated == 8, "all 8 seeded bot-vs-bot games (mixing the 2x2 variant on/off) terminated")
+check(quartoMaxDecisionTime < 1.0,
+      "every single bot decision across all those games stayed under the 1s device budget (measured \(quartoMaxDecisionTime)s)")
+print("Quarto bot: max single-decision time across seeded bot-vs-bot games = \(quartoMaxDecisionTime)s (budget \(QuartoBot.defaultTimeLimit)s)")
+
+// MARK: - Quarto: Codable round-trips
+
+let quartoActionSamples: [QuartoAction] = [.selectPiece(9), .placePiece(9, at: 12)]
+let quartoActionData = try! JSONEncoder().encode(quartoActionSamples)
+check((try! JSONDecoder().decode([QuartoAction].self, from: quartoActionData)) == quartoActionSamples,
+      "QuartoAction round-trips through JSON")
+
+let quartoEventSamples: [QuartoEvent] = [
+    .gameStarted, .pieceSelected(by: 0, piece: 4), .piecePlaced(by: 1, piece: 4, cell: 9),
+    .gameWon(seat: 1, line: [0, 5, 10, 15], attributes: [.shape, .fill]), .draw,
+    .illegalAttempt(seat: 0, reason: "Not a legal placement"),
+]
+let quartoEventData = try! JSONEncoder().encode(quartoEventSamples)
+check((try! JSONDecoder().decode([QuartoEvent].self, from: quartoEventData)) == quartoEventSamples,
+      "QuartoEvent round-trips through JSON")
+
+let quartoStateData = try! JSONEncoder().encode(winEngine.state)
+check((try! JSONDecoder().decode(QuartoState.self, from: quartoStateData)) == winEngine.state,
+      "QuartoState (mid-win) round-trips through JSON")
+
+// MARK: - Cribbage: helpers
+
+func isIllegalCrib(_ events: [CribbageEvent]) -> Bool {
+    events.contains { if case .illegalAttempt = $0 { return true }; return false }
+}
+func hasCribEvent(_ events: [CribbageEvent], _ predicate: (CribbageEvent) -> Bool) -> Bool {
+    events.contains(where: predicate)
+}
+/// A minimal, self-consistent fixture: 2 empty pegging hands, a neutral
+/// starter, zero scores. Individual tests override whichever fields they
+/// need (hands/pegging/scores/postDiscardHands/...) — the engine never
+/// cross-validates `count` against `sequence`'s actual sum, or hand
+/// contents against a single 52-card deck, so these fixtures are free to
+/// be "unrealistic" wherever that doesn't matter to what's being tested.
+func baseCribbageState() -> CribbageState {
+    CribbageState(
+        seed: 1, dealShuffleSeed: 1, scores: [0: 0, 1: 0], dealerSeat: 0,
+        phase: .pegging, hands: [0: [], 1: []], postDiscardHands: [0: [], 1: []],
+        crib: [], discardsSubmitted: [0, 1], starter: card("h9"),
+        pegging: CribbagePeggingState(sequence: [], count: 0, turnSeat: 0, lastPlayerSeat: nil),
+        handNumber: 1
+    )
+}
+
+// MARK: - Cribbage: pegValue
+
+check(CribbageScoring.pegValue(card("h2")) == 2, "cribbage pegValue: 2 is 2")
+check(CribbageScoring.pegValue(card("c10")) == 10, "cribbage pegValue: 10 is 10")
+check(CribbageScoring.pegValue(card("h11")) == 10, "cribbage pegValue: jack is 10")
+check(CribbageScoring.pegValue(card("d12")) == 10, "cribbage pegValue: queen is 10")
+check(CribbageScoring.pegValue(card("s13")) == 10, "cribbage pegValue: king is 10")
+check(CribbageScoring.pegValue(card("c14")) == 1, "cribbage pegValue: ace is 1")
+
+// MARK: - Cribbage: pegging score math (pure function, no engine)
+
+let fifteenEntries = CribbageScoring.peggingScore(sequence: [card("h10"), card("c5")], count: 15)
+check(fifteenEntries.contains { $0.reason == .fifteen && $0.points == 2 }, "pegging: 10+5 scores fifteen for 2")
+
+let thirtyOneEntries = CribbageScoring.peggingScore(
+    sequence: [card("d10"), card("h11"), card("s12"), card("c14")], count: 31
+)
+check(thirtyOneEntries.contains { $0.reason == .thirtyOne && $0.points == 2 }, "pegging: 10+10+10+1 scores 31 for 2")
+check(!thirtyOneEntries.contains { $0.reason == .fifteen }, "pegging: hitting 31 doesn't also claim a fifteen")
+
+let runOutOfOrderEntries = CribbageScoring.peggingScore(sequence: [card("h7"), card("c5"), card("d6")], count: 18)
+check(runOutOfOrderEntries.contains { $0.reason == .run(3) && $0.points == 3 },
+      "pegging: 7,5,6 played in that order still scores a run of 3 (any order)")
+
+let pairEntries = CribbageScoring.peggingScore(sequence: [card("h5"), card("c5")], count: 10)
+check(pairEntries.contains { $0.reason == .pair && $0.points == 2 }, "pegging: two 5s in a row score a pair for 2")
+
+let tripsEntries = CribbageScoring.peggingScore(sequence: [card("h5"), card("c5"), card("d5")], count: 15)
+check(tripsEntries.contains { $0.reason == .pair && $0.points == 6 }, "pegging: three 5s in a row score trips for 6")
+check(tripsEntries.contains { $0.reason == .fifteen }, "pegging: three 5s in a row also happens to hit fifteen")
+
+let quadsEntries = CribbageScoring.peggingScore(
+    sequence: [card("h5"), card("c5"), card("d5"), card("s5")], count: 20
+)
+check(quadsEntries.contains { $0.reason == .pair && $0.points == 12 }, "pegging: four 5s in a row score quads for 12")
+
+let brokenRunEntries = CribbageScoring.peggingScore(sequence: [card("h5"), card("d10"), card("c6")], count: 21)
+check(!brokenRunEntries.contains { if case .run = $0.reason { return true }; return false },
+      "pegging: 5,10,6 has no run — the 10 breaks the 5/6 adjacency")
+
+// MARK: - Cribbage: show scoring against known hands
+
+// The 29 hand: J-5-5-5 with the fourth 5 as starter, jack matching the
+// starter's suit for nobs. The best possible cribbage hand.
+let (pts29, breakdown29) = CribbageScoring.scoreShow(
+    cards: [card("s5"), card("c5"), card("d5"), card("h11")], starter: card("h5"), isCrib: false
+)
+check(pts29 == 29, "show scoring: the 29 hand (J555 + matching starter) scores exactly 29")
+check(breakdown29.contains { $0.reason == .showFifteen && $0.points == 16 }, "29 hand: 8 fifteens = 16")
+check(breakdown29.contains { $0.reason == .showPair && $0.points == 12 }, "29 hand: 4-of-a-kind = 12")
+check(breakdown29.contains { $0.reason == .nobs && $0.points == 1 }, "29 hand: nobs = 1")
+
+// The 28 hand: same four 5s + jack, but the jack does NOT match the
+// starter's suit — loses only the nobs point relative to the 29 hand.
+let (pts28, _) = CribbageScoring.scoreShow(
+    cards: [card("h5"), card("s5"), card("d5"), card("s11")], starter: card("c5"), isCrib: false
+)
+check(pts28 == 28, "show scoring: the 28 hand (J555, non-matching jack) scores exactly 28")
+
+// Double run of 4 (2,3,3,4,5... constructed as 3,3,4,5 + starter 2): one
+// fifteen (3+3+4+5=15), a pair (the two 3s), and a run of 4 counted twice
+// (the two 3s each complete a distinct 4-card run) = 4 x 2 = 8.
+let (ptsDoubleRun4, breakdownDoubleRun4) = CribbageScoring.scoreShow(
+    cards: [card("s3"), card("h3"), card("s4"), card("s5")], starter: card("d2"), isCrib: false
+)
+check(breakdownDoubleRun4.contains { $0.reason == .showRun(4) && $0.points == 8 },
+      "double run of 4: two 4-card runs (via the duplicated 3) = 8")
+check(breakdownDoubleRun4.contains { $0.reason == .showPair && $0.points == 2 }, "double run of 4: the duplicated 3 also pairs for 2")
+check(breakdownDoubleRun4.contains { $0.reason == .showFifteen && $0.points == 2 }, "double run of 4: exactly one fifteen (3+3+4+5)")
+check(ptsDoubleRun4 == 12, "double run of 4: total is fifteen(2) + pair(2) + run(8) = 12")
+
+// Triple run: three 4s plus a 5 and a 6 (starter) — three 3-card runs
+// (4,5,6 with any of the three 4s) = 3 x 3 = 9, plus the pair-royal on the
+// three 4s = 6, plus three fifteens (4+5+6, once per which-4) = 6.
+let (ptsTripleRun, breakdownTripleRun) = CribbageScoring.scoreShow(
+    cards: [card("s4"), card("h4"), card("d4"), card("s5")], starter: card("c6"), isCrib: false
+)
+check(breakdownTripleRun.contains { $0.reason == .showRun(3) && $0.points == 9 }, "triple run: three 3-card runs = 9")
+check(breakdownTripleRun.contains { $0.reason == .showPair && $0.points == 6 }, "triple run: pair-royal on the three 4s = 6")
+check(breakdownTripleRun.contains { $0.reason == .showFifteen && $0.points == 6 }, "triple run: three ways to make 4+5+6=15")
+check(ptsTripleRun == 21, "triple run: total is run(9) + pair(6) + fifteen(6) = 21")
+
+// 5-card flush: all 4 hand cards AND the starter share a suit.
+let (ptsFlush5, breakdownFlush5) = CribbageScoring.scoreShow(
+    cards: [card("s2"), card("s4"), card("s7"), card("s9")], starter: card("s13"), isCrib: false
+)
+check(breakdownFlush5.contains { $0.reason == .flush(5) && $0.points == 5 }, "flush: starter matching hand suit scores 5")
+check(ptsFlush5 == 7, "flush: 5-card flush + one fifteen (2+4+9=15) = 7")
+
+// Hand flush of 4 (starter doesn't match) still scores 4 for a plain
+// hand, but scores NOTHING as a crib — a crib flush needs all 5. Reuses
+// the verified zero-scoring ranks (2, 4, 8, Q) so the only thing in play
+// is the flush rule itself, not an incidental fifteen/pair/run.
+let flushOnlyHand = [card("s2"), card("s4"), card("s8"), card("s12")]
+let (ptsHandFlush4, breakdownHandFlush4) = CribbageScoring.scoreShow(cards: flushOnlyHand, starter: card("h13"), isCrib: false)
+check(breakdownHandFlush4.contains { $0.reason == .flush(4) && $0.points == 4 },
+      "flush: 4-card hand flush (starter off-suit) still scores 4")
+check(ptsHandFlush4 == 4, "flush: nothing else scores in this hand, so the total is exactly the flush")
+let (ptsCribFlush4, breakdownCribFlush4) = CribbageScoring.scoreShow(cards: flushOnlyHand, starter: card("h13"), isCrib: true)
+check(!breakdownCribFlush4.contains { if case .flush = $0.reason { return true }; return false },
+      "flush: the SAME 4 cards score no flush at all as a crib (starter doesn't match)")
+check(ptsCribFlush4 == 0, "flush: crib flush total is 0 when the starter breaks the suit")
+
+// Zero hand: hand-picked so no fifteen/pair/run/flush/nobs exists at all.
+let (ptsZero, breakdownZero) = CribbageScoring.scoreShow(
+    cards: [card("c2"), card("h4"), card("s8"), card("d12")], starter: card("s13"), isCrib: false
+)
+check(ptsZero == 0 && breakdownZero.isEmpty, "show scoring: a genuinely zero hand scores 0 with an empty breakdown")
+
+// MARK: - Cribbage: engine basics (deal, discard, cut, heels)
+
+let cribBasic = CribbageEngine(seed: 3)
+let cribBasicDealer = cribBasic.state.dealerSeat
+let cribBasicNonDealer = 1 - cribBasicDealer
+check(cribBasicDealer == 0 || cribBasicDealer == 1, "cribbage: dealer is seat 0 or 1")
+check(cribBasic.state.phase == .discarding, "cribbage: engine starts already dealt, in .discarding")
+check(cribBasic.state.hands[0]?.count == 6 && cribBasic.state.hands[1]?.count == 6, "cribbage: 6 cards dealt to each seat")
+check(isIllegalCrib(cribBasic.apply(.playCard(cardID: "h2"), from: cribBasicNonDealer)),
+      "cribbage: can't play a card before discarding is done")
+check(isIllegalCrib(cribBasic.apply(.advance, from: 0)), "cribbage: can't advance before the hand completes")
+check(isIllegalCrib(cribBasic.apply(.declareGo, from: 0)), "cribbage: declareGo always rejects (auto-go design)")
+check(isIllegalCrib(cribBasic.apply(.discardToCrib(cards: ["zz1", "zz2"]), from: cribBasicDealer)),
+      "cribbage: discarding cards not in hand is rejected")
+check(isIllegalCrib(cribBasic.apply(.discardToCrib(cards: [cribBasic.state.hands[cribBasicDealer]![0].id]), from: cribBasicDealer)),
+      "cribbage: discarding fewer than 2 cards is rejected")
+
+let cribFirstTwo = Array(cribBasic.state.hands[cribBasicDealer]!.prefix(2)).map(\.id)
+_ = cribBasic.apply(.discardToCrib(cards: cribFirstTwo), from: cribBasicDealer)
+check(cribBasic.state.discardsSubmitted.contains(cribBasicDealer), "cribbage: first discard recorded")
+check(isIllegalCrib(cribBasic.apply(.discardToCrib(cards: cribFirstTwo), from: cribBasicDealer)),
+      "cribbage: can't discard a second time")
+check(cribBasic.state.phase == .discarding, "cribbage: still waiting on the other seat's discard")
+
+let cribNextTwo = Array(cribBasic.state.hands[cribBasicNonDealer]!.prefix(2)).map(\.id)
+let cribCompleteEvents = cribBasic.apply(.discardToCrib(cards: cribNextTwo), from: cribBasicNonDealer)
+check(cribBasic.state.phase == .pegging, "cribbage: both discarded -> straight into pegging")
+check(hasCribEvent(cribCompleteEvents) { if case .cribComplete = $0 { return true }; return false },
+      "cribbage: cribComplete fires once both discards land")
+check(hasCribEvent(cribCompleteEvents) { if case .starterCut = $0 { return true }; return false },
+      "cribbage: starterCut fires right after")
+check(cribBasic.state.crib.count == 4, "cribbage: crib has exactly 4 cards")
+check(cribBasic.state.pegging?.turnSeat == cribBasicNonDealer, "cribbage: non-dealer leads pegging")
+check(cribBasic.state.hands[cribBasicDealer]?.count == 4 && cribBasic.state.hands[cribBasicNonDealer]?.count == 4,
+      "cribbage: each pegging hand is 4 cards after discarding")
+
+// Heels: search for a seed whose cut starter is a jack, then verify the
+// dealer scores 2 right at the cut, through the real deal/discard flow.
+var heelsSeed: UInt64 = 0
+while heelsSeed <= 3000, DeckBuilder.shuffled(DeckBuilder.standard52(), seed: heelsSeed &+ 1)[12].rank != 11 {
+    heelsSeed += 1
+}
+check(heelsSeed <= 3000, "heels test: found a seed whose starter cuts a jack")
+let heelsEngine = CribbageEngine(seed: heelsSeed)
+let heelsDealer = heelsEngine.state.dealerSeat
+let heelsNonDealer = 1 - heelsDealer
+_ = heelsEngine.apply(.discardToCrib(cards: Array(heelsEngine.state.hands[heelsDealer]!.prefix(2)).map(\.id)), from: heelsDealer)
+let heelsEvents = heelsEngine.apply(
+    .discardToCrib(cards: Array(heelsEngine.state.hands[heelsNonDealer]!.prefix(2)).map(\.id)), from: heelsNonDealer
+)
+check(heelsEngine.state.starter?.rank == 11, "heels: the cut starter is indeed a jack")
+check(hasCribEvent(heelsEvents) { event in
+    if case .pointsScored(let seat, let reason, let points) = event { return seat == heelsDealer && reason == .heels && points == 2 }
+    return false
+}, "heels: dealer scores 2 for his heels")
+check(heelsEngine.state.scores[heelsDealer] == 2, "heels: dealer's total reflects the 2 heels points")
+
+// MARK: - Cribbage: pegging edge cases via constructed fixtures
+
+// Illegal peg play (over 31) and out-of-turn rejection.
+var overState = baseCribbageState()
+overState.hands = [0: [card("s13")], 1: [card("h2")]]
+overState.pegging = CribbagePeggingState(sequence: [], count: 25, turnSeat: 0, lastPlayerSeat: 1)
+let overEngine = CribbageEngine(restoring: overState)
+check(isIllegalCrib(overEngine.apply(.playCard(cardID: "s13"), from: 0)),
+      "pegging: a card that would push the count past 31 is rejected")
+check(overEngine.state.pegging?.count == 25, "pegging: the rejected play changed nothing")
+check(isIllegalCrib(overEngine.apply(.playCard(cardID: "h2"), from: 1)), "pegging: can't play out of turn")
+
+// Auto-go: seat 1 gets to play two cards in a row while seat 0 is stuck
+// on a king it can't unload; the go point lands on seat 1 (who played
+// last), the count resets, and the turn returns to the stuck seat 0.
+var goState = baseCribbageState()
+goState.hands = [0: [card("s13")], 1: [card("h2"), card("c14")]]
+goState.pegging = CribbagePeggingState(sequence: [], count: 22, turnSeat: 1, lastPlayerSeat: 0)
+let goEngine = CribbageEngine(restoring: goState)
+
+_ = goEngine.apply(.playCard(cardID: "h2"), from: 1)
+check(goEngine.state.pegging?.turnSeat == 1, "auto-go: seat 0 (holding only the king) is skipped, seat 1 goes again")
+check(goEngine.state.pegging?.count == 24, "auto-go: count is unaffected by the skip")
+
+let goFinalEvents = goEngine.apply(.playCard(cardID: "c14"), from: 1)
+check(goEngine.state.pegging?.count == 0, "auto-go: the count resets once both seats are stuck")
+check(goEngine.state.pegging?.turnSeat == 0, "auto-go: the previously-stuck seat leads the fresh segment")
+check(goEngine.state.hands[0] == [card("s13")], "auto-go: seat 0's king is still unplayed, waiting for count 0")
+check(goEngine.state.scores[1] == 1, "auto-go: seat 1 (who played last) scores the go point")
+check(goEngine.state.scores[0] == 0, "auto-go: seat 0 (the stuck seat) scores nothing")
+check(hasCribEvent(goFinalEvents) { event in
+    if case .pointsScored(let seat, let reason, let points) = event { return seat == 1 && reason == .go && points == 1 }
+    return false
+}, "auto-go: a .go pointsScored event narrates the point")
+
+// Last card: the literal final card of the pegging phase, not making 31,
+// scores 1 to whoever played it and rolls straight into a (here, empty)
+// show — distinct from .go, and here nobody wins.
+var lastCardState = baseCribbageState()
+let zeroHandFixture = [card("c2"), card("h4"), card("s8"), card("d12")]
+lastCardState.hands = [0: [card("h2")], 1: [card("c14")]]
+lastCardState.pegging = CribbagePeggingState(sequence: [], count: 0, turnSeat: 0, lastPlayerSeat: nil)
+lastCardState.starter = card("s13")
+lastCardState.postDiscardHands = [0: zeroHandFixture, 1: zeroHandFixture]
+let lastCardEngine = CribbageEngine(restoring: lastCardState)
+
+_ = lastCardEngine.apply(.playCard(cardID: "h2"), from: 0)
+let lastCardFinalEvents = lastCardEngine.apply(.playCard(cardID: "c14"), from: 1)
+check(hasCribEvent(lastCardFinalEvents) { event in
+    if case .pointsScored(let seat, let reason, let points) = event { return seat == 1 && reason == .lastCard && points == 1 }
+    return false
+}, "last card: the final card of the hand (not making 31) scores 1, not .go")
+check(hasCribEvent(lastCardFinalEvents) { if case .pegComplete = $0 { return true }; return false },
+      "last card: pegComplete fires once both hands are empty")
+check(hasCribEvent(lastCardFinalEvents) { if case .cribRevealed = $0 { return true }; return false },
+      "last card: the (empty) crib is still revealed as the show begins")
+check(lastCardEngine.state.phase == .handComplete, "last card: the zero-scoring show settles into .handComplete, no winner")
+check(lastCardEngine.state.scores == [0: 0, 1: 1], "last card: only the 1-point last-card peg landed")
+
+// MARK: - Cribbage: win mid-pegging
+
+var winPegState = baseCribbageState()
+winPegState.scores = [0: 119, 1: 50]
+winPegState.dealerSeat = 1
+winPegState.hands = [0: [card("h5")], 1: []]
+winPegState.pegging = CribbagePeggingState(
+    sequence: [CribbagePeggedPlay(seat: 1, card: card("d10"))], count: 10, turnSeat: 0, lastPlayerSeat: 1
+)
+let winPegEngine = CribbageEngine(restoring: winPegState)
+let winPegEvents = winPegEngine.apply(.playCard(cardID: "h5"), from: 0)
+
+check(winPegEngine.state.phase == .gameOver, "win mid-pegging: reaching 121 on a peg point ends the game immediately")
+check(winPegEngine.state.winnerSeat == 0, "win mid-pegging: seat 0 (119 + 2 for fifteen) wins")
+check(winPegEngine.state.scores[0] == 121, "win mid-pegging: final score is exactly 121")
+check(winPegEngine.state.skunk == true, "win mid-pegging: seat 1 was still under 91 — a skunk")
+check(hasCribEvent(winPegEvents) { event in
+    if case .gameWon(let seat, let skunk) = event { return seat == 0 && skunk == true }
+    return false
+}, "win mid-pegging: gameWon(seat: 0, skunk: true) is emitted")
+
+// MARK: - Cribbage: win order at the show (non-dealer counts first)
+
+var winShowState = baseCribbageState()
+winShowState.dealerSeat = 1
+winShowState.scores = [0: 100, 1: 100]
+winShowState.hands = [0: [card("h9")], 1: [card("d2")]]
+winShowState.pegging = CribbagePeggingState(sequence: [], count: 0, turnSeat: 0, lastPlayerSeat: nil)
+winShowState.starter = card("h5")
+let the29Hand = [card("s5"), card("c5"), card("d5"), card("h11")]
+winShowState.postDiscardHands = [0: the29Hand, 1: the29Hand] // seat 1's copy must never actually be counted
+winShowState.crib = []
+let winShowEngine = CribbageEngine(restoring: winShowState)
+
+_ = winShowEngine.apply(.playCard(cardID: "h9"), from: 0)
+check(winShowEngine.state.phase == .pegging, "win-order setup: pegging continues while seat 1 still has a card")
+let winShowFinalEvents = winShowEngine.apply(.playCard(cardID: "d2"), from: 1)
+
+check(winShowEngine.state.phase == .gameOver, "win-order: non-dealer's show (the 29 hand) ends the game")
+check(winShowEngine.state.winnerSeat == 0, "win-order: non-dealer (seat 0) wins")
+check(winShowEngine.state.scores[0] == 129, "win-order: 100 + the 29 hand = 129")
+check(winShowEngine.state.scores[1] == 101, "win-order: dealer only banks the last-card peg point (100 + 1), never the show")
+check(hasCribEvent(winShowFinalEvents) { event in
+    if case .pointsScored(let seat, let reason, let points) = event { return seat == 1 && reason == .lastCard && points == 1 }
+    return false
+}, "win-order: dealer's last-card peg point still lands before the show starts")
+check(!hasCribEvent(winShowFinalEvents) { event in
+    if case .handCounted(1, _, _, _) = event { return true }
+    return false
+}, "win-order: dealer's hand and crib are never counted once seat 0 already won")
+check(!hasCribEvent(winShowFinalEvents) { if case .cribRevealed = $0 { return true }; return false },
+      "win-order: the crib is never even revealed")
+check(winShowEngine.state.skunk == false, "win-order: dealer is over 91, not a skunk")
+
+// MARK: - Cribbage: NetMessage round-trips (additive cases)
+
+let cribbageActionMsg: NetMessage = .cribbageAction(.playCard(cardID: "h5"))
+check((try! JSONDecoder().decode(NetMessage.self, from: try! JSONEncoder().encode(cribbageActionMsg))) == cribbageActionMsg,
+      "cribbageAction round-trips through JSON")
+
+let cribbageEventsMsg: NetMessage = .cribbageEvents([.dealt(dealerSeat: 0), .pointsScored(seat: 1, reason: .fifteen, points: 2)])
+check((try! JSONDecoder().decode(NetMessage.self, from: try! JSONEncoder().encode(cribbageEventsMsg))) == cribbageEventsMsg,
+      "cribbageEvents round-trips through JSON")
+
+let cribbageSnapshotSample = CribbageEngine(seed: 5).state.snapshot(for: 0)
+let cribbageSnapshotMsg: NetMessage = .cribbageSnapshot(cribbageSnapshotSample)
+check((try! JSONDecoder().decode(NetMessage.self, from: try! JSONEncoder().encode(cribbageSnapshotMsg))) == cribbageSnapshotMsg,
+      "cribbageSnapshot round-trips through JSON")
+
+// MARK: - Cribbage: dealer alternation + full seeded bot game to completion
+
+func playCribbageBotGame(seed: UInt64, actionCap: Int = 5000) -> (engine: CribbageEngine, actions: Int, anyIllegal: Bool, dealerSeats: [Int]) {
+    let engine = CribbageEngine(seed: seed)
+    var rng = SeededGenerator(seed: seed &+ 999)
+    var actions = 0
+    var anyIllegal = false
+    var dealerSeats: [Int] = [engine.state.dealerSeat]
+
+    while engine.state.phase != .gameOver, actions < actionCap {
+        switch engine.state.phase {
+        case .discarding:
+            for seat in [0, 1] where !engine.state.discardsSubmitted.contains(seat) {
+                guard let hand = engine.state.hands[seat] else { continue }
+                let discard = CribbageBot.discard(hand: hand, isDealer: seat == engine.state.dealerSeat, rng: &rng)
+                let events = engine.apply(.discardToCrib(cards: discard.map(\.id)), from: seat)
+                if isIllegalCrib(events) { anyIllegal = true }
+                actions += 1
+            }
+        case .pegging:
+            guard let pegging = engine.state.pegging, let hand = engine.state.hands[pegging.turnSeat] else {
+                anyIllegal = true
+                actions = actionCap
+                break
+            }
+            guard let choice = CribbageBot.pegPlay(
+                hand: hand, sequence: pegging.sequence.map(\.card), count: pegging.count, rng: &rng
+            ) else {
+                anyIllegal = true // shouldn't happen: the engine guarantees turnSeat always has a legal play
+                actions = actionCap
+                break
+            }
+            let events = engine.apply(.playCard(cardID: choice.id), from: pegging.turnSeat)
+            if isIllegalCrib(events) { anyIllegal = true }
+            actions += 1
+        case .handComplete:
+            let events = engine.apply(.advance, from: 0)
+            if isIllegalCrib(events) { anyIllegal = true }
+            actions += 1
+            dealerSeats.append(engine.state.dealerSeat)
+        case .gameOver:
+            break
+        }
+    }
+    return (engine, actions, anyIllegal, dealerSeats)
+}
+
+let dealerAlternationResult = playCribbageBotGame(seed: 1)
+check(dealerAlternationResult.dealerSeats.count >= 2, "bot game: at least one hand completed to check dealer alternation")
+var dealerAlternationHolds = true
+for i in 1..<dealerAlternationResult.dealerSeats.count where dealerAlternationResult.dealerSeats[i] == dealerAlternationResult.dealerSeats[i - 1] {
+    dealerAlternationHolds = false
+}
+check(dealerAlternationHolds, "bot game: the dealer alternates every hand, never repeats back-to-back")
+
+for botSeed: UInt64 in [1, 2, 3, 42, 777, 2026] {
+    let result = playCribbageBotGame(seed: botSeed)
+    check(result.engine.state.phase == .gameOver, "bot game seed \(botSeed): reaches gameOver within the action budget")
+    check(!result.anyIllegal, "bot game seed \(botSeed): every action taken was legal throughout")
+    check(result.actions < 5000, "bot game seed \(botSeed): terminates well under the action cap")
+    if let winner = result.engine.state.winnerSeat {
+        check((result.engine.state.scores[winner] ?? 0) >= 121, "bot game seed \(botSeed): the winner's final score is >= 121")
+    } else {
+        check(false, "bot game seed \(botSeed): a winnerSeat was recorded")
+    }
+}
+
 // MARK: - Summary
 
 let total = passCount + failCount

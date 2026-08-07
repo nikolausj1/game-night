@@ -110,12 +110,20 @@ struct DiceTableView: View {
     private func diceScene(size: CGSize) -> some View {
         let seat = activeCupSeat
         let required = seat.map { min(controller.chips[$0], 3) } ?? 0
+        // LCR never sets `diceCount`/`faceStyle` (both default to the LCR
+        // pool, 3 × `.lcr`), so every result below is always `.lcr` — the
+        // compactMap is just the general `DieResult` unwrap every call
+        // site now does, not a behavior change.
         return DiceTableSceneView(
             roll: controller.currentRoll, anchor: rollerAnchor,
             cupSeat: seat, requiredCount: required, loadedCount: controller.loadedDiceCount,
             autoCup: autoCup, mouthScreen: seat != nil ? cupMouthScreen(seatID: seat!, size: size) : nil,
             onDieLoaded: { s in controller.loadDie(forSeat: s) }
-        ) { rollID, faces in
+        ) { rollID, results in
+            let faces = results.compactMap { result -> LcrFace? in
+                if case .lcr(let face) = result { return face }
+                return nil
+            }
             controller.completeRoll(id: rollID, faces: faces)
         }
     }

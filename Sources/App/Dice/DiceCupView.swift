@@ -45,6 +45,13 @@ struct DiceCupView: View {
                     // Always the cup, ready or still loading — see the
                     // type doc above. `cupStage` itself branches on
                     // `cupReady` for the overlay/dice-count only.
+                    // `isMyTurn` only ever goes true while there's
+                    // something for the phone to actually roll — Yahtzee
+                    // (and any future roll-then-decide game) flips it back
+                    // to false once its rolls are spent, so a "your turn,
+                    // but nothing to shake" seat falls through to
+                    // `standingsView` instead, which reads `statusLine` for
+                    // what to do next ("pick a category on the table").
                     cupStage(state)
                 } else {
                     standingsView(state)
@@ -108,7 +115,7 @@ struct DiceCupView: View {
                 // prefers. Dice roll around inside as the phone tilts and
                 // shakes. `.id` rebuilds the scene instantly on toggle.
                 DiceCupSceneView(diceCount: cupSceneDiceCount(state), model: model,
-                                 concept: cupConcept)
+                                 concept: cupConcept, faceStyle: cupFaceStyle(state))
                     .id(cupConcept)
                     .ignoresSafeArea()
                     .gesture(
@@ -126,7 +133,13 @@ struct DiceCupView: View {
                         Text("Your roll!")
                             .font(.system(.title, design: .serif).weight(.bold))
                             .foregroundStyle(CardStyle.gold)
-                        Text(rollingDiceLabel(state))
+                        // LCR never sets `statusLine` (stays nil), so this
+                        // keeps showing the same "Rolling N dice" line it
+                        // always has; a game that DOES set it (Yahtzee's
+                        // "Tap dice on the table to keep, then shake for
+                        // roll 2 of 3") replaces that line entirely rather
+                        // than appending to it.
+                        Text(state.statusLine ?? rollingDiceLabel(state))
                             .font(.subheadline)
                             .foregroundStyle(.white.opacity(0.75))
                     }
@@ -183,8 +196,34 @@ struct DiceCupView: View {
     }
 
     private func myDiceCount(_ state: DiceClientState) -> Int {
-        guard state.chips.indices.contains(state.mySeat) else { return 3 }
-        return min(max(state.chips[state.mySeat], 0), 3)
+        let cap = maxCupDice(for: state.kind)
+        guard state.chips.indices.contains(state.mySeat) else { return cap }
+        return min(max(state.chips[state.mySeat], 0), cap)
+    }
+
+    /// Upper bound for `chips[mySeat]`'s reused "dice to roll" meaning (see
+    /// `DiceClientState.chips`'s doc) — sourced from the same
+    /// `DiceGameConfig` every table-side controller builds its dice pool
+    /// from, so this can never drift out of sync with the real per-game
+    /// dice count the way a second hardcoded literal here would. LCR's own
+    /// `.leftRightCenter` → `.lcr` mapping reproduces the old hardcoded `3`
+    /// exactly.
+    private func maxCupDice(for kind: DiceGameKind) -> Int {
+        let appKind: DiceKind
+        switch kind {
+        case .leftRightCenter: appKind = .lcr
+        case .yahtzee: appKind = .yahtzee
+        case .zilch: appKind = .zilch
+        case .shutTheBox: appKind = .shutTheBox
+        }
+        return DiceGameConfig.config(for: appKind).diceCount
+    }
+
+    /// Which face art the cup's own dice should be built with — LCR's
+    /// letters/dot, or a standard 1-6 pip die for every other kind (see
+    /// `DieFaceStyle`/`DiceGameConfig`).
+    private func cupFaceStyle(_ state: DiceClientState) -> DieFaceStyle {
+        state.kind == .leftRightCenter ? .lcr : .pips
     }
 
     /// What `DiceCupSceneView` should actually show right now: the full
@@ -270,7 +309,22 @@ struct DiceCupView: View {
 
     // MARK: - Not your turn: standings
 
+    /// LCR keeps its own chip-dots/pot panel (`lcrStandingsView`) exactly
+    /// as before; every other kind gets a generic panel built from
+    /// `statusLine`/`standingsLines` instead of a game-specific layout —
+    /// see those fields' doc in `DiceTypes.swift`. Branching here (rather
+    /// than inside one view) is what lets `lcrStandingsView` stay byte-
+    /// identical to the pre-generalization body.
+    @ViewBuilder
     private func standingsView(_ state: DiceClientState) -> some View {
+        if state.kind == .leftRightCenter {
+            lcrStandingsView(state)
+        } else {
+            genericStandingsView(state)
+        }
+    }
+
+    private func lcrStandingsView(_ state: DiceClientState) -> some View {
         VStack(spacing: 20) {
             Text("Left · Right · Center")
                 .font(.system(.title3, design: .serif).weight(.semibold))
@@ -341,9 +395,75 @@ struct DiceCupView: View {
         }
     }
 
+    /// The non-LCR "not your turn" panel: kind title, a rolling indicator
+    /// (same shape as LCR's), `statusLine` as an italic ghost-hint line if
+    /// the controller sent one (e.g. what's currently happening), then
+    /// `standingsLines` as a plain running-score list. Every part is
+    /// optional/best-effort so a kind that only sends SOME of these still
+    /// renders something sensible rather than a half-empty panel.
+    private func genericStandingsView(_ state: DiceClientState) -> some View {
+        VStack(spacing: 20) {
+            Text(kindTitle(state.kind))
+                .font(.system(.title3, design: .serif).weight(.semibold))
+                .foregroundStyle(CardStyle.gold)
+
+            if state.seatNames.indices.contains(state.turnSeat) {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small).tint(CardStyle.gold)
+                    Text("\(state.seatNames[state.turnSeat]) is playing…")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.85))
+                }
+            }
+
+            if let status = state.statusLine, !status.isEmpty {
+                Text(status)
+                    .font(.system(.footnote, design: .serif).italic())
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white.opacity(0.65))
+                    .padding(.horizontal, 12)
+            }
+
+            if let lines = state.standingsLines, !lines.isEmpty {
+                VStack(spacing: 10) {
+                    ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                        Text(line)
+                            .font(.system(.body, design: .serif)
+                                .weight(index == state.mySeat ? .bold : .regular))
+                            .foregroundStyle(index == state.mySeat ? CardStyle.gold : .white.opacity(0.85))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(20)
+                .frame(maxWidth: 320)
+                .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(.black.opacity(0.35)))
+            }
+        }
+        .padding(.horizontal, 24)
+    }
+
+    private func kindTitle(_ kind: DiceGameKind) -> String {
+        switch kind {
+        case .leftRightCenter: return "Left · Right · Center"
+        case .yahtzee: return "Yahtzee"
+        case .zilch: return "Zilch"
+        case .shutTheBox: return "Shut the Box"
+        }
+    }
+
     // MARK: - Game over
 
+    @ViewBuilder
     private func gameOverView(_ state: DiceClientState) -> some View {
+        if state.kind == .leftRightCenter {
+            lcrGameOverView(state)
+        } else {
+            genericGameOverView(state)
+        }
+    }
+
+    private func lcrGameOverView(_ state: DiceClientState) -> some View {
         VStack(spacing: 14) {
             let iWon = state.winnerSeat == state.mySeat
             Text(iWon ? "You take the pot!" : "That's the game!")
@@ -355,6 +475,29 @@ struct DiceCupView: View {
                     .foregroundStyle(.white.opacity(0.85))
             }
             Text("The full story is on the table.")
+                .font(.footnote)
+                .foregroundStyle(.white.opacity(0.5))
+        }
+    }
+
+    /// `winnerSeat` is only ever set here when there's a SINGLE winner
+    /// (a controller that allows ties, e.g. Yahtzee, leaves it `nil` on a
+    /// tie) — this falls back to the generic "That's the game!" headline
+    /// with no named winner in that case, and `standingsLines` (already
+    /// shown on the standings screen a beat earlier) carries the real
+    /// final tally.
+    private func genericGameOverView(_ state: DiceClientState) -> some View {
+        VStack(spacing: 14) {
+            let iWon = state.winnerSeat == state.mySeat
+            Text(iWon ? "You win!" : "That's the game!")
+                .font(.system(.largeTitle, design: .serif).weight(.bold))
+                .foregroundStyle(CardStyle.gold)
+            if let winner = state.winnerSeat, state.seatNames.indices.contains(winner), !iWon {
+                Text("\(state.seatNames[winner]) wins.")
+                    .font(.title3)
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+            Text("The full score is on the table.")
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.5))
         }

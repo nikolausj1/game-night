@@ -14,6 +14,18 @@ struct DiceTableSceneView: UIViewRepresentable {
     let roll: DiceGameController.Roll?
     /// Normalized felt anchor of the rolling seat (spawn edge).
     let anchor: CGPoint
+    /// How many dice live in the persistent pool this whole game — LCR's
+    /// always-3 default keeps every existing call site unchanged; Yahtzee/
+    /// Zilch/Shut the Box pass their own `DiceGameConfig.diceCount` (2-6).
+    /// Only takes effect the FIRST time the pool is built (see
+    /// `DiceTableSceneCoordinator.ensurePool`) — it's a whole-game setting,
+    /// not something that changes turn to turn.
+    var diceCount: Int = 3
+    /// Which face art the pool's dice are built with — LCR's letters/dot
+    /// by default, or `.pips` for a standard 1-6 die (see `DieNode`,
+    /// `DieFaceReader`). Same "only matters before the pool exists" rule
+    /// as `diceCount`.
+    var faceStyle: DieFaceStyle = .lcr
     /// Manual/auto cup loading, table-side: which seat (if any) currently
     /// has a cup open and waiting, how many dice it still needs, and the
     /// cup mouth's on-screen drop zone. `mouthScreen` lives in the SAME
@@ -29,9 +41,21 @@ struct DiceTableSceneView: UIViewRepresentable {
     var mouthScreen: CGPoint? = nil
     /// Fired once per die that lands in the cup (drag-drop OR auto-glide).
     var onDieLoaded: (Int) -> Void = { _ in }
-    /// Called exactly once per roll id, on the main queue, with the faces
-    /// physics settled on (in die order).
-    let onResult: (_ rollID: Int, _ faces: [LcrFace]) -> Void
+    /// Pool indices a game controller has marked HELD right now (Yahtzee-
+    /// style hold, Zilch-style set-aside) — see
+    /// `DiceTableSceneCoordinator.setHeld` for the full contract. Empty
+    /// default costs LCR nothing: it never sets this.
+    var heldIndices: Set<Int> = []
+    /// Fired when a RESTING or HELD die is tapped (not dragged) — the
+    /// table-side half of the hold/set-aside primitive. `nil` (the
+    /// default) means "no game wants taps," which also keeps this view's
+    /// hit-testing exactly as expensive as it's always been for LCR and
+    /// free play (see `DiceTableSceneCoordinator.shouldClaim`).
+    var onDieTapped: ((Int) -> Void)? = nil
+    /// Called exactly once per roll id, on the main queue, with each die's
+    /// settled result — `.lcr(LcrFace)` for an LCR pool, `.pip(1...6)` for
+    /// a pip pool (see `DieResult`), in die order.
+    let onResult: (_ rollID: Int, _ results: [DieResult]) -> Void
 
     func makeUIView(context: Context) -> DiceSCNView {
         let view = DiceSCNView(frame: .zero, options: [
@@ -44,9 +68,12 @@ struct DiceTableSceneView: UIViewRepresentable {
     func updateUIView(_ view: DiceSCNView, context: Context) {
         context.coordinator.onResult = onResult
         context.coordinator.onDieLoaded = onDieLoaded
+        context.coordinator.onDieTapped = onDieTapped
+        context.coordinator.configurePool(diceCount: diceCount, faceStyle: faceStyle)
         context.coordinator.updateCupLoading(seat: cupSeat, required: requiredCount,
                                              loaded: loadedCount, autoCup: autoCup,
                                              mouthScreen: mouthScreen)
+        context.coordinator.setHeld(heldIndices)
         context.coordinator.requestRoll(roll, anchor: anchor)
     }
 
@@ -86,29 +113,49 @@ final class DiceSCNView: SCNView {
 /// flags settlement.
 final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
                                        SCNPhysicsContactDelegate {
-    var onResult: ((Int, [LcrFace]) -> Void)?
+    var onResult: ((Int, [DieResult]) -> Void)?
     var onDieLoaded: ((Int) -> Void)?
+    /// Table-side half of the hold/set-aside primitive — see `setHeld`.
+    /// `nil` (LCR, free play) keeps `shouldClaim`'s hit-testing exactly as
+    /// narrow as it's always been.
+    var onDieTapped: ((Int) -> Void)?
 
     private let scene = SCNScene()
     private weak var view: DiceSCNView?
     private let cameraNode = SCNNode()
     private var wallNodes: [SCNNode] = []
 
-    /// The persistent pool: up to 3 real dice that live for the entire
-    /// game. `poolStates[i]` tracks what die `pool[i]` is doing right now;
-    /// `poolShadows[i]` is its tracked contact shadow. Nothing here is
-    /// ever destroyed and recreated mid-game — loading, pouring, and
-    /// settling all just move the SAME nodes around and flip their state,
-    /// which is what makes "the same dice persist across turns" true.
+    /// Whole-game pool settings, latched in by `configurePool` (called
+    /// every SwiftUI pass) and only actually consumed once, by
+    /// `ensurePool` the first time the pool is built. LCR's defaults (3,
+    /// `.lcr`) reproduce the pool this coordinator has always built.
+    private var poolDiceCount = 3
+    private var poolFaceStyle: DieFaceStyle = .lcr
+
+    /// The persistent pool: 2-6 real dice (game-dependent — see
+    /// `poolDiceCount`) that live for the entire game. `poolStates[i]`
+    /// tracks what die `pool[i]` is doing right now; `poolShadows[i]` is
+    /// its tracked contact shadow. Nothing here is ever destroyed and
+    /// recreated mid-game — loading, pouring, holding, and settling all
+    /// just move the SAME nodes around and flip their state, which is what
+    /// makes "the same dice persist across turns" true.
     private enum PoolDieState: Equatable {
         case resting     // free on the felt, dynamic physics, draggable
         case dragging    // a finger (or the auto-glide) has it, kinematic
         case loaded(seat: Int) // hidden inside a seat's cup, waiting to be thrown
         case flying      // mid-roll, dynamic physics, being read for a result
+        case held        // marked by a game controller — sits in the hold tray, kinematic, excluded from the next launch (see `setHeld`)
     }
     private var pool: [DieNode] = []
     private var poolStates: [PoolDieState] = []
     private var poolShadows: [DieShadowNode] = []
+    /// One gold underglow ring per pool die, shown only while that die is
+    /// `.held` — see `setHeld`.
+    private var poolHoldRings: [DieHoldRingNode] = []
+    /// Pool indices currently `.held`, mirroring the last `setHeld(_:)`
+    /// call — kept so that call can diff against "what's already true"
+    /// instead of re-animating dice that haven't actually changed state.
+    private var heldIndices: Set<Int> = []
     /// Per-pool-index last world position `trackAllShadows` actually
     /// re-solved a shadow transform for — lets it detect "this die hasn't
     /// moved since last frame" (a table nudge/jolt can set a `.resting` die
@@ -145,6 +192,11 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     private var reported = false
     private var pendingRoll: DiceGameController.Roll?
     private var pendingAnchor = CGPoint(x: 0.5, y: 0.94)
+    /// The most recent `anchor` passed to `requestRoll`, kept even when
+    /// that particular call didn't launch anything — `heldTraySlot` reuses
+    /// it so the hold tray always sits near the CURRENT roller's edge, not
+    /// just wherever the last actual throw came from.
+    private var lastAnchor = CGPoint(x: 0.5, y: 0.94)
     /// Last frame's presentation pose per die — settle detection measures
     /// OBSERVED motion (SCNPhysicsBody's velocity getters don't track the
     /// live simulation, they just echo whatever was last assigned).
@@ -229,14 +281,26 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     }
 
     /// Dice a table jolt/nudge should actually touch: not hidden inside a
-    /// cup, and not mid-drag under someone's finger.
+    /// cup, not mid-drag under someone's finger, and not sitting HELD in
+    /// the tray (a real player wouldn't expect a table thump to jostle a
+    /// die they've deliberately set aside).
     private func liveDice() -> [DieNode] {
         pool.indices.compactMap { index in
             switch poolStates[index] {
-            case .loaded, .dragging: return nil
+            case .loaded, .dragging, .held: return nil
             case .resting, .flying: return pool[index]
             }
         }
+    }
+
+    /// Latches this whole-game pool config in — see the properties' own
+    /// doc. Called every SwiftUI pass; cheap (two Int/enum writes) and
+    /// only actually consumed the first time `ensurePool` runs, so calling
+    /// it repeatedly (or with the same values, as every LCR pass does) is
+    /// a no-op in effect.
+    func configurePool(diceCount: Int, faceStyle: DieFaceStyle) {
+        poolDiceCount = max(1, min(6, diceCount))
+        poolFaceStyle = faceStyle
     }
 
     func attach(to view: DiceSCNView) {
@@ -257,6 +321,16 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         pan.maximumNumberOfTouches = 1
         view.addGestureRecognizer(pan)
+
+        // Hold/set-aside primitive: a TAP (not a drag) on a resting or
+        // held die reports back via `onDieTapped`. Harmless to add
+        // unconditionally — `shouldClaim` only ever lets a touch reach
+        // this view AT ALL when `onDieTapped` is actually wired (or a cup
+        // is open), so for LCR/free play (which never set it) this
+        // recognizer simply never receives a touch, exactly today's
+        // behavior.
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        view.addGestureRecognizer(tap)
 
         scene.background.contents = UIColor.clear
         scene.physicsWorld.gravity = DiceScenePhysics.gravity
@@ -338,16 +412,17 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         }
     }
 
-    /// Builds the 3-die pool the first time the world is sized, resting at
-    /// the table center — the "fresh set of dice sitting at the pot,
-    /// waiting to be loaded" a brand-new game starts with. Every later
-    /// roll/load/pour just moves these SAME three nodes; nothing here ever
-    /// gets destroyed and recreated again.
+    /// Builds the pool (`poolDiceCount` dice, LCR's default 3) the first
+    /// time the world is sized, resting at the table center — the "fresh
+    /// set of dice sitting at the pot, waiting to be loaded" a brand-new
+    /// game starts with. Every later roll/load/pour/hold just moves these
+    /// SAME nodes; nothing here ever gets destroyed and recreated again.
     private func ensurePool() {
         guard pool.isEmpty else { return }
-        for index in 0..<3 {
-            let die = DieNode(lcrDie: index)
-            let lateral = (CGFloat(index) - 1) * Dice3D.side * 1.3
+        let count = poolDiceCount
+        for index in 0..<count {
+            let die = poolFaceStyle == .pips ? DieNode(pipDie: index) : DieNode(lcrDie: index)
+            let lateral = (CGFloat(index) - CGFloat(count - 1) / 2) * Dice3D.side * 1.3
             die.position = SCNVector3(lateral, Dice3D.side * 3 + CGFloat(index) * 0.5,
                                       CGFloat.random(in: -0.8...0.8))
             die.eulerAngles = SCNVector3(CGFloat.random(in: 0..<(2 * .pi)),
@@ -360,6 +435,9 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
             scene.rootNode.addChildNode(shadow)
             poolShadows.append(shadow)
             lastShadowPosition.append(simd_float3(repeating: .greatestFiniteMagnitude))
+            let ring = DieHoldRingNode()
+            scene.rootNode.addChildNode(ring)
+            poolHoldRings.append(ring)
         }
         // Freshly spawned above the floor — needs a moment of real physics
         // ticks to actually fall and settle (see beginSettleWindow's doc).
@@ -415,7 +493,15 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     /// `.ended`/`.cancelled` clears the cache so the NEXT touch is fresh.
     private func shouldClaim(_ point: CGPoint, phase: UITouch.Phase?) -> Bool {
         if draggingIndex != nil { return true }
-        guard dragSeat != nil, let view else { return false }
+        guard let view else { return false }
+        // Same "nothing here wants this touch" short-circuit the cup-
+        // loading doc above describes, just widened by one more reason to
+        // stay interested: a game controller wired `onDieTapped` (the
+        // hold/set-aside primitive). Costs LCR/free play nothing — neither
+        // ever sets it, so this reduces to the original `dragSeat != nil`
+        // gate for them.
+        let tapCapable = onDieTapped != nil
+        guard dragSeat != nil || tapCapable else { return false }
         switch phase {
         case .ended, .cancelled:
             lastProbeComputed = false
@@ -427,7 +513,11 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         let hits = view.hitTest(point, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
         let result = hits.first
             .flatMap { hit in pool.firstIndex(where: { $0 === hit.node }) }
-            .map { poolStates[$0] == .resting } ?? false
+            .map { index -> Bool in
+                if dragSeat != nil, poolStates[index] == .resting { return true }
+                if tapCapable, poolStates[index] == .resting || poolStates[index] == .held { return true }
+                return false
+            } ?? false
         lastProbeComputed = true
         lastProbeResult = result
         return result
@@ -446,6 +536,21 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         default:
             break
         }
+    }
+
+    /// The tap half of the hold/set-aside primitive: a resting OR held die
+    /// tapped (not dragged) reports its pool index to `onDieTapped`.
+    /// `onDieTapped == nil` (LCR, free play) short-circuits before doing
+    /// any work, and `shouldClaim` already refuses the touch in that case
+    /// anyway, so this recognizer never even fires for them.
+    @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
+        guard let view, let onDieTapped else { return }
+        let point = recognizer.location(in: view)
+        let hits = view.hitTest(point, options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+        guard let hit = hits.first, let index = pool.firstIndex(where: { $0 === hit.node }),
+              poolStates[index] == .resting || poolStates[index] == .held else { return }
+        Haptics.tick()
+        onDieTapped(index)
     }
 
     private func beginDrag(at point: CGPoint) {
@@ -596,6 +701,10 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     /// Idempotent per roll id — updateUIView calls this on every SwiftUI
     /// pass, only a NEW id launches dice.
     func requestRoll(_ roll: DiceGameController.Roll?, anchor: CGPoint) {
+        // Captured on EVERY pass, not just a launching one — `heldTraySlot`
+        // wants the current roller's edge even between rolls (e.g. while a
+        // Yahtzee player is still deciding what to hold).
+        lastAnchor = anchor
         guard let roll, roll.id != lastRollID else { return }
         lastRollID = roll.id
         guard let view, view.bounds.width > 10, !pool.isEmpty else {
@@ -633,8 +742,12 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         }
         if chosen.count < roll.count {
             // Still short (e.g. a die is mid-drag elsewhere) — grab
-            // whatever's left rather than leave the roll stuck.
-            let leftover = poolStates.indices.filter { !chosen.contains($0) }
+            // whatever's left rather than leave the roll stuck. `.held`
+            // dice are excluded even here: "excluded from the next
+            // launch" is a hard guarantee for `setHeld`, not a best-effort
+            // one, so a Yahtzee reroll can never accidentally scoop up a
+            // die the player just locked in.
+            let leftover = poolStates.indices.filter { !chosen.contains($0) && poolStates[$0] != .held }
             chosen.append(contentsOf: leftover.prefix(roll.count - chosen.count))
         }
         chosen = Array(chosen.prefix(roll.count).sorted())
@@ -724,6 +837,88 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
                                 $0.presentation.simdWorldOrientation) }
         resistanceTiers = Array(repeating: 0, count: dice.count)
         updateRenderingContinuity()
+    }
+
+    // MARK: hold / set-aside primitive
+
+    /// Called every SwiftUI pass with the CURRENT full held set — same
+    /// "diff against what's already true" idiom `updateCupLoading` uses
+    /// for the cup. Only indices whose membership actually CHANGED this
+    /// pass do any work; a repeat call with the same set (every LCR/free-
+    /// play pass, since they never populate this) is a cheap no-op.
+    ///
+    /// A newly-held die goes kinematic and slides into a small tray row
+    /// near the current roller's own felt edge (`lastAnchor` — the same
+    /// edge the throw entry point and cup mouth already use), with a gold
+    /// underglow ring (`DieHoldRingNode`) fading in underneath. A newly-
+    /// released index slides back to `.resting` on the open felt with the
+    /// ring fading out. Held dice are excluded from the next `launch()`
+    /// (see the `.held` guard there) and from jolts/nudges (`liveDice()`);
+    /// only ever transitions a die that's actually `.resting` right now —
+    /// a game controller marking an in-flight/loaded/dragging index held
+    /// is a no-op until that die settles back to `.resting` on its own.
+    func setHeld(_ indices: Set<Int>) {
+        let clamped = indices.filter { pool.indices.contains($0) }
+        guard clamped != heldIndices else { return }
+        let newlyHeld = clamped.subtracting(heldIndices)
+        let newlyReleased = heldIndices.subtracting(clamped)
+        heldIndices = clamped
+
+        for index in newlyHeld where poolStates[index] == .resting {
+            poolStates[index] = .held
+            pool[index].physicsBody?.type = .kinematic
+        }
+        for index in newlyReleased where poolStates[index] == .held {
+            poolStates[index] = .resting
+            pool[index].physicsBody?.type = .dynamic
+            if poolHoldRings.indices.contains(index) {
+                poolHoldRings[index].opacity = 0
+            }
+        }
+        // Re-lay the WHOLE tray row in stable sorted order on every change
+        // (not just the newly-held ones) so held dice never end up
+        // overlapping regardless of which order they were held/released in.
+        let order = heldIndices.sorted()
+        for (slot, index) in order.enumerated() where pool.indices.contains(index) {
+            let target = heldTraySlot(order: slot)
+            animateHeldDie(pool[index], ring: poolHoldRings.indices.contains(index) ? poolHoldRings[index] : nil,
+                          to: target)
+        }
+        if !newlyHeld.isEmpty || !newlyReleased.isEmpty {
+            beginSettleWindow(0.5)
+            updateRenderingContinuity()
+        }
+    }
+
+    /// Where held/set-aside die #`order` (0-based, stable sort of the
+    /// currently held pool indices) sits: a short row just inside the felt
+    /// from the roller's own edge — the same entry-point math `launch`
+    /// uses for `anchor`, just parked at rest height instead of thrown.
+    private func heldTraySlot(order: Int) -> SCNVector3 {
+        let halfW = worldWidth / 2 - wallInset - Dice3D.side
+        let halfH = worldHeight / 2 - wallInset - Dice3D.side
+        let baseX = max(-halfW, min(halfW, (lastAnchor.x - 0.5) * worldWidth * 0.6))
+        let baseZ = max(-halfH, min(halfH, (lastAnchor.y - 0.5) * worldHeight * 0.6))
+        let heading = atan2(-baseZ, -baseX) // toward world center, same convention as launch()
+        // Room for up to 6 in a row (Zilch's whole pool), centered on the
+        // anchor point.
+        let lateral = (CGFloat(order) - 2.5) * Dice3D.side * 1.3
+        return SCNVector3(
+            baseX + -sin(heading) * lateral,
+            Dice3D.side / 2,
+            baseZ + cos(heading) * lateral)
+    }
+
+    /// Slides a held die (and its ring) to its tray slot over a short
+    /// animation — not physics-driven (the die is kinematic through the
+    /// whole move), matching `loadDie`'s own cup drop-in animation.
+    private func animateHeldDie(_ die: DieNode, ring: DieHoldRingNode?, to position: SCNVector3) {
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0.28
+        die.position = position
+        ring?.position = SCNVector3(position.x, 0.03, position.z)
+        ring?.opacity = 1
+        SCNTransaction.commit()
     }
 
     // MARK: settle detection (render delegate — no allocations here)
@@ -885,11 +1080,27 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         guard !reported, let rollID = activeRollID else { return }
         reported = true
         let dice = activeDice
-        let faces = dice.map { DieFaceReader.upFace(of: $0) }
+        // Style-tagged so an LCR pool and a pip pool can ride the exact
+        // same `onResult` callback — see `DieResult`. The whole pool is
+        // built to ONE style (`poolFaceStyle`, latched by `configurePool`
+        // before `ensurePool` ever runs), so every die here reads the same
+        // way.
+        let results: [DieResult] = dice.map { die in
+            switch poolFaceStyle {
+            case .lcr: return .lcr(DieFaceReader.upFace(of: die))
+            case .pips: return .pip(DieFaceReader.upPipValue(of: die))
+            }
+        }
         #if DEBUG
         let elapsed = (lastFrameTime ?? 0) - (rollStartTime ?? 0)
+        let debugFaces = results.map { result -> String in
+            switch result {
+            case .lcr(let face): return face.rawValue
+            case .pip(let value): return "\(value)"
+            }
+        }
         NSLog("Dice3D roll %d settled in %.2fs: %@", rollID, elapsed,
-              faces.map(\.rawValue).joined(separator: ","))
+              debugFaces.joined(separator: ","))
         #endif
         let settledIndices = activeIndices
         DispatchQueue.main.async { [weak self] in
@@ -913,7 +1124,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
             self.activeRollID = nil
             self.activeIndices = []
             self.updateRenderingContinuity()
-            self.onResult?(rollID, faces)
+            self.onResult?(rollID, results)
         }
     }
 
@@ -922,4 +1133,57 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     func physicsWorld(_ world: SCNPhysicsWorld, didBegin contact: SCNPhysicsContact) {
         contactThrottle?.register(contact)
     }
+}
+
+/// A soft gold ring glowing under a HELD die — the visual telling a
+/// player "this one's locked in, it won't roll again until you tap it
+/// loose." Same tracked-plane trick as `DieShadowNode` (a flat, constant-
+/// lit plane repositioned in world space, not a real light), just gold and
+/// ring-shaped instead of a dark shadow disc. Table-only: the hold/set-
+/// aside primitive is a table-side mechanism (see `DiceTableSceneCoordinator.
+/// setHeld`), so this lives here rather than in `DiceScenePhysics` (shared
+/// with the cup, which has no hold concept).
+final class DieHoldRingNode: SCNNode {
+    private static let texture: UIImage = {
+        let size: CGFloat = 256
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: size, height: size),
+                                       format: format).image { ctx in
+            let space = CGColorSpaceCreateDeviceRGB()
+            let gold = UIColor(red: 1.0, green: 0.84, blue: 0.35, alpha: 0.9)
+            let clear = UIColor(red: 1.0, green: 0.84, blue: 0.35, alpha: 0)
+            // A RING, not a filled disc: transparent core, a bright gold
+            // band, transparent again past the edge.
+            if let gradient = CGGradient(
+                colorsSpace: space,
+                colors: [clear.cgColor, clear.cgColor, gold.cgColor, gold.cgColor, clear.cgColor] as CFArray,
+                locations: [0, 0.56, 0.70, 0.82, 1]) {
+                ctx.cgContext.drawRadialGradient(
+                    gradient,
+                    startCenter: CGPoint(x: size / 2, y: size / 2), startRadius: 0,
+                    endCenter: CGPoint(x: size / 2, y: size / 2), endRadius: size / 2,
+                    options: [])
+            }
+        }
+    }()
+
+    override init() {
+        super.init()
+        let plane = SCNPlane(width: Dice3D.side * 2.2, height: Dice3D.side * 2.2)
+        let material = SCNMaterial()
+        material.diffuse.contents = Self.texture
+        material.emission.contents = Self.texture
+        material.lightingModel = .constant
+        material.writesToDepthBuffer = false
+        material.isDoubleSided = false
+        plane.materials = [material]
+        geometry = plane
+        eulerAngles = SCNVector3(-Float.pi / 2, 0, 0) // lie flat
+        castsShadow = false
+        opacity = 0 // hidden until `setHeld` shows it
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) unsupported") }
 }

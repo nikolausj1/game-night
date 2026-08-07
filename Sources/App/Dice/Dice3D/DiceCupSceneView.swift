@@ -78,6 +78,11 @@ struct DiceCupSceneView: UIViewRepresentable {
     let model: DiceCupModel
     /// Which of the three cup looks to build.
     var concept: CupConcept = .crossSection
+    /// Which face art the cup's dice are built with — LCR's letters/dot by
+    /// default, or `.pips` for a standard 1-6 die (Yahtzee/Zilch/Shut the
+    /// Box — see `DieNode`). Only read the FIRST time the scene seeds its
+    /// dice (same "whole-game setting" rule as `DiceTableSceneView.faceStyle`).
+    var faceStyle: DieFaceStyle = .lcr
 
     /// Returns a plain `UIView` rather than the `SCNView` directly so the
     /// photo backdrop (lookIn/deepLookIn — see `CupConcept.photoBackdropImageName`)
@@ -127,7 +132,8 @@ struct DiceCupSceneView: UIViewRepresentable {
         // auto-cup/back-compat) goes straight to the coordinator so it
         // seeds correctly on the very first frame — no placeholder count
         // that then has to be torn down again a moment later.
-        context.coordinator.attach(to: sceneView, model: model, concept: concept, diceCount: diceCount)
+        context.coordinator.attach(to: sceneView, model: model, concept: concept,
+                                   diceCount: diceCount, faceStyle: faceStyle)
         return container
     }
 
@@ -240,9 +246,18 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
         }
     }
 
+    /// Upper bound on how many dice this cup will ever seed/spawn — was a
+    /// hardcoded `3` throughout (LCR's own max); raised to cover Zilch's
+    /// full 6-die pool, the largest of the new games. LCR/free play still
+    /// only ever ask for up to 3 (their own `myDiceCount`/`requiredCount`
+    /// math is unchanged), so this is a ceiling, not a new default.
+    private static let maxPoolDice = 6
+
     private let scene = SCNScene()
     private weak var view: SCNView?
     private var concept: CupConcept = .crossSection
+    /// Which face art this cup's dice use — see `DiceCupSceneView.faceStyle`.
+    private var faceStyle: DieFaceStyle = .lcr
     private var dice: [DieNode] = []
     private var audio = CupAudio()
     private var contactThrottle: DiceContactThrottle?
@@ -252,9 +267,11 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
     /// `-autoCupLoadDemo` sim-verify hook (see `scheduleLoadDemo`).
     private var loadDemoTimer: Timer?
 
-    func attach(to view: SCNView, model: DiceCupModel, concept: CupConcept, diceCount: Int) {
+    func attach(to view: SCNView, model: DiceCupModel, concept: CupConcept, diceCount: Int,
+               faceStyle: DieFaceStyle = .lcr) {
         self.view = view
         self.concept = concept
+        self.faceStyle = faceStyle
         view.scene = scene
         if concept.photoBackdropImageName != nil {
             // lookIn/deepLookIn: the photo drawn by DiceCupSceneView's
@@ -982,6 +999,13 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
         CommandLine.arguments.contains("-autoCupLoadDemo")
     }
 
+    /// One die, built to whichever face style this cup was configured
+    /// with — the single call site `seedDice`/`spawnFromMouth` route
+    /// through so neither has to know `DieNode`'s two initializers exist.
+    private func makeDie(index: Int) -> DieNode {
+        faceStyle == .pips ? DieNode(pipDie: index) : DieNode(lcrDie: index)
+    }
+
     /// Full reseed: clears every die and rebuilds `count` of them from
     /// scratch at their resting spread. This is the ORIGINAL `setDiceCount`
     /// body — still what runs for the very first seed (see `attach`) and
@@ -989,11 +1013,11 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
     /// enough not to warrant its own animation). Increments no longer come
     /// through here — see `setDiceCount` below.
     private func seedDice(count: Int) {
-        let clamped = max(0, min(3, count))
+        let clamped = max(0, min(Self.maxPoolDice, count))
         dice.forEach { $0.removeFromParentNode() }
         dice = []
         for index in 0..<clamped {
-            let die = DieNode(lcrDie: index)
+            let die = makeDie(index: index)
             // Cup dice sit HEAVY: much higher rolling resistance and
             // damping than a table throw (they live in a hand-sized world
             // — any drift reads as floating). They still fly on a shake;
@@ -1001,7 +1025,13 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
             die.physicsBody?.damping = 0.30
             die.physicsBody?.angularDamping = 0.45
             die.physicsBody?.rollingFriction = 0.55
-            let spread = CGFloat(index) - CGFloat(clamped - 1) / 2
+            // Bounded to ±1 regardless of `clamped` (divides by 1, i.e. a
+            // no-op, at LCR's own max of 3 — this is an exact match for the
+            // original 3-dice spread, not a behavior change for LCR) so a
+            // bigger pool (Zilch: 6) fans out across the SAME safe width
+            // instead of overflowing the crossSection frustum walls or the
+            // lookIn/deepLookIn physics cylinder — see both usages below.
+            let spread = (CGFloat(index) - CGFloat(clamped - 1) / 2) / max(1, CGFloat(clamped - 1) / 2)
             if concept == .crossSection,
                let point = crossSectionSpawnPoint(depth: 5.4 + CGFloat(index) * 0.9,
                                                   lateralFraction: spread,
@@ -1041,7 +1071,7 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
     /// rare enough (a chip count changing mid-turn) not to need to.
     func setDiceCount(_ count: Int) {
         guard !Self.isLoadDemoActive else { return } // the demo timeline owns dice count
-        let clamped = max(0, min(3, count))
+        let clamped = max(0, min(Self.maxPoolDice, count))
         if clamped == dice.count { return }
         if clamped > dice.count {
             spawnFromMouth(additional: clamped - dice.count)
@@ -1061,8 +1091,8 @@ final class DiceCupSceneCoordinator: NSObject, SCNPhysicsContactDelegate {
     private func spawnFromMouth(additional: Int) {
         guard additional > 0 else { return }
         for _ in 0..<additional {
-            guard dice.count < 3 else { break }
-            let die = DieNode(lcrDie: dice.count)
+            guard dice.count < Self.maxPoolDice else { break }
+            let die = makeDie(index: dice.count)
             die.physicsBody?.damping = 0.30
             die.physicsBody?.angularDamping = 0.45
             die.physicsBody?.rollingFriction = 0.55

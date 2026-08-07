@@ -90,7 +90,11 @@ struct HandRootView: View {
 
     @ViewBuilder
     private var connectedContent: some View {
-        if client.diceState != nil {
+        if client.cribbageSnapshot != nil {
+            // Cribbage mode: the table is running a cribbage game — this
+            // phone is a cribbage hand, not the trick-game card UI below.
+            CribbageHandView(client: client, onLeave: onLeave)
+        } else if client.diceState != nil {
             // Dice mode: the table is running a dice game — this phone is
             // a dice cup, not a card hand.
             DiceCupView(client: client)

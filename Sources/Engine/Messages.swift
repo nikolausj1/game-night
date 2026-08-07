@@ -16,6 +16,14 @@ public struct NetEnvelope: Codable, Sendable, Equatable {
     }
 }
 
+/// Adding a case here is safe for back-compat on its own: an old peer that
+/// receives a message using a case it doesn't know about will fail to
+/// decode the whole `NetEnvelope`, but both call sites
+/// (`ClientSession.handleData`, `HostSession.handleData`) already wrap that
+/// decode in `try? NetCodec.decode(data)` and silently drop the message on
+/// failure — the existing "unknown case" resilience lives there, not in a
+/// custom `Decodable` on this enum. New cases below (added for cribbage)
+/// rely on that same mechanism; no envelope/decoder changes were needed.
 public enum NetMessage: Codable, Sendable, Equatable {
     case hello(name: String, deviceID: String)
     case welcome(seat: Int)
@@ -48,6 +56,16 @@ public enum NetMessage: Codable, Sendable, Equatable {
     /// into a new engine that rightly rejects them (observed in the field
     /// as the silent-bounce deadend).
     case tableReset
+    /// Cribbage, phone → table: the seat's action. Mirrors `.action`
+    /// (`PlayerAction`) — the sender's seat comes from the connection
+    /// (`welcome(seat:)`), never embedded in the message.
+    case cribbageAction(CribbageAction)
+    /// Cribbage, table → everyone: the events an action just produced.
+    /// Mirrors `.events` ([GameEvent]).
+    case cribbageEvents([CribbageEvent])
+    /// Cribbage, table → each phone: that seat's personalized, redacted
+    /// view. Mirrors `.snapshot` (`ClientSnapshot`).
+    case cribbageSnapshot(CribbageSnapshot)
 }
 
 public enum NetCodec {

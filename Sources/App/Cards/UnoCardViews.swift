@@ -493,67 +493,80 @@ struct SkipGlyph: View {
     }
 }
 
-/// One arrow of UNO's chasing-arrows reverse glyph: a thick curved shaft
-/// swept along an ellipse (so it fills whatever aspect frame the caller
-/// hands it — square-ish center art or a squat corner index) ending in a
-/// flared triangular head. Two of these, point-symmetric through the
-/// center, chase each other around — the real card's reverse icon is not a
-/// blocky right-angle bend, it's a soft hook, and this traces one directly.
+/// One arrow of UNO's reverse glyph, traced from the owner's reference
+/// card (`_inbox/new games/uno reverse.jpg`): NOT a curved ribbon — a
+/// STRAIGHT thick shaft with a big triangular head at one end, whose tail
+/// makes a tight 180° U-turn and rises in a short stub that runs parallel
+/// to (and just clear of) its partner arrow's shaft. Two of these,
+/// point-symmetric through the center, interlock into the famous S.
 ///
-/// Everything is built on the unit circle (radius 1, centered at the
-/// origin) and mapped into `rect` by scaling x by `rect.width/2` and y by
-/// `rect.height/2` independently — a circle squashed into an ellipse — so
-/// the same angle math produces a correctly-proportioned hook at any aspect.
+/// Built in a unit space with the arrow pointing straight up, then every
+/// point is rotated 45° (up-right, like the print) and scaled to fit the
+/// unit box before mapping into `rect`.
 private struct ReverseArrow: Shape {
-    /// Sweep, in radians, on the unit circle. `endAngle` is where the
-    /// arrowhead sits; `startAngle` is the shaft's plain cut tail.
-    let startAngle: Double
-    let endAngle: Double
+    /// 180° point-symmetry flag for the partner arrow.
+    var flipped = false
 
     func path(in rect: CGRect) -> Path {
-        let a = rect.width / 2
-        let b = rect.height / 2
+        // Unit-space layout (y-down screen convention), arrow pointing up:
+        // shaft on the right, hook wrapping left under the partner.
+        // Proportions verified against the reference by plotting this
+        // exact math (see _review/night-reverse-glyph-check.png): the
+        // shafts must be LONG relative to the hook — each head has to
+        // clear ABOVE the partner's U-turn (whose top sits at
+        // -hookTopY - ro), or the hook swallows the head. That was the
+        // first attempt's failure mode.
+        let w = 0.30            // shaft/stub thickness
+        let axis = 0.20         // shaft centerline x
+        let headTipY = -1.35
+        let headBaseY = -0.95
+        let headHalf = 0.32     // head half-span past the tip's centerline
+        let hookTopY = 0.35     // where the shaft ends and the U-turn begins
+        let stubTopY = -0.10    // stub rises alongside the partner's shaft
+        let shaftL = axis - w / 2, shaftR = axis + w / 2
+        // U-turn center: chosen so the stub clears the partner shaft
+        // (at x ∈ [-shaftR, -shaftL]) by a visible outline gap.
+        let hookC = -0.20
+        let ro = shaftR - hookC          // outer hook radius
+        let ri = shaftL - hookC          // inner hook radius
+
+        var pts: [(Double, Double)] = []
+        pts.append((axis, headTipY))                    // tip
+        pts.append((axis + headHalf, headBaseY))        // head base, right
+        pts.append((shaftR, headBaseY))                 // into the shaft
+        pts.append((shaftR, hookTopY))                  // down the right edge
+        // Outer U-turn, right → bottom → left.
+        let arcN = 18
+        for i in 0...arcN {
+            let t = Double.pi * Double(i) / Double(arcN)
+            pts.append((hookC + cos(t) * ro, hookTopY + sin(t) * ro))
+        }
+        pts.append((hookC - ro, stubTopY))              // stub outer edge up
+        pts.append((hookC - ri, stubTopY))              // stub flat cut
+        pts.append((hookC - ri, hookTopY))              // stub inner edge down
+        // Inner U-turn, left → bottom → right.
+        for i in stride(from: arcN, through: 0, by: -1) {
+            let t = Double.pi * Double(i) / Double(arcN)
+            pts.append((hookC + cos(t) * ri, hookTopY + sin(t) * ri))
+        }
+        pts.append((shaftL, headBaseY))                 // up the left edge
+        pts.append((axis - headHalf, headBaseY))        // head base, left
+        // close back to tip
+
+        // Rotate 45° (up → up-right), flip for the partner, fit, map.
+        let c = cos(Double.pi / 4), s = sin(Double.pi / 4)
+        let fit = 0.66
+        let sign: Double = flipped ? -1 : 1
         let cx = rect.midX, cy = rect.midY
-
-        let outer = 0.98
-        let inner = 0.46
-        let thickness = outer - inner
-        let headLength = thickness * 1.55   // tip's reach beyond the shaft's mid-radius
-        let flare = thickness * 0.34        // head base bulge past the shaft's half-width
-        let samples = 22
-
-        func screen(_ x: Double, _ y: Double) -> CGPoint {
-            CGPoint(x: cx + x * a, y: cy + y * b)
-        }
-        func unit(_ radius: Double, _ theta: Double) -> (Double, Double) {
-            (cos(theta) * radius, sin(theta) * radius)
-        }
-
-        var points: [CGPoint] = []
-        // Outer edge of the shaft, tail → head.
-        for i in 0...samples {
-            let t = startAngle + (endAngle - startAngle) * Double(i) / Double(samples)
-            let (x, y) = unit(outer, t)
-            points.append(screen(x, y))
-        }
-        // Flared triangular head, built from the tangent/radial directions
-        // at the shaft's leading edge.
-        let tangent = (x: -sin(endAngle), y: cos(endAngle))
-        let radial = (x: cos(endAngle), y: sin(endAngle))
-        let (mx, my) = unit((outer + inner) / 2, endAngle)
-        let halfSpan = thickness / 2 + flare
-        points.append(screen(mx + radial.x * halfSpan, my + radial.y * halfSpan))
-        points.append(screen(mx + tangent.x * headLength, my + tangent.y * headLength))
-        points.append(screen(mx - radial.x * halfSpan, my - radial.y * halfSpan))
-        // Inner edge of the shaft, head → tail, closing the ribbon.
-        for i in stride(from: samples, through: 0, by: -1) {
-            let t = startAngle + (endAngle - startAngle) * Double(i) / Double(samples)
-            let (x, y) = unit(inner, t)
-            points.append(screen(x, y))
+        let ax = rect.width / 2, ay = rect.height / 2
+        let screen: [CGPoint] = pts.map { (x, y) in
+            let rx = (x * c - y * s) * fit * sign
+            let ry = (x * s + y * c) * fit * sign
+            return CGPoint(x: cx + rx * ax, y: cy + ry * ay)
         }
 
         var p = Path()
-        p.addLines(points)
+        p.addLines(screen)
         p.closeSubpath()
         return p
     }
@@ -586,12 +599,8 @@ struct ReverseGlyph: View {
 private struct ReverseArrowPair: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
-        let first = ReverseArrow(startAngle: Angle.degrees(198).radians,
-                                  endAngle: Angle.degrees(344).radians)
-        path.addPath(first.path(in: rect))
-        let second = ReverseArrow(startAngle: Angle.degrees(18).radians,
-                                   endAngle: Angle.degrees(164).radians)
-        path.addPath(second.path(in: rect))
+        path.addPath(ReverseArrow(flipped: false).path(in: rect))
+        path.addPath(ReverseArrow(flipped: true).path(in: rect))
         return path
     }
 }

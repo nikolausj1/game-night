@@ -2,7 +2,7 @@
 title: "STATUS - Digital Card Games"
 created: 2026-07-24
 modified: 2026-08-06
-version: 2.7
+version: 2.8
 author: Claude Fable 5 (claude-fable-5)
 tags:
 ---
@@ -11,7 +11,7 @@ tags:
 
 ## Project
 
-Game Night (working title, needs a real name before shipping): a family iOS app where each player's iPhone is their private hand of cards and an iPad in the middle of the table is the communal felt. Cards flick from phone to table with real physics; a voice announcer calls the game. Native SwiftUI, peer-to-peer MultipeerConnectivity (no server/internet). Now also a dice platform (phone = dice cup, photoreal table cup at the rail).
+Game Night (working title, needs a real name before shipping): a family iOS app where each player's iPhone is their private hand of cards and an iPad in the middle of the table is the communal felt. Cards flick from phone to table with real physics. Native SwiftUI, peer-to-peer MultipeerConnectivity (no server/internet). Thirteen games: five card games + cribbage + solitaire, four dice games on the phone-as-cup platform, and two board-and-paper games played directly on the table.
 
 ## Stage
 
@@ -19,14 +19,14 @@ Active Development (feature-rich beta-adjacent: five card games + LCR dice, comp
 
 ## Health
 
-🟢 On-track - Wave 5 (motion + feel) shipped on top of waves 3-4: the hand-fan clipping regression root-caused (a SwiftUI mask silently clips - cards "slid under the felt") and fixed with a permanent mid-gesture screenshot harness; the UNO throw is finally ONE fluid arc (single animated progress scalar drives position/height/rotation/shadow - desync now structurally impossible, proven frame-by-frame from sim video); wild cards glow in their called color (chip removed); coins flick-glide with felt friction and rail bounce; free play got the full cup ceremony; LCR cup-loading perf fixed (throttled hit-tests, motion-gated shadow tracking); and the phone cup went PHOTOREAL - generated photographic interiors with live 3D dice composited over them, replacing the procedural render Justin rejected, plus the deep look-in rebuilt at honest real-cup proportions. Deployed to iPhone (iPad pending unlock). Earlier same day, waves 3-4: manual draw-2/4 penalties, hand-fan geometry finally right at every count (root-caused twice, verified by screenshot at 2/3/7 cards), real rail hands bleeding off the screen edge, photoreal AI-generated table cup + felt/leather textures, real-dice cup loading (drag the actual settled dice into the cup), velocity-layered dice audio, wild-color glow, accessibility floor (Reduce Motion, Dynamic Type, VoiceOver labels) + TipKit. Also fixed two latent product bugs found during verification: MCSession teardown blocking the main thread on every reconnect, and a felt-texture change that silently inflated the whole hand screen's layout. Deployed to Justin's iPhone + iPad.
+🟢 On-track - THE OVERNIGHT BUILD LANDED: seven new games in one night (Cribbage with a photoreal pegboard and combinatorially exact scoring incl. the 29-hand test; Solitaire dealt onto the felt; Yahtzee/Zilch/Shut the Box on a generalized dice platform with pip dice and tap-to-hold; Dots & Boxes as real pencil on paper; Quarto in turned wood matching Justin's reference). Engine suite grew 375 -> 3,489 checks, all green. New category-shelf home screen (Cards / Dice / Board & Paper). All games bot-capable except Solitaire; all launch paths live-verified by screenshot. UNO reverse glyph redrawn against Justin's reference image. Deployed to both devices. Earlier: Wave 5 (motion + feel) shipped on top of waves 3-4: the hand-fan clipping regression root-caused (a SwiftUI mask silently clips - cards "slid under the felt") and fixed with a permanent mid-gesture screenshot harness; the UNO throw is finally ONE fluid arc (single animated progress scalar drives position/height/rotation/shadow - desync now structurally impossible, proven frame-by-frame from sim video); wild cards glow in their called color (chip removed); coins flick-glide with felt friction and rail bounce; free play got the full cup ceremony; LCR cup-loading perf fixed (throttled hit-tests, motion-gated shadow tracking); and the phone cup went PHOTOREAL - generated photographic interiors with live 3D dice composited over them, replacing the procedural render Justin rejected, plus the deep look-in rebuilt at honest real-cup proportions. Deployed to iPhone (iPad pending unlock). Earlier same day, waves 3-4: manual draw-2/4 penalties, hand-fan geometry finally right at every count (root-caused twice, verified by screenshot at 2/3/7 cards), real rail hands bleeding off the screen edge, photoreal AI-generated table cup + felt/leather textures, real-dice cup loading (drag the actual settled dice into the cup), velocity-layered dice audio, wild-color glow, accessibility floor (Reduce Motion, Dynamic Type, VoiceOver labels) + TipKit. Also fixed two latent product bugs found during verification: MCSession teardown blocking the main thread on every reconnect, and a felt-texture change that silently inflated the whole hand screen's layout. Deployed to Justin's iPhone + iPad.
 
 ## Waiting on Me
 
-- [ ] **Field-test wave 5** (hand swipe-to-play fixed, one-motion UNO throw, colored wild glow, coin flicking, free-play dice cup, photoreal phone cup + Deep cup concept, dice loading mirrored on the remote) (~15 min)
-      - unblocks: confirmation on real hardware; dice shadows + cup lighting can ONLY be judged on device (simulator can't render SceneKit shadows)
-- [ ] **Unlock the iPad** so the wave-5 build can install (background retry is running) (~1 min)
-      - unblocks: both devices on the same build
+- [ ] **Play the seven new games** (Cribbage, Solitaire, Yahtzee, Zilch, Shut the Box, Dots & Boxes, Quarto) (~45 min of fun)
+      - unblocks: the next fix wave; player-count ranges for Yahtzee (1-6) / Zilch / Shut the Box (2-6) were my judgment calls - veto freely
+- [ ] **Field-test wave 5 leftovers** (one-motion UNO throw, coin flicking, photoreal phone cup on real hardware) (~10 min)
+      - unblocks: closing the motion/feel wave for good
 - [ ] **Pick a name from `_review/name-candidates.md`** (top pick: Suited) (~10 min)
       - unblocks: icon/bundle ID off placeholder
 - [ ] **500 house rules (kitty, misere, partnerships)** (~15 min)
@@ -36,13 +36,13 @@ Active Development (feature-rich beta-adjacent: five card games + LCR dice, comp
 
 ## Next Up
 
-1. Field-test wave 5 fixes from Justin's next report.
+1. Justin's field report on the seven new games; fix wave follows.
 2. Family playtest night, then Farkle or Liar's Dice on the dice platform.
 3. Polish leftovers: dice color-grade against the photo interiors (a touch bright/flat), on-device shadow + cup lighting pass, cross-section concept's photoreal treatment (look-ins done), demo-mode deal-in ghost frame.
 
 ## Ideas Shelf
 
-- **Liar's Dice** (M) - every phone hides dice under its own cup; bluffing + kids = chaos; platform seams already built
+- **Liar's Dice** (M) - every phone hides dice under its own cup; bluffing + kids = chaos; the generalized dice platform makes this mostly UI now
 - **Scorepad-only mode** (M) - Wizard Keeper's scorekeeping folded in for physical-card nights
 - **Family deck** (S) - kids' drawings or photos as court cards via one Gemini batch
 - **"Last trick" peek** (S) - review who threw what; settles arguments

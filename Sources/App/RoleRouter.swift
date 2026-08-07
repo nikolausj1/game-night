@@ -35,6 +35,23 @@ struct RoleRouter: View {
         // standalone (see DiceCupPreviewHarness).
         if CommandLine.arguments.contains("-autoCupPreview") {
             DiceCupPreviewHarness()
+        } else if SolitaireDemo.wantsDemo {
+            // Sim-verify hook: -demoSolitaire drops straight into a
+            // scripted mid-game Solitaire table, bypassing the role
+            // picker/lobby entirely — Solitaire is a local, table-less
+            // game (see SolitaireDemo's own doc comment), so there's no
+            // host session to route through. `onClose` is a no-op: this
+            // harness has nowhere to return to, same as
+            // DiceCupPreviewHarness above.
+            SolitaireView(onClose: {})
+        } else if DotsAndBoxesDemoData.wantsDemo {
+            // Sim-verify hook: -demoDotsAndBoxes, same shape as
+            // -demoSolitaire above (see DotsAndBoxesDemoData's doc comment).
+            DotsAndBoxesView(onClose: {})
+        } else if QuartoDemo.wantsQuartoDemo {
+            // Sim-verify hook: -demoQuarto, same shape as -demoSolitaire
+            // above (see QuartoDemo's doc comment).
+            QuartoView(onClose: {})
         } else {
             roleSwitch
         }

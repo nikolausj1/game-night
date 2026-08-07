@@ -1,18 +1,28 @@
 import SwiftUI
 
 /// Live phones fill human seats automatically (`host.lobbyPlayers`); the
-/// +/- controls add or remove bot seats, filled from `BotRoster`, up to the
-/// selected game's player limits. Bot names are editable via tap.
+/// +/- controls add or remove bot seats, filled from `BotRoster`, up to
+/// `maxPlayers`. Bot names are editable via tap.
+///
+/// Takes `minPlayers`/`maxPlayers` directly rather than a `GameKind` so one
+/// builder serves every launch path the menu has — card games pass
+/// `kind.minPlayers...kind.maxPlayers`, dice games their own per-kind
+/// range, and Cribbage `2...2` (its engine is fixed 2-player, so the same
+/// +/- stepper that fills out any other game's seats also enforces
+/// Cribbage's exact seat count for free: `canAddBot` refuses a 3rd seat,
+/// and the empty-seat placeholder shows whichever of the 2 isn't filled
+/// yet).
 struct SeatsBuilderView: View {
     @Bindable var host: GameHostController
-    let game: GameKind
+    let minPlayers: Int
+    let maxPlayers: Int
     @Binding var botDrafts: [BotSeatDraft]
 
     @State private var editingBotID: BotSeatDraft.ID?
     @State private var editingName = ""
 
     private var totalSeats: Int { host.lobbyPlayers.count + botDrafts.count }
-    private var canAddBot: Bool { totalSeats < game.maxPlayers }
+    private var canAddBot: Bool { totalSeats < maxPlayers }
     private var canRemoveBot: Bool { !botDrafts.isEmpty }
 
     var body: some View {
@@ -39,7 +49,7 @@ struct SeatsBuilderView: View {
                     )
                     .transition(.scale.combined(with: .opacity))
                 }
-                ForEach(0..<max(0, game.minPlayers - totalSeats), id: \.self) { _ in
+                ForEach(0..<max(0, minPlayers - totalSeats), id: \.self) { _ in
                     EmptySeatChip()
                 }
             }

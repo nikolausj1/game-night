@@ -140,49 +140,6 @@ struct SolitaireRulesSheet: View {
 // MARK: - Win celebration
 
 /// The trophy moment's aftermath — a tasteful felt glow, not confetti. A
-/// soft gold radial pulse behind a serif banner; the cards themselves do
-/// the real celebrating (the autocomplete cascade that leads here).
-struct SolitaireWinCelebration: View {
-    @State private var shown = false
-    @State private var glowPulse = false
-    @Environment(\.accessibilityReduceMotion) private var motionReduced
-
-    var body: some View {
-        ZStack {
-            RadialGradient(colors: [CardStyle.gold.opacity(glowPulse ? 0.30 : 0.14), .clear],
-                          center: .center, startRadius: 20, endRadius: 420)
-                .allowsHitTesting(false)
-            VStack(spacing: 10) {
-                Text("You Win!")
-                    .font(.system(.largeTitle, design: .serif).weight(.bold))
-                    .foregroundStyle(CardStyle.stockTop)
-                Text("Every card home.")
-                    .font(.system(.title3, design: .serif).italic())
-                    .foregroundStyle(CardStyle.gold)
-            }
-            .padding(.horizontal, 44)
-            .padding(.vertical, 26)
-            .background(
-                Capsule().fill(.black.opacity(0.55))
-                    .overlay(Capsule().strokeBorder(CardStyle.gold.opacity(0.5), lineWidth: 1.5))
-                    .shadow(color: .black.opacity(0.4), radius: 16, y: 8)
-            )
-            .scaleEffect(shown ? 1 : 0.7)
-            .opacity(shown ? 1 : 0)
-        }
-        .onAppear {
-            if motionReduced {
-                shown = true
-            } else {
-                withAnimation(.spring(response: 0.5, dampingFraction: 0.62)) { shown = true }
-                withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) { glowPulse = true }
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("You win. Every card is home.")
-    }
-}
-
 // MARK: - Auto-finish prompt
 
 /// Appears once the board is provably safe to autoplay (see

@@ -83,6 +83,13 @@ final class DiceLauncher {
         game?.end()
         game = nil
     }
+
+    /// Resume (see `DiceSave`): mount a controller rebuilt from its save.
+    /// No-op while a dice game is already live.
+    func adopt(_ restored: ActiveDiceGame) {
+        guard game == nil else { return }
+        game = restored
+    }
 }
 
 /// Left-Right-Center, table-side. Owns all rules state (chips, pot, turn),
@@ -176,6 +183,7 @@ final class DiceGameController {
     /// Bumps whenever a pending-transfer phase starts or ends, so a stale
     /// watchdog can tell its phase is over.
     private var pendingGeneration = 0
+    private let autosave = SaveDebouncer()
 
     init(host: GameHostController, seats specs: [SeatSpec]) {
         self.host = host
@@ -207,6 +215,7 @@ final class DiceGameController {
         }
         seats = built
         chips = Array(repeating: 3, count: built.count)
+        SaveSlots.clear(kind: .dice(.lcr)) // an explicit new game supersedes any parked one
 
         host.diceSeatByDevice = deviceMap
         host.onDicePour = { [weak self] seat, intensity in
@@ -222,6 +231,56 @@ final class DiceGameController {
         Announcer.shared.announceGameStart(playerNames: built.map(\.name))
         broadcast()
         scheduleBotIfNeeded()
+    }
+
+    /// Resume (see `DiceSave`): chips, pot and turn exactly as parked; the
+    /// host's dice routing is re-registered from the seats' durable
+    /// deviceIDs so returning phones land straight back in their cups.
+    init?(host: GameHostController, restoring saved: LcrSaveState) {
+        guard !saved.seats.isEmpty, saved.chips.count == saved.seats.count,
+              saved.seats.indices.contains(saved.turnSeat) else { return nil }
+        self.host = host
+        rng = SplitMix64(seed: UInt64.random(in: .min ... .max))
+        seats = saved.seats.map {
+            DiceSeat(id: $0.id, name: $0.name, isBot: $0.isBot, deviceID: $0.deviceID, colorIndex: $0.colorIndex)
+        }
+        chips = saved.chips.map { max(0, $0) }
+        centerPot = max(0, saved.centerPot)
+        turnSeat = saved.turnSeat
+        var deviceMap: [String: Int] = [:]
+        for seat in seats {
+            if let deviceID = seat.deviceID { deviceMap[deviceID] = seat.id }
+        }
+        host.diceSeatByDevice = deviceMap
+        host.onDicePour = { [weak self] seat, intensity in
+            self?.roll(from: seat, intensity: intensity)
+        }
+        host.onDiceHello = { [weak self] deviceID in
+            self?.resendState(toDevice: deviceID)
+        }
+        broadcast()
+        scheduleBotIfNeeded()
+    }
+
+    // MARK: - Save (see Sources/App/Save/DiceSave.swift)
+
+    /// Writes the game between rolls, 2s after the last change; a finished
+    /// game clears its slot. Skipped while dice are in the air or chips are
+    /// still being passed — the slot always holds the last settled moment.
+    private func persist() {
+        if gameOver {
+            SaveSlots.clear(kind: .dice(.lcr))
+            return
+        }
+        guard !rollInFlight, pendingTransfers.isEmpty, seats.indices.contains(turnSeat) else { return }
+        let savedSeats = seats.map {
+            DiceSavedSeat(id: $0.id, name: $0.name, isBot: $0.isBot, deviceID: $0.deviceID, colorIndex: $0.colorIndex)
+        }
+        let saved = LcrSaveState(seats: savedSeats, chips: chips, centerPot: centerPot, turnSeat: turnSeat)
+        let subtitle = DiceSave.leaderSubtitle(prefix: "\(seats[turnSeat].name) rolling · pot \(centerPot)",
+                                               standings: seats.map { ($0.name, chips[$0.id]) })
+        SaveSlots.write(kind: .dice(.lcr), title: "L·R·C", subtitle: subtitle,
+                        seats: DiceSave.envelopeSeats(savedSeats), payload: saved)
     }
 
     // MARK: - Rolling
@@ -495,6 +554,7 @@ final class DiceGameController {
             guard let deviceID = seat.deviceID else { continue }
             host.sendDiceState(state(for: seat.id), toDevice: deviceID)
         }
+        autosave.schedule { [weak self] in self?.persist() }
     }
 
     /// One seat's personalized view of the game, as of right now.
@@ -519,6 +579,9 @@ final class DiceGameController {
     /// GameClientController clears diceState, phone returns to the lobby),
     /// and the host's dice routing is unhooked.
     func end() {
+        // Park it now (the debounced write may not have landed yet).
+        autosave.cancel()
+        persist()
         let sentinel = DiceClientState(
             kind: kind, mySeat: -1, seatNames: [], chips: [], centerPot: 0,
             turnSeat: -1, isMyTurn: false, gameOver: true, winnerSeat: nil)

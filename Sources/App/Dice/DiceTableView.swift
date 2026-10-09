@@ -197,7 +197,11 @@ struct DiceTableView: View {
     /// which hit-tests the REAL dice already resting on the felt.
     @ViewBuilder
     private func cupLayer(size: CGSize) -> some View {
-        if let seat = activeCupSeat {
+        // Keep drawing the roller's cup while a pour is in flight: the
+        // loading cup (`activeCupSeat`) goes nil the instant `rollInFlight`
+        // is set, which is exactly when `TablePourState` wants to tip it.
+        if let seat = activeCupSeat ?? TablePourState.shared.seat,
+           controller.seats.indices.contains(seat) {
             let anchors = TableGeometry.seatAnchors(count: controller.seats.count)
             let edge = railEdge(for: anchors[seat])
             let cup = cupCenter(seatAnchor: anchors[seat], size: size)
@@ -205,6 +209,7 @@ struct DiceTableView: View {
 
             TableCupView(edge: edge, loadedCount: controller.loadedDiceCount,
                         requiredCount: required)
+                .tablePourTilt(seat: seat, edge: edge)
                 .position(cup)
         }
     }

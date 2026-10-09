@@ -419,45 +419,24 @@ struct GoFishTableContent: View {
         let best = counts.values.max() ?? 0
         let title: String
         if winners.count > 1 {
-            title = "\(KidsRank.joined(winners.map { game.name($0) })) tie with \(best) books!"
+            title = "It's a tie!"
         } else if let w = winners.first {
-            title = "\(game.name(w)) wins with \(best) books!"
+            title = "\(game.name(w)) wins!"
         } else {
             title = "Good game!"
         }
         let order = (0..<state.playerCount).sorted { (counts[$0] ?? 0) > (counts[$1] ?? 0) }
-        return ScorecardPanel(title: title) {
-            ForEach(order, id: \.self) { seat in
-                HStack {
-                    Circle().fill(PlayerPalette.color(seat)).frame(width: 12, height: 12)
-                    Text(game.name(seat)).font(.system(.title3, design: .serif))
-                    Spacer()
-                    Text((counts[seat] ?? 0) == 1 ? "1 book" : "\(counts[seat] ?? 0) books")
-                        .font(.title3.weight(.bold).monospacedDigit())
-                }
-                .foregroundStyle(winners.contains(seat) ? CardStyle.gold : CardStyle.stockTop)
-            }
-        } action: {
-            HStack(spacing: 14) {
-                if let onPlayAgain {
-                    Button(action: onPlayAgain) {
-                        Text("Play again")
-                            .font(.title3.weight(.bold))
-                            .padding(.horizontal, 30).padding(.vertical, 12)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(CardStyle.gold)
-                    .foregroundStyle(CardStyle.ink)
-                }
-                Button { onClose?() } label: {
-                    Text("Back to menu")
-                        .font(.title3.weight(.semibold))
-                        .padding(.horizontal, 22).padding(.vertical, 12)
-                }
-                .buttonStyle(.bordered)
-                .tint(CardStyle.stockTop)
-            }
+        let rows = order.map { seat in
+            let n = counts[seat] ?? 0
+            return RecapRow(id: seat, name: game.name(seat), colorIndex: seat,
+                            score: n == 1 ? "1 book" : "\(n) books", isWinner: winners.contains(seat))
         }
+        let highlight = winners.count > 1
+            ? "\(KidsRank.joined(winners.map { game.name($0) })) both made \(best) books!"
+            : "\(best) book\(best == 1 ? "" : "s")!"
+        return GameRecapCard(title: title, rows: rows, highlight: highlight, kidMode: true,
+                             rematchLabel: onPlayAgain == nil ? nil : "Rematch",
+                             onRematch: onPlayAgain, onDone: { onClose?() })
     }
 }
 

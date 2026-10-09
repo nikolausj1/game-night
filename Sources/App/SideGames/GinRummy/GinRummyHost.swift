@@ -38,6 +38,14 @@ struct GinRummyPhoneState: Codable, Equatable {
     }
 }
 
+/// What a parked Gin Rummy game writes to disk: the engine state plus the
+/// score pad (the engine only keeps the LAST hand's result; the pad is the
+/// host's running record).
+struct GinRummySave: Codable, Equatable {
+    var state: GinRummyState
+    var scoreRows: [GinScoreRow]
+}
+
 /// One line of the paper score pad (one finished hand).
 struct GinScoreRow: Codable, Equatable, Identifiable {
     var id: Int { handNumber }
@@ -129,6 +137,43 @@ final class GinRummyHost: SideGameHost {
         }
         // First beat: a bot non-dealer may need to act at once.
         DispatchQueue.main.async { [weak self] in self?.schedule() }
+    }
+
+    /// Resume: the engine picks up mid-hand, the pad keeps its rows, bots
+    /// keep their temperaments.
+    init(restoring save: GinRummySave, botSeats: Set<Int>, names: [Int: String], pacing: Pacing = .live) {
+        self.engine = GinRummyEngine(restoring: save.state)
+        self.botSeats = botSeats
+        self.seatNames = names
+        self.pacing = pacing
+        self.rng = SeededGenerator(seed: save.state.seed ^ 0x61_6E_52_75_6D_6D_79 ^ UInt64(save.state.handNumber &+ 1))
+        self.scoreRows = save.scoreRows
+        for seat in botSeats {
+            personalities[seat] = GinBotMood.personality(name: names[seat] ?? "", seat: seat)
+        }
+        DispatchQueue.main.async { [weak self] in self?.schedule() }
+    }
+
+    /// `SideGameRegistry` restore.
+    convenience init?(restoring data: Data, seats specs: [SeatSpec]) {
+        guard let save = try? JSONDecoder().decode(GinRummySave.self, from: data),
+              save.state.phase != .gameOver else { return nil }
+        var names: [Int: String] = [:]
+        for spec in specs where !spec.name.isEmpty { names[spec.id] = spec.name }
+        self.init(restoring: save, botSeats: Set(specs.filter(\.isBot).map(\.id)), names: names)
+    }
+
+    func snapshot() -> Data? {
+        guard engine.state.phase != .gameOver else { return nil }
+        return try? JSONEncoder().encode(GinRummySave(state: engine.state, scoreRows: scoreRows))
+    }
+
+    var resumeSubtitle: String {
+        let s = engine.state
+        let a = s.scores[0] ?? 0, b = s.scores[1] ?? 0
+        let hand = max(1, s.handNumber)
+        if a == b { return "Hand \(hand) · tied at \(a)" }
+        return a > b ? "Hand \(hand) · \(name(0)) leads \(a)-\(b)" : "Hand \(hand) · \(name(1)) leads \(b)-\(a)"
     }
 
     /// The shape `GameHostController.startSideGame` hands a factory.

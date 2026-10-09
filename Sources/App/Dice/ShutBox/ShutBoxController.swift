@@ -100,6 +100,7 @@ final class ShutBoxController {
     private let host: GameHostController
     private var rng: SplitMix64
     private var rollCounter = 0
+    private let autosave = SaveDebouncer()
 
     init(host: GameHostController, seats specs: [SeatSpec], roundsToWin: Int = 1) {
         self.host = host
@@ -132,6 +133,7 @@ final class ShutBoxController {
         seats = built
         roundScores = Array(repeating: nil, count: built.count)
         roundsWon = Array(repeating: 0, count: built.count)
+        SaveSlots.clear(kind: .dice(.shutTheBox)) // an explicit new game supersedes any parked one
 
         host.diceSeatByDevice = deviceMap
         host.onDicePour = { [weak self] seat, intensity in
@@ -145,6 +147,83 @@ final class ShutBoxController {
         resetBoxForCurrentPlayer()
         broadcast()
         scheduleBotIfNeeded()
+    }
+
+    /// Resume (see `DiceSave`): the box as it stands for the current
+    /// player, the round's scores, the match bookkeeping. A roll that was
+    /// waiting for a tile set isn't kept — the player rolls again from
+    /// the same tiles (see `ShutBoxSaveState`).
+    init?(host: GameHostController, restoring saved: ShutBoxSaveState) {
+        guard !saved.seats.isEmpty, saved.standing.count == 9,
+              saved.roundScores.count == saved.seats.count, saved.roundsWon.count == saved.seats.count,
+              saved.seats.indices.contains(saved.turnSeat) else { return nil }
+        self.host = host
+        self.roundsToWin = max(1, saved.roundsToWin)
+        rng = SplitMix64(seed: UInt64.random(in: .min ... .max))
+        seats = saved.seats.map {
+            ShutBoxSeat(id: $0.id, name: $0.name, isBot: $0.isBot, deviceID: $0.deviceID, colorIndex: $0.colorIndex)
+        }
+        standing = saved.standing
+        turnSeat = saved.turnSeat
+        roundIndex = saved.roundIndex
+        roundsWon = saved.roundsWon
+        roundScores = saved.roundScores
+        usingOneDie = saved.usingOneDie
+        oneDieAvailable = saved.oneDieAvailable
+        shutTheBoxSeat = saved.shutTheBoxSeat
+        let name = seats[turnSeat].name
+        statusLine = standing.allSatisfy { $0 } ? "\(name)'s box — roll to begin" : "\(name), roll again"
+        wireHost()
+        broadcast()
+        scheduleBotIfNeeded()
+    }
+
+    /// Host dice routing from the seats' durable deviceIDs — what the fresh
+    /// init builds inline; resume rebuilds it from the saved seats.
+    private func wireHost() {
+        var deviceMap: [String: Int] = [:]
+        for seat in seats {
+            if let deviceID = seat.deviceID { deviceMap[deviceID] = seat.id }
+        }
+        host.diceSeatByDevice = deviceMap
+        host.onDicePour = { [weak self] seat, intensity in
+            self?.roll(from: seat, intensity: intensity)
+        }
+        host.onDiceHello = { [weak self] deviceID in
+            self?.resendState(toDevice: deviceID)
+        }
+    }
+
+    // MARK: - Save (see Sources/App/Save/DiceSave.swift)
+
+    /// Writes the game between rolls, 2s after the last change; a finished
+    /// game clears its slot. Skipped while dice are in the air, while a
+    /// roll waits for its tile set, and during the bust beat.
+    private func persist() {
+        if gameOver {
+            SaveSlots.clear(kind: .dice(.shutTheBox))
+            return
+        }
+        guard !rollInFlight, lastDice.isEmpty, lastBustedSeat == nil, seats.indices.contains(turnSeat) else { return }
+        let saved = ShutBoxSaveState(seats: savedSeats, standing: standing, turnSeat: turnSeat,
+                                     roundIndex: roundIndex, roundsToWin: roundsToWin, roundsWon: roundsWon,
+                                     roundScores: roundScores, usingOneDie: usingOneDie,
+                                     oneDieAvailable: oneDieAvailable, shutTheBoxSeat: shutTheBoxSeat)
+        let up = standing.filter { $0 }.count
+        var subtitle = "\(seats[turnSeat].name)'s box · \(up) tile\(up == 1 ? "" : "s") up"
+        let played = seats.indices.compactMap { seat -> (name: String, score: Int)? in
+            guard let score = roundScores[seat] else { return nil }
+            return (seats[seat].name, score)
+        }
+        if let best = played.min(by: { $0.score < $1.score }) {
+            subtitle += " · \(best.name) to beat with \(best.score)"
+        }
+        SaveSlots.write(kind: .dice(.shutTheBox), title: "Shut the Box", subtitle: subtitle,
+                        seats: DiceSave.envelopeSeats(savedSeats), payload: saved)
+    }
+
+    private var savedSeats: [DiceSavedSeat] {
+        seats.map { DiceSavedSeat(id: $0.id, name: $0.name, isBot: $0.isBot, deviceID: $0.deviceID, colorIndex: $0.colorIndex) }
     }
 
     // MARK: - Rolling
@@ -544,6 +623,7 @@ final class ShutBoxController {
             guard let deviceID = seat.deviceID else { continue }
             host.sendDiceState(state(for: seat.id), toDevice: deviceID)
         }
+        autosave.schedule { [weak self] in self?.persist() }
     }
 
     /// One seat's personalized view of the game, as of right now.
@@ -592,6 +672,9 @@ final class ShutBoxController {
     /// host's dice routing is unhooked — identical contract to
     /// `DiceGameController.end()`.
     func end() {
+        // Park it now (the debounced write may not have landed yet).
+        autosave.cancel()
+        persist()
         let sentinel = DiceClientState(
             kind: .shutTheBox, mySeat: -1, seatNames: [], chips: [], centerPot: 0,
             turnSeat: -1, isMyTurn: false, gameOver: true, winnerSeat: nil)

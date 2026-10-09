@@ -265,6 +265,11 @@ final class GameHostController {
         throwVelocityByCard = [:]
         freePlayLayout = [:]
         faceDownCards = []
+        // Park whatever non-engine game was running (a finished one clears
+        // its own slot) — same "autosave has it" promise the card engine
+        // makes, flushed synchronously so the last 2s aren't lost.
+        CribbageSave.flush(host: self)
+        SideGameSave.flush(host: self)
         // Cribbage and the card engine are mutually exclusive (like dice) —
         // clearing both here, unconditionally, is the defensive half of
         // that rule: whichever one was actually running, this always
@@ -319,11 +324,13 @@ final class GameHostController {
         sideGameBotSeats = bots
         session.broadcast(.tableReset)
         let game = factory(specs, seed)
+        SideGameSave.clear(kind: game.kind) // an explicit new game supersedes any parked one
         game.onChanged = { [weak self] in self?.sideGameEmit() }
         sideGame = game
         for (deviceID, seat) in deviceMap {
             for (peer, device) in deviceByPeer where device == deviceID {
                 session.send(.welcome(seat: seat), to: [peer])
+                Logger(subsystem: "com.levelup.gamenight", category: "Host").info("welcome sent seat=\(seat)")
             }
         }
         stateVersion += 1
@@ -354,6 +361,7 @@ final class GameHostController {
             session.broadcast(.sideGameEvents(events))
         }
         pushSideGameStates()
+        SideGameSave.noteChanged(host: self) // debounced 2s; a finished game clears its slot
     }
 
     private func pushSideGameStates() {
@@ -363,6 +371,103 @@ final class GameHostController {
                   let state = sideGame.state(for: seat) else { continue }
             session.send(.sideGameState(state), to: [peer])
         }
+    }
+
+    // MARK: - Save / resume (ResumeCatalog; see Sources/App/Save)
+
+    /// Who's at the side-game table, with durable deviceIDs, for the save
+    /// envelope — the exact shape `SavedGame.seats` uses for engine games,
+    /// so a resumed side game reclaims phones the same way.
+    var sideGameSavedSeats: [SeatSpecCodable] {
+        var deviceBySeat: [Int: String] = [:]
+        for (deviceID, seat) in sideGameSeatByDevice { deviceBySeat[seat] = deviceID }
+        return sideGameSeatNames.keys.sorted().map { seat in
+            SeatSpecCodable(id: seat, name: sideGameSeatNames[seat] ?? "",
+                            isBot: sideGameBotSeats.contains(seat), deviceID: deviceBySeat[seat])
+        }
+    }
+
+    /// Same, for cribbage's two chairs.
+    var cribbageSavedSeats: [SeatSpecCodable] {
+        var deviceBySeat: [Int: String] = [:]
+        for (deviceID, seat) in cribbageSeatByDevice { deviceBySeat[seat] = deviceID }
+        return [0, 1].map { seat in
+            SeatSpecCodable(id: seat, name: cribbageSeatNames[seat] ?? "Seat \(seat + 1)",
+                            isBot: cribbageBotSeats.contains(seat), deviceID: deviceBySeat[seat])
+        }
+    }
+
+    /// Adopts a side game rebuilt from its save (`SideGameSave.resume`).
+    /// Seats come back by durable deviceID — a phone that was at the table
+    /// when it was parked walks straight back into its chair on its next
+    /// `hello`, exactly like `adoptRestoredGame` for the card engine; bots
+    /// are the game's own; `fresh` is what "Rematch" builds afterwards.
+    func adoptRestoredSideGame(_ game: any SideGameHost, seats: [SeatSpecCodable],
+                               fresh: (([SeatSpec], UInt64) -> any SideGameHost)?) {
+        var deviceMap: [String: Int] = [:]
+        var names: [Int: String] = [:]
+        var bots: Set<Int> = []
+        for seat in seats {
+            names[seat.id] = seat.name
+            if seat.isBot {
+                bots.insert(seat.id)
+            } else if let deviceID = seat.deviceID {
+                deviceMap[deviceID] = seat.id
+            }
+        }
+        sideGame?.end()
+        lastSideGameSeats = seats.map { SeatSpec(id: $0.id, name: $0.name, isBot: $0.isBot) }
+        lastSideGameFactory = fresh
+        sideGameSeatByDevice = deviceMap
+        sideGameSeatNames = names
+        sideGameBotSeats = bots
+        session.broadcast(.tableReset)
+        game.onChanged = { [weak self] in self?.sideGameEmit() }
+        sideGame = game
+        for (deviceID, seat) in deviceMap {
+            for (peer, device) in deviceByPeer where device == deviceID {
+                session.send(.welcome(seat: seat), to: [peer])
+                Logger(subsystem: "com.levelup.gamenight", category: "Host").info("welcome sent seat=\(seat) (resume)")
+            }
+        }
+        stateVersion += 1
+        sideGameEmit()
+    }
+
+    /// Adopts a cribbage game rebuilt from its save (`CribbageSave.resume`):
+    /// the engine picks up mid-hand, seats reclaim by deviceID, and a bot
+    /// that was on the hook gets its pacing timer back.
+    func adoptRestoredCribbage(state: CribbageState, seats: [SeatSpecCodable]) {
+        var deviceMap: [String: Int] = [:]
+        var names: [Int: String] = [:]
+        var bots: Set<Int> = []
+        for seat in seats where seat.id == 0 || seat.id == 1 {
+            names[seat.id] = seat.name
+            if seat.isBot {
+                bots.insert(seat.id)
+            } else if let deviceID = seat.deviceID {
+                deviceMap[deviceID] = seat.id
+            }
+        }
+        lastCribbageSeats = seats.map { SeatSpec(id: $0.id, name: $0.name, isBot: $0.isBot) }
+        cribbageSeatByDevice = deviceMap
+        cribbageSeatNames = names
+        cribbageBotSeats = bots
+        // Fresh bot RNG per resume, derived from the game so a replayed
+        // save still plays like the same bots.
+        cribbageBotRNG = SeededGenerator(seed: state.seed ^ 0x5EED_5EED_5EED_5EED ^ UInt64(max(0, state.handNumber)))
+        cribbageRecentEvents = []
+        session.broadcast(.tableReset)
+        cribbageEngine = CribbageEngine(restoring: state)
+        for (deviceID, seat) in deviceMap {
+            for (peer, device) in deviceByPeer where device == deviceID {
+                session.send(.welcome(seat: seat), to: [peer])
+                Logger(subsystem: "com.levelup.gamenight", category: "Host").info("welcome sent seat=\(seat) (resume)")
+            }
+        }
+        stateVersion += 1
+        pushCribbageSnapshots()
+        scheduleCribbageBotIfNeeded()
     }
 
     // MARK: cribbage lifecycle (driven by the table UI)
@@ -378,6 +483,7 @@ final class GameHostController {
     func startCribbage(seats specs: [SeatSpec], seed: UInt64) {
         guard specs.count == 2 else { return } // CribbageEngine is fixed 2-player
         lastCribbageSeats = specs
+        CribbageSave.clear() // an explicit new game supersedes any parked one
 
         var deviceMap: [String: Int] = [:]
         var names: [Int: String] = [:]
@@ -413,6 +519,7 @@ final class GameHostController {
         for (deviceID, seat) in deviceMap {
             for (peer, device) in deviceByPeer where device == deviceID {
                 session.send(.welcome(seat: seat), to: [peer])
+                Logger(subsystem: "com.levelup.gamenight", category: "Host").info("welcome sent seat=\(seat)")
             }
         }
         stateVersion += 1
@@ -495,6 +602,7 @@ final class GameHostController {
         for (deviceID, seat) in deviceMap {
             for (peer, device) in deviceByPeer where device == deviceID {
                 session.send(.welcome(seat: seat), to: [peer])
+                Logger(subsystem: "com.levelup.gamenight", category: "Host").info("welcome sent seat=\(seat)")
             }
         }
         emit(engine.apply(.startGame(kind, rules, seed: engine.state.seed)))
@@ -554,6 +662,7 @@ final class GameHostController {
                 // Reclaim: same device returns mid-game → same seat, exact hand.
                 engine.setConnected(seat: seat, connected: true)
                 session.send(.welcome(seat: seat), to: [peer])
+                Logger(subsystem: "com.levelup.gamenight", category: "Host").info("welcome sent seat=\(seat)")
                 session.send(.snapshot(engine.state.snapshot(for: seat)), to: [peer])
                 emit([])
                 // Free play keeps `engine` non-nil, so THIS is the reclaim
@@ -564,6 +673,7 @@ final class GameHostController {
                 // Side-game reclaim: same device returns mid-game → same
                 // seat, its current redacted state.
                 session.send(.welcome(seat: seat), to: [peer])
+                Logger(subsystem: "com.levelup.gamenight", category: "Host").info("welcome sent seat=\(seat)")
                 if let state = sideGame.state(for: seat) {
                     session.send(.sideGameState(state), to: [peer])
                 }
@@ -571,12 +681,14 @@ final class GameHostController {
                 // Cribbage reclaim: same device returns mid-hand → same
                 // seat, exact hand — mirrors the card-engine branch above.
                 session.send(.welcome(seat: seat), to: [peer])
+                Logger(subsystem: "com.levelup.gamenight", category: "Host").info("welcome sent seat=\(seat)")
                 session.send(.cribbageSnapshot(cribbageEngine.state.snapshot(for: seat)), to: [peer])
             } else if engine == nil {
                 if !lobbyPlayers.contains(where: { $0.deviceID == deviceID }) {
                     lobbyPlayers.append((deviceID, name))
                 }
                 session.send(.welcome(seat: lobbyPlayers.count - 1), to: [peer])
+                Logger(subsystem: "com.levelup.gamenight", category: "Host").info("welcome sent seat=\(self.lobbyPlayers.count - 1)")
                 // Dice mode runs with engine == nil: hand a returning (or
                 // re-identified) phone its dice seat state immediately.
                 onDiceHello?(deviceID)
@@ -789,7 +901,9 @@ final class GameHostController {
         case .pegging:
             guard let hand = state.hands[expectedSeat], let pegging = state.pegging,
                   let card = CribbageBot.pegPlay(hand: hand, sequence: pegging.sequence.map(\.card),
-                                                 count: pegging.count, rng: &cribbageBotRNG)
+                                                 count: pegging.count, rng: &cribbageBotRNG,
+                                                 seen: pegging.sequence.map(\.card) + (state.starter.map { [$0] } ?? []),
+                                                 opponentCards: state.hands[1 - expectedSeat]?.count)
             else { return }
             cribbageEmit(cribbageEngine.apply(.playCard(cardID: card.id), from: expectedSeat))
         case .handComplete, .gameOver:

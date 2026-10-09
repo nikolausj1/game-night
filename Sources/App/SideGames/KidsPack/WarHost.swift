@@ -98,6 +98,44 @@ final class WarHost: SideGameHost {
         scheduleAutoIfNeeded()
     }
 
+    /// Resume: both piles exactly as they were; the felt is free at once.
+    init(restoring state: WarState, seats: [SeatSpec]) {
+        engine = WarEngine(restoring: state)
+        var names: [Int: String] = [0: "Player 1", 1: "Player 2"]
+        var bots = Set<Int>()
+        for (index, spec) in seats.prefix(2).enumerated() {
+            names[index] = spec.name.isEmpty ? "Player \(index + 1)" : spec.name
+            if spec.isBot { bots.insert(index) }
+        }
+        seatNames = names
+        botSeats = bots
+        busyUntil = Date()
+        scheduleAutoIfNeeded()
+    }
+
+    // MARK: save / resume
+
+    convenience init?(restoring data: Data, seats: [SeatSpec]) {
+        guard let state = try? JSONDecoder().decode(WarState.self, from: data),
+              state.phase != .gameOver else { return nil }
+        self.init(restoring: state, seats: seats)
+    }
+
+    func snapshot() -> Data? {
+        guard engine.state.phase != .gameOver else { return nil }
+        return try? JSONEncoder().encode(engine.state)
+    }
+
+    var resumeSubtitle: String {
+        let s = engine.state
+        let counts = engine.counts()
+        let c0 = counts[0] ?? 0, c1 = counts[1] ?? 0
+        let battle = "Battle \(min(s.round + 1, s.maxRounds)) of \(s.maxRounds)"
+        if c0 == c1 { return "\(battle) · \(c0) cards each" }
+        let lead = c0 > c1 ? 0 : 1
+        return "\(battle) · \(name(lead)) has \(max(c0, c1)) cards"
+    }
+
     // MARK: SideGameHost
 
     func handle(action: SideGamePayload, from seat: Int) {

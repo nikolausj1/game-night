@@ -383,39 +383,21 @@ struct OldMaidTableContent: View {
     private var finishedPanel: some View {
         let state = game.engine.state
         let loser = state.loser
-        let queen = loser.flatMap { state.hands[$0]?.first }
-        let title = loser.map { "\(game.name($0)) is the Old Maid" } ?? "Good game!"
-        return ScorecardPanel(title: title) {
-            if let queen {
-                CardView(card: queen, faceUp: true, elevation: 0.2)
-                    .frame(width: 96)
-                    .rotationEffect(.degrees(-3))
-            }
-            Text("It's only the luck of the cards. Everyone else is safe, and nobody minds. Shall we go again?")
-                .font(.system(.body, design: .serif).italic())
-                .foregroundStyle(CardStyle.stockTop.opacity(0.85))
-                .multilineTextAlignment(.center)
-        } action: {
-            HStack(spacing: 14) {
-                if let onPlayAgain {
-                    Button(action: onPlayAgain) {
-                        Text("Play again")
-                            .font(.title3.weight(.bold))
-                            .padding(.horizontal, 30).padding(.vertical, 12)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(CardStyle.gold)
-                    .foregroundStyle(CardStyle.ink)
-                }
-                Button { onClose?() } label: {
-                    Text("Back to menu")
-                        .font(.title3.weight(.semibold))
-                        .padding(.horizontal, 22).padding(.vertical, 12)
-                }
-                .buttonStyle(.bordered)
-                .tint(CardStyle.stockTop)
-            }
+        let title = loser.map { "\(game.name($0)) has the Old Maid" } ?? "Good game!"
+        let first = state.outSeats.first
+        let rows = (0..<state.playerCount).sorted { a, b in
+            // Safe players first, in the order they went out; the Old Maid last.
+            let ia = state.outSeats.firstIndex(of: a) ?? Int.max
+            let ib = state.outSeats.firstIndex(of: b) ?? Int.max
+            return ia < ib
+        }.map { seat in
+            RecapRow(id: seat, name: game.name(seat), colorIndex: seat,
+                     score: seat == loser ? "Old Maid" : "safe", isWinner: seat == first)
         }
+        return GameRecapCard(title: title, rows: rows,
+                             highlight: "Just the luck of the cards. Go again?", kidMode: true,
+                             rematchLabel: onPlayAgain == nil ? nil : "Rematch",
+                             onRematch: onPlayAgain, onDone: { onClose?() })
     }
 }
 

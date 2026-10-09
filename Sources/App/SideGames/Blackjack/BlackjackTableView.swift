@@ -434,29 +434,18 @@ struct BlackjackTableStage: View {
     // MARK: end of session
 
     private var sessionOverPanel: some View {
-        ScorecardPanel(title: "The table is cleaned out") {
-            ForEach(Array(d.seats.enumerated()), id: \.offset) { seat, s in
-                HStack {
-                    Circle().fill(PlayerPalette.color(seat)).frame(width: 12, height: 12)
-                    Text(bj.name(of: seat)).font(.system(.title3, design: .serif))
-                    Spacer()
-                    Text("\(s.chips)").font(.title3.weight(.bold).monospacedDigit())
-                }
-                .foregroundStyle(CardStyle.stockTop)
-            }
-        } action: {
-            HStack(spacing: 14) {
-                Button { onPlayAgain() } label: {
-                    Text("Play again").font(.title3.weight(.bold)).padding(.horizontal, 30).padding(.vertical, 12)
-                }
-                .buttonStyle(.borderedProminent).tint(CardStyle.gold).foregroundStyle(CardStyle.ink)
-                Button { onClose() } label: {
-                    Text("Back to menu").font(.title3.weight(.semibold)).padding(.horizontal, 22).padding(.vertical, 12)
-                }
-                .buttonStyle(.bordered).tint(CardStyle.stockTop)
-            }
+        let ranked = d.seats.enumerated().sorted { $0.element.chips > $1.element.chips }
+        let topChips = ranked.first?.element.chips ?? 0
+        let rows = ranked.map { seat, s in
+            RecapRow(id: seat, name: bj.name(of: seat), colorIndex: seat,
+                     score: "\(s.chips)", detail: s.chips == 1 ? "chip" : "chips",
+                     isWinner: topChips > 0 && s.chips == topChips)
         }
-        .zIndex(28)
+        let rounds = bj.engine.state.roundNumber
+        let highlight = "\(rounds) round\(rounds == 1 ? "" : "s") dealt and the house holds the chips"
+        return GameRecapCard(title: "The table is cleaned out", rows: rows, highlight: highlight,
+                             rematchLabel: "Buy back in", onRematch: { onPlayAgain() }, onDone: { onClose() })
+            .zIndex(28)
     }
 }
 

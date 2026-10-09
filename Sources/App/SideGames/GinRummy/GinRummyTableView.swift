@@ -550,55 +550,20 @@ struct GinRummyTableContent: View {
 
     private func gameOverPanel(_ game: GinGameResult) -> some View {
         let winner = game.winnerSeat
-        func line(_ label: String, _ a: String, _ b: String, bold: Bool = false) -> some View {
-            HStack {
-                Text(label).frame(maxWidth: .infinity, alignment: .leading)
-                Text(a).frame(width: 90, alignment: .trailing)
-                Text(b).frame(width: 90, alignment: .trailing)
-            }
-            .font(.system(bold ? .title3 : .body, design: .serif).weight(bold ? .bold : .regular))
-            .monospacedDigit()
-            .foregroundStyle(bold ? CardStyle.gold : CardStyle.stockTop.opacity(0.9))
+        let loser = 1 - winner
+        let rows = [winner, loser].map { seat in
+            RecapRow(id: seat, name: feed.name(seat),
+                     colorIndex: GinSeat.colorIndex(name: feed.name(seat), seat: seat),
+                     score: "\(game.finalTotals[seat] ?? 0)",
+                     detail: "\(game.handScores[seat] ?? 0) hand points · \(game.handsWon[seat] ?? 0) hands won · box +\(game.boxBonus[seat] ?? 0)",
+                     isWinner: seat == winner)
         }
-        return ScorecardPanel(title: "\(feed.name(winner)) wins the game!") {
-            VStack(spacing: 10) {
-                HStack {
-                    Spacer()
-                    Text(feed.name(0)).frame(width: 90, alignment: .trailing)
-                    Text(feed.name(1)).frame(width: 90, alignment: .trailing)
-                }
-                .font(.system(.subheadline, design: .serif).weight(.bold))
-                .foregroundStyle(CardStyle.gold.opacity(0.85))
-                line("Hand points", "\(game.handScores[0] ?? 0)", "\(game.handScores[1] ?? 0)")
-                line(game.shutout ? "Game bonus (shutout, doubled)" : "Game bonus",
-                     winner == 0 ? "+\(game.gameBonus)" : "", winner == 1 ? "+\(game.gameBonus)" : "")
-                line("Box bonus (25 a hand won)", "+\(game.boxBonus[0] ?? 0)", "+\(game.boxBonus[1] ?? 0)")
-                Rectangle().fill(CardStyle.gold.opacity(0.4)).frame(height: 1)
-                line("Final", "\(game.finalTotals[0] ?? 0)", "\(game.finalTotals[1] ?? 0)", bold: true)
-            }
-        } action: {
-            HStack(spacing: 14) {
-                Button {
-                    rematch()
-                } label: {
-                    Text("Rematch")
-                        .font(.title3.weight(.bold))
-                        .padding(.horizontal, 30).padding(.vertical, 12)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(CardStyle.gold)
-                .foregroundStyle(CardStyle.ink)
-                Button {
-                    onClose()
-                } label: {
-                    Text("Back to menu")
-                        .font(.title3.weight(.semibold))
-                        .padding(.horizontal, 22).padding(.vertical, 12)
-                }
-                .buttonStyle(.bordered)
-                .tint(CardStyle.stockTop)
-            }
-        }
+        let hands = max(1, feed.snapshot.handNumber)
+        let highlight = game.shutout
+            ? "A shutout: \(feed.name(loser)) never won a hand, game bonus doubled to \(game.gameBonus)"
+            : "Took \(game.handsWon[winner] ?? 0) of \(hands) hands, game bonus \(game.gameBonus)"
+        return GameRecapCard(title: "\(feed.name(winner)) wins Gin Rummy", rows: rows, highlight: highlight,
+                             onRematch: { rematch() }, onDone: { onClose() })
     }
 
     // MARK: event choreography

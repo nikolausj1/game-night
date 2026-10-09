@@ -47,6 +47,9 @@ struct BattleshipTableContent: View {
     @State private var callouts: [Int: String] = [:]
     @State private var announcement: String?
     @State private var lastSerial: Int
+    /// The recap waits for the surviving fleets to be revealed on the
+    /// charts (see `column`'s appear delays) before it covers them.
+    @State private var recapShown = false
 
     init(snapshot: BattleshipTableSnapshot, names: [Int: String], botSeats: Set<Int> = [],
          log: [BattleshipEventBatch] = [], onRematch: @escaping () -> Void = {}, onClose: @escaping () -> Void = {}) {
@@ -105,6 +108,11 @@ struct BattleshipTableContent: View {
                         .zIndex(5)
                 }
 
+                if recapShown, snapshot.phase == .gameOver {
+                    recapCard
+                        .zIndex(8)
+                }
+
                 GameHUD(title: "Battleship", onExit: onClose, toggles: [])
                     .padding(16)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
@@ -115,6 +123,14 @@ struct BattleshipTableContent: View {
             for batch in log where batch.serial > lastSerial { process(batch) }
             lastSerial = log.last?.serial ?? lastSerial
         }
+        .onChange(of: snapshot.phase) { _, phase in
+            guard phase == .gameOver else { recapShown = false; return }
+            let beat = reduceMotion ? 0.4 : 3.4
+            DispatchQueue.main.asyncAfter(deadline: .now() + beat) {
+                withAnimation(.easeInOut(duration: 0.3)) { recapShown = true }
+            }
+        }
+        .onAppear { if snapshot.phase == .gameOver { recapShown = true } }
         .animation(.spring(response: 0.4, dampingFraction: 0.82), value: snapshot.turnSeat)
     }
 
@@ -276,13 +292,34 @@ struct BattleshipTableContent: View {
                             .font(.system(.footnote, design: .serif).italic())
                             .foregroundStyle(CardStyle.stockTop.opacity(0.8))
                     }
-                    Button("Rematch") { onRematch() }
-                        .buttonStyle(BrassButtonStyle(tone: .gold, large: true))
-                    Button("Back to menu") { onClose() }
-                        .buttonStyle(BrassButtonStyle(tone: .brass))
                 }
             }
         }
+    }
+
+    // MARK: game over
+
+    private var recapCard: some View {
+        let winner = snapshot.winnerSeat ?? 0
+        let loser = 1 - winner
+        let rows = [winner, loser].map { seat -> RecapRow in
+            let shots = snapshot.shotsBy[seat] ?? []
+            let hits = shots.filter { $0.result.isHit }.count
+            let afloat = snapshot.shipsAfloat[seat] ?? 0
+            return RecapRow(id: seat, name: name(seat),
+                            colorIndex: BotRoster.identity(named: name(seat))?.colorIndex ?? seat,
+                            score: "\(hits) of \(shots.count)",
+                            detail: afloat == 0 ? "fleet sunk" : "\(afloat) ship\(afloat == 1 ? "" : "s") afloat · hits of shots",
+                            isWinner: seat == winner)
+        }
+        let winnerShots = snapshot.shotsBy[winner] ?? []
+        var highlight = "Sank the fleet in \(winnerShots.count) shots"
+        if let last = winnerShots.last,
+           let ship = (snapshot.sunk[loser] ?? []).first(where: { $0.cells.contains(last.cell) }) {
+            highlight = "\(name(winner)) sank the \(ship.kind.rawValue) on shot \(winnerShots.count)"
+        }
+        return GameRecapCard(title: "\(name(winner)) wins the battle", rows: rows, highlight: highlight,
+                             onRematch: { onRematch() }, onDone: { onClose() })
     }
 
     private var salvoPips: some View {

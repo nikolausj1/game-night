@@ -79,11 +79,26 @@ final class GameClientController {
 
     // MARK: actions from the hand UI
 
-    func placeBid(_ bid: Int) { sendAction(.placeBid(bid)) }
+    func placeBid(_ bid: Int) {
+        lastAttemptedCardID = nil
+        sendAction(.placeBid(bid))
+    }
 
     /// Hearts: pass exactly three card IDs. Spades: blind nil.
-    func passCards(_ cardIDs: [String]) { sendAction(.passCards(cardIDs)) }
-    func bidBlindNil() { sendAction(.bidBlindNil) }
+    /// Neither is a card play, so a host rejection of one must never be
+    /// pinned on whatever card was last flicked: `lastAttemptedCardID` is
+    /// cleared first so an `illegalAttempt` here lands in `lastRejection`
+    /// only, not the illegal-play banner.
+    func passCards(_ cardIDs: [String]) {
+        lastAttemptedCardID = nil
+        pendingIllegal = nil
+        sendAction(.passCards(cardIDs))
+    }
+
+    func bidBlindNil() {
+        lastAttemptedCardID = nil
+        sendAction(.bidBlindNil)
+    }
 
     func chooseTrump(_ suit: Suit) { sendAction(.chooseTrump(suit)) }
 
@@ -186,8 +201,12 @@ final class GameClientController {
             for event in events {
                 if case .illegalAttempt(let seat, let reason) = event, seat == mySeat {
                     // Reconstruct which card: the host rejected our last try.
+                    // A rejected pass / bid has no card behind it (see
+                    // passCards above) and surfaces as `lastRejection`.
                     if let cardID = lastAttemptedCardID {
                         pendingIllegal = (cardID, reason)
+                    } else {
+                        lastRejection = reason
                     }
                 }
             }

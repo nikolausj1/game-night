@@ -25,8 +25,10 @@ public enum YahtzeeStrategy {
     private static let yahtzeeIndex = 11
 
     /// Long-run average score of each category under strong play.
-    /// Scales `par` (set by measurement; 1.0 = full opportunity cost).
-    static var parScale = 1.0
+    /// Opportunity cost of using a category now, as a fraction of its long-run
+    /// average. 1.0 over-values leaving made combinations open (it would
+    /// re-roll a made small straight); 0.8 measured best over 800 seeded games.
+    static let parScale = 0.8
     static let par: [Double] = [2.11, 5.28, 8.57, 12.16, 15.69, 19.19,
                                 21.66, 13.10, 22.59, 29.46, 32.71, 16.87, 22.01]
 

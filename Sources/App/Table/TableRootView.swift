@@ -91,6 +91,9 @@ struct TableRootView: View {
             if host.state == nil, host.sideGame == nil, host.cribbageEngine == nil {
                 GinRummyLaunch.autoStartIfRequested(host: host) // -autoStartGinRummy
             }
+            if host.state == nil, host.sideGame == nil, host.cribbageEngine == nil {
+                HeartsSpadesLaunch.autoStartIfRequested(host: host) // -autoStartHearts / -autoStartSpades
+            }
             if CommandLine.arguments.contains("-autoStartBattleship"),
                host.state == nil, host.sideGame == nil, host.cribbageEngine == nil {
                 let seats = BotRoster.random(count: 2).enumerated().map {

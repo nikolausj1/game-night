@@ -1,16 +1,19 @@
 import SwiftUI
 
 /// Suspended games, front and center when there are any: a row of cards
-/// above the game picker. Tap to resume; long-press any card to enter wiggle
-/// edit mode (every card gets a corner ⓧ), tap ⓧ to delete immediately — no
+/// above the game shelves, one per `ResumeEntry` in `ResumeCatalog` (engine
+/// games, Cribbage, side games, dice, board games, Solitaire, all in one
+/// list). Tap to resume; long-press any card to enter wiggle edit mode
+/// (every card gets a corner ⓧ), tap ⓧ to delete immediately, no
 /// confirmation, like springboard icon deletion. Tap anywhere else exits
 /// edit mode without resuming.
 struct ResumeStripView: View {
-    let games: [SavedGame]
-    let onResume: (SavedGame) -> Void
-    let onDelete: (SavedGame) -> Void
+    let entries: [ResumeEntry]
+    let onResume: (ResumeEntry) -> Void
+    let onDelete: (ResumeEntry) -> Void
 
     @State private var isEditing = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var deleteBadgeSize: CGFloat = 22
 
     var body: some View {
@@ -19,23 +22,24 @@ struct ResumeStripView: View {
                 .font(.system(.subheadline, design: .serif).weight(.semibold))
                 .foregroundStyle(CardStyle.gold.opacity(0.85))
                 .padding(.leading, 6)
+                .accessibilityAddTraits(.isHeader)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 16) {
-                    ForEach(games) { saved in
-                        ResumeCard(saved: saved, isEditing: isEditing)
+                HStack(alignment: .top, spacing: 16) {
+                    ForEach(entries) { entry in
+                        ResumeCard(entry: entry, isEditing: isEditing, wiggles: !reduceMotion)
                             .onTapGesture {
                                 if isEditing {
                                     exitEditing()
                                 } else {
                                     Haptics.tick()
-                                    onResume(saved)
+                                    onResume(entry)
                                 }
                             }
                             .onLongPressGesture {
                                 guard !isEditing else { return }
                                 Haptics.arm()
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                                withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.6)) {
                                     isEditing = true
                                 }
                             }
@@ -43,7 +47,7 @@ struct ResumeStripView: View {
                                 if isEditing {
                                     Button {
                                         Haptics.tick()
-                                        onDelete(saved)
+                                        onDelete(entry)
                                     } label: {
                                         Image(systemName: "xmark.circle.fill")
                                             .font(.system(size: deleteBadgeSize))
@@ -53,15 +57,15 @@ struct ResumeStripView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .offset(x: -8, y: -8)
-                                    .transition(.scale.combined(with: .opacity))
-                                    .accessibilityLabel("Delete \(saved.label)")
+                                    .transition(reduceMotion ? .opacity : .scale.combined(with: .opacity))
+                                    .accessibilityLabel("Delete saved \(entry.title) game")
                                 }
                             }
                             // Editing: keep the delete badge individually
                             // reachable (children: .contain). Otherwise the
                             // whole card reads as one resume button.
                             .accessibilityElement(children: isEditing ? .contain : .ignore)
-                            .accessibilityLabel(isEditing ? "" : saved.label)
+                            .accessibilityLabel(isEditing ? "" : "\(entry.title), \(entry.subtitle)")
                             .accessibilityHint(isEditing ? "" : "Double-tap to resume")
                             .accessibilityAddTraits(isEditing ? [] : .isButton)
                     }
@@ -70,55 +74,66 @@ struct ResumeStripView: View {
                 .padding(.vertical, 4)
             }
             // Tapping the scroll strip's own background (not a card, not the
-            // ⓧ badge) is "anywhere else" — it exits edit mode.
+            // ⓧ badge) is "anywhere else": it exits edit mode.
             .contentShape(Rectangle())
             .onTapGesture { if isEditing { exitEditing() } }
         }
     }
 
     private func exitEditing() {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+        withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.7)) {
             isEditing = false
         }
     }
 }
 
 private struct ResumeCard: View {
-    let saved: SavedGame
+    let entry: ResumeEntry
     var isEditing: Bool
+    /// False under Reduce Motion: edit mode shows the ⓧ badges without
+    /// the springboard wiggle.
+    var wiggles: Bool
 
     @State private var wiggleUp = false
+    @ScaledMetric(relativeTo: .subheadline) private var width: CGFloat = 168
 
     private var relativeTime: String {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: saved.savedAt, relativeTo: Date())
+        return formatter.localizedString(for: entry.savedAt, relativeTo: Date())
     }
 
-    /// A per-card phase offset (from the save's own id) so a whole row of
-    /// wiggling cards doesn't move in lockstep — reads as loose, alive
+    /// A per-card phase offset (from the entry's own id) so a whole row of
+    /// wiggling cards doesn't move in lockstep: reads as loose, alive
     /// felt-adjacent chaos rather than one rigid block sliding together.
     private var wigglePhaseDelay: Double {
-        Double(abs(saved.id.hashValue) % 5) * 0.03
+        Double(abs(entry.id.hashValue) % 5) * 0.03
     }
 
     var body: some View {
-        VStack(spacing: 8) {
-            // The picker's own card-art mark, not the raw emoji `emblem`
-            // string — a suspended UNO game shouldn't wear a rainbow on its
-            // resume card when the picker itself hasn't since the redesign.
-            GameEmblem(kind: saved.gameKind)
+        VStack(spacing: 6) {
+            // The shelves' own card/dice/board art, picked by save kind,
+            // so a suspended Yahtzee game wears the same pip die its tile
+            // does instead of a generic glyph.
+            ResumeKindEmblem(kind: entry.kind)
                 .frame(height: GameEmblem.height)
-            Text(saved.label)
+            Text(entry.title)
                 .font(.system(.subheadline, design: .serif).weight(.semibold))
                 .foregroundStyle(CardStyle.stockTop)
                 .lineLimit(1)
+                .minimumScaleFactor(0.85)
+            Text(entry.subtitle)
+                .font(.system(.caption, design: .serif).italic())
+                .foregroundStyle(CardStyle.stockTop.opacity(0.75))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
             Text(relativeTime)
-                .font(.caption)
-                .foregroundStyle(CardStyle.stockTop.opacity(0.55))
+                .font(.caption2)
+                .foregroundStyle(CardStyle.stockTop.opacity(0.5))
         }
         .padding(.horizontal, 10)
-        .frame(width: 152, height: 112)
+        .padding(.vertical, 12)
+        .frame(width: width)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(.white.opacity(0.08))
@@ -128,15 +143,15 @@ private struct ResumeCard: View {
                 )
                 .shadow(color: .black.opacity(0.3), radius: 6, y: 3)
         )
-        .rotationEffect(.degrees(isEditing ? (wiggleUp ? 1.6 : -1.6) : 0))
+        .rotationEffect(.degrees(isEditing && wiggles ? (wiggleUp ? 1.6 : -1.6) : 0))
         .animation(
-            isEditing
+            isEditing && wiggles
                 ? .easeInOut(duration: 0.12).repeatForever(autoreverses: true).delay(wigglePhaseDelay)
                 : .easeOut(duration: 0.15),
             value: wiggleUp
         )
         .onChange(of: isEditing) { _, editing in
-            wiggleUp = editing
+            wiggleUp = editing && wiggles
         }
     }
 }

@@ -50,19 +50,60 @@ struct DeckAndTrumpView: View {
 
     /// Where the table lamp sits relative to the pile (see `TableLamp`).
     @State private var lamp = LampSample()
+    @Environment(\.accessibilityReduceMotion) private var motionReduced
+
+    /// Hearts / Spades deal the whole deck out (or sit the rest aside), so
+    /// there is nothing to draw from: the empty pile would only read as a
+    /// ghost deck. The trump / "broken" signage still sits at the deck
+    /// anchor so the felt keeps its landmark.
+    private var hidesDeck: Bool { state.gameKind.isScoreLimitGame && deckCount == 0 }
+
+    /// Spades is always trump with no card turned; Hearts has no trump at
+    /// all. Wizard / Oh Hell show the flipped card (or "No trump" on a
+    /// jester / no-flip round) exactly as before.
+    private var fixedTrumpBadge: String? {
+        guard state.round != nil else { return nil }
+        switch state.gameKind {
+        case .spades: return "♠ trump"
+        case .hearts: return "No trump"
+        case .wizard, .ohHell: return "No trump"
+        case .crazyEights, .uno, .freePlay: return nil
+        }
+    }
+
+    /// Hearts: a heart has been played, so hearts may now be led. Spades:
+    /// same for spades.
+    private var brokenBadge: String? {
+        guard let round = state.round else { return nil }
+        switch state.gameKind {
+        case .hearts: return round.heartsBroken ? "♥ broken" : nil
+        case .spades: return round.spadesBroken ? "♠ broken" : nil
+        default: return nil
+        }
+    }
 
     var body: some View {
         HStack(spacing: 26) {
-            deckStack
+            if !hidesDeck {
+                deckStack
+            }
             if let trump = state.round?.trumpCard {
                 trumpCard(trump)
-            } else if state.round != nil, state.gameKind.isTrickTaking {
-                Text("No trump")
-                    .font(.system(.caption, design: .serif).weight(.semibold))
-                    .foregroundStyle(CardStyle.gold)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(.black.opacity(0.4)))
+            } else if fixedTrumpBadge != nil || brokenBadge != nil {
+                VStack(spacing: 8) {
+                    if let fixedTrumpBadge {
+                        feltBadge(fixedTrumpBadge, tint: CardStyle.gold)
+                            .accessibilityLabel(state.gameKind == .spades ? "Spades are trump" : "No trump")
+                    }
+                    if let brokenBadge {
+                        feltBadge(brokenBadge, tint: state.gameKind == .hearts
+                                  ? Color(red: 0.95, green: 0.45, blue: 0.40) : CardStyle.stockTop)
+                            .transition(motionReduced ? .opacity : .scale(scale: 0.7).combined(with: .opacity))
+                            .accessibilityLabel(state.gameKind == .hearts ? "Hearts have been broken" : "Spades have been broken")
+                    }
+                }
+                .animation(motionReduced ? .easeOut(duration: 0.15) : .spring(response: 0.4, dampingFraction: 0.7),
+                           value: brokenBadge)
             }
         }
         .lampSample($lamp)
@@ -178,6 +219,17 @@ struct DeckAndTrumpView: View {
     private var trumpLabel: String {
         if let suit = state.round?.trumpSuit { return "Trump \(suit.symbol)" }
         return "No trump"
+    }
+
+    /// Small serif capsule in the signage voice (same as the old "No trump"
+    /// label), tinted per use.
+    private func feltBadge(_ text: String, tint: Color) -> some View {
+        Text(text)
+            .font(.system(.caption, design: .serif).weight(.semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(.black.opacity(0.4)))
     }
 
     // MARK: - Trump reveal animation

@@ -12,6 +12,8 @@ import SwiftUI
 /// finished. `onClose` is only ever the "leave Dots & Boxes entirely" exit.
 struct DotsAndBoxesView: View {
     var onClose: () -> Void
+    /// Mount straight into the parked game (`ResumeCatalog`), skipping setup.
+    var resumeSaved = false
 
     @State private var controller: DotsAndBoxesController?
     @State private var showScoreboard = false
@@ -23,6 +25,7 @@ struct DotsAndBoxesView: View {
             } else {
                 DotsAndBoxesSetupView(
                     onStart: { gridSize, players in
+                        LocalGameSave.clear(.board("dotsAndBoxes"))
                         withAnimation(.easeOut(duration: 0.25)) {
                             controller = DotsAndBoxesController(gridSize: gridSize, players: players, seed: .random(in: .min ... .max))
                         }
@@ -39,6 +42,13 @@ struct DotsAndBoxesView: View {
             if controller == nil, DotsAndBoxesDemoData.wantsDemo {
                 controller = DotsAndBoxesDemoData.makeMidGameController()
             }
+            if controller == nil, resumeSaved, let saved = LocalGameSave.loadDotsAndBoxes() {
+                controller = DotsAndBoxesController(engine: DotsAndBoxesEngine(restoring: saved))
+            }
+        }
+        .onChange(of: controller?.state) { _, state in
+            // Autosave 2s after the last line; a full sheet clears it.
+            if let state { LocalGameSave.noteDotsAndBoxes(state) }
         }
     }
 

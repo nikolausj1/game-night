@@ -347,51 +347,23 @@ struct ZilchTableView: View {
     // MARK: - Game over
 
     private var gameOverBanner: some View {
-        VStack(spacing: 14) {
-            if let winner = controller.winnerSeat, controller.seats.indices.contains(winner) {
-                Text(controller.seats[winner].name)
-                    .font(.system(.largeTitle, design: .serif).weight(.bold))
-                    .foregroundStyle(CardStyle.gold)
-                Text("wins with \(controller.bankedScore[winner]) points!")
-                    .font(.system(.title2, design: .serif))
-                    .foregroundStyle(CardStyle.stockTop)
-            }
-            HStack(spacing: 16) {
-                Button {
-                    Haptics.arm()
-                    controller.restart()
-                } label: {
-                    Text("Roll again")
-                        .font(.headline.weight(.bold))
-                        .padding(.horizontal, 28)
-                        .padding(.vertical, 12)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(CardStyle.gold)
-                .foregroundStyle(CardStyle.ink)
-                if let onClose {
-                    Button {
-                        Haptics.tick()
-                        onClose()
-                    } label: {
-                        Text("Back to menu")
-                            .font(.headline)
-                            .padding(.horizontal, 22)
-                            .padding(.vertical, 12)
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(CardStyle.stockTop)
-                }
-            }
+        let winner = controller.winnerSeat
+        let order = controller.seats.indices.sorted { controller.bankedScore[$0] > controller.bankedScore[$1] }
+        let rows = order.map { seat in
+            RecapRow(id: seat, name: controller.seats[seat].name, colorIndex: controller.seats[seat].colorIndex,
+                     score: "\(controller.bankedScore[seat])",
+                     detail: seat == controller.finalChaseSeat ? "crossed \(ZilchPartyRules.targetScore) first" : nil,
+                     isWinner: seat == winner)
         }
-        .padding(36)
-        .background(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(.black.opacity(0.55))
-                .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .strokeBorder(CardStyle.gold.opacity(0.5), lineWidth: 1.5))
-        )
-        .transition(.scale(scale: 0.85).combined(with: .opacity))
+        let title = winner.flatMap { controller.seats[safe: $0]?.name }.map { "\($0) wins Zilch" } ?? "Game over"
+        var highlight = "First past \(ZilchPartyRules.targetScore)"
+        if let w = winner, let chase = controller.finalChaseSeat {
+            highlight = chase == w
+                ? "\(controller.seats[w].name) crossed \(ZilchPartyRules.targetScore) and nobody caught up"
+                : "\(controller.seats[chase].name) hit \(ZilchPartyRules.targetScore) first, but \(controller.seats[w].name) chased past on the last turn"
+        }
+        return GameRecapCard(title: title, rows: rows, highlight: highlight, rematchLabel: "Roll again",
+                             onRematch: { controller.restart() }, onDone: { onClose?() })
     }
 }
 

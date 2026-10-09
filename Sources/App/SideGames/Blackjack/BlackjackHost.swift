@@ -63,6 +63,50 @@ final class BlackjackHost: SideGameHost {
         schedulePump()
     }
 
+    /// Resume: the engine's saved state (shoe, chips, the hand in play),
+    /// the same seats, bots re-personalized from the game's seed.
+    init(restoring state: BlackjackState, seats specs: [SeatSpec], paced: Bool = true) {
+        let sorted = specs.sorted { $0.id < $1.id }
+        let n = state.seats.count
+        let used = Array(sorted.prefix(n))
+        engine = BlackjackEngine(restoring: state)
+        names = (0..<n).map { i in
+            i < used.count && !used[i].name.isEmpty ? used[i].name : "Seat \(i + 1)"
+        }
+        botSeats = Set(used.enumerated().filter { $0.element.isBot }.map(\.offset))
+        self.paced = paced
+        var gen = SeededGenerator(seed: state.seed ^ 0xB1AC_4A3C)
+        for s in botSeats.sorted() {
+            personalities[s] = BlackjackBetPersonality.allCases.randomElement(using: &gen) ?? .steady
+        }
+        rng = SeededGenerator(seed: state.seed ^ 0xB1AC_4A3C ^ UInt64(state.roundNumber &+ 1))
+        schedulePump()
+    }
+
+    // MARK: save / resume
+
+    convenience init?(restoring data: Data, seats: [SeatSpec]) {
+        guard let state = try? JSONDecoder().decode(BlackjackState.self, from: data),
+              state.phase != .sessionOver else { return nil }
+        self.init(restoring: state, seats: seats)
+    }
+
+    /// Blackjack is a session, not a race: chips persist round to round,
+    /// so the save is worth keeping mid-hand too. Gone once every seat is
+    /// cleaned out.
+    func snapshot() -> Data? {
+        guard engine.state.phase != .sessionOver else { return nil }
+        return try? JSONEncoder().encode(engine.state)
+    }
+
+    var resumeSubtitle: String {
+        let s = engine.state
+        let ranked = s.seats.enumerated().map { (name: name(of: $0.offset), chips: $0.element.chips) }
+            .sorted { $0.chips > $1.chips }
+        guard let top = ranked.first else { return "Round \(s.roundNumber)" }
+        return "Round \(max(1, s.roundNumber)) · \(top.name) holds \(top.chips) chips"
+    }
+
     // MARK: SideGameHost
 
     func handle(action payload: SideGamePayload, from seat: Int) {

@@ -5487,6 +5487,613 @@ do {
     check(allOutcomes.contains(.knock), "gin bot games: knocks happen")
 }
 
+// MARK: - BotAI BEGIN (smarter bots: Cribbage, Dots & Boxes, Yahtzee, Zilch, Shut the Box, UNO, Crazy Eights, Wizard/Oh Hell, personalities)
+
+func bxCards(_ ids: [String]) -> [Card] {
+    let all = DeckBuilder.standard52()
+    return ids.map { id in all.first { $0.id == id }! }
+}
+
+// --- Bot personalities -------------------------------------------------
+
+do {
+    let names = ["Hank", "Ruthie", "Marco", "Mae", "Tucker", "Julie"]
+    let expect: [(BotPersonality.Speed, BotPersonality.Aggression, BotPersonality.Chattiness)] = [
+        (.deliberate, .cautious, .quiet), (.snappy, .bold, .chatty), (.steady, .bold, .chatty),
+        (.deliberate, .balanced, .normal), (.snappy, .balanced, .quiet), (.steady, .cautious, .chatty),
+    ]
+    for (i, name) in names.enumerated() {
+        let p = BotPersonality.forName(name)
+        check((p.speed, p.aggression, p.chattiness) == expect[i], "personality table: \(name)")
+        check(BotPersonality.forName(name.lowercased()).speed == p.speed, "personality lookup is case-insensitive: \(name)")
+    }
+    check(BotPersonality.forName("Pat") == BotPersonality.forName("Pat"), "an unknown name always maps to the same personality")
+    check(BotPersonality.forName("Hank").delayScale > BotPersonality.forName("Ruthie").delayScale,
+          "deliberate Hank is slower than snappy Ruthie")
+    check(BotPersonality.forName("Ruthie").pressFactor > BotPersonality.forName("Julie").pressFactor,
+          "bold presses harder than cautious")
+    let r = BotPersonality.forName("Hank").scaledDelay(1.0...2.0)
+    check(abs(r.lowerBound - 1.4) < 1e-9 && abs(r.upperBound - 2.8) < 1e-9, "delay range scales by the speed factor")
+    check(BotPersonality.forName("Ruthie").quartoNodeBudget < BotPersonality.forName("Hank").quartoNodeBudget
+          && BotPersonality.forName("Hank").quartoNodeBudget <= QuartoBot.defaultNodeBudget,
+          "snappy bots search fewer Quarto nodes than deliberate ones, never above the default")
+}
+
+// --- Cribbage ----------------------------------------------------------
+
+func bxDiscardIDs(_ hand: [String], dealer: Bool) -> Set<String> {
+    var rng = SeededGenerator(seed: 1)
+    return Set(CribbageBot.discard(hand: bxCards(hand), isDealer: dealer, rng: &rng).map(\.id))
+}
+check(bxDiscardIDs(["h5", "d5", "c5", "s11", "d2", "s8"], dealer: false) == ["d2", "s8"],
+      "cribbage: 5-5-5-J is kept whole (discard 2 and 8)")
+check(bxDiscardIDs(["h6", "d7", "c8", "s9", "d13", "c2"], dealer: false) == ["d13", "c2"],
+      "cribbage: the 6-7-8-9 run is kept (discard K and 2)")
+check(bxDiscardIDs(["h5", "d5", "s11", "c12", "d2", "s13"], dealer: false).isDisjoint(with: ["h5", "d5"]),
+      "cribbage: a pair of 5s with J-Q is never thrown away")
+do {
+    var rng1 = SeededGenerator(seed: 1), rng2 = SeededGenerator(seed: 999)
+    let hand = bxCards(["h2", "c9", "d12", "s5", "h13", "c7"])
+    check(CribbageBot.discard(hand: hand, isDealer: true, rng: &rng1) == CribbageBot.discard(hand: hand, isDealer: true, rng: &rng2),
+          "cribbage discard is independent of the caller's rng state (no near-tie flips)")
+    let ev = CribbageBot.evaluateDiscards(hand: bxCards(["h5", "d5", "c5", "s11", "d2", "s8"]), isDealer: false)
+    check(ev.count == 15, "cribbage: all 15 splits are evaluated")
+    check(ev.allSatisfy { abs($0.total - ($0.handEV - $0.cribEV)) < 1e-9 }, "cribbage: a non-dealer's score subtracts the crib's expected value")
+    // Dealer vs non-dealer: the dealer throws crib-friendly cards (5s, pairs, runs) more often.
+    var dealerFives = 0, defenderFives = 0
+    var g = SeededGenerator(seed: 606)
+    for _ in 0..<40 {
+        var deck = DeckBuilder.standard52(); deck.shuffle(using: &g)
+        let hand = Array(deck.prefix(6))
+        var r = SeededGenerator(seed: 1)
+        if CribbageBot.discard(hand: hand, isDealer: true, rng: &r).contains(where: { $0.rank == 5 }) { dealerFives += 1 }
+        if CribbageBot.discard(hand: hand, isDealer: false, rng: &r).contains(where: { $0.rank == 5 }) { defenderFives += 1 }
+    }
+    check(dealerFives >= defenderFives, "cribbage: the dealer feeds 5s to the crib at least as often as the non-dealer (\(dealerFives) vs \(defenderFives))")
+}
+do {
+    var rng = SeededGenerator(seed: 5)
+    let make = { (ids: [String]) in bxCards(ids) }
+    check(CribbageBot.pegPlay(hand: make(["h5", "d3"]), sequence: make(["s10"]), count: 10, rng: &rng)?.id == "h5",
+          "pegging: makes fifteen when it can")
+    check(CribbageBot.pegPlay(hand: make(["h7", "c2"]), sequence: make(["s5", "c6"]), count: 11, rng: &rng)?.id == "h7",
+          "pegging: extends a run for three")
+    check(CribbageBot.pegPlay(hand: make(["h5", "c4"]), sequence: [], count: 0, rng: &rng)?.id == "c4",
+          "pegging: never leads a 5 into an empty count")
+    check(CribbageBot.pegPlay(hand: make(["c10", "d4"]), sequence: make(["s10", "h7", "d4"]), count: 21, rng: &rng)?.id == "c10",
+          "pegging: takes the 31")
+    check(CribbageBot.pegPlay(hand: make(["h9"]), sequence: make(["s10", "c9"]), count: 29, rng: &rng) == nil,
+          "pegging: no legal card returns nil")
+    // Setting up the opponent: count 4 with hand {J, 6}: J makes 14, 6 makes 10 - never reach 5 or 21 for a free fifteen/31.
+    let pick = CribbageBot.pegPlay(hand: make(["s11", "h4"]), sequence: [], count: 0, rng: &rng)!
+    check(pick.id == "h4" || pick.id == "s11", "pegging: leads something legal")
+}
+do {
+    // Measured gain: the current bot vs the original heuristics, 50 seeded games
+    // (25 seeds x both seatings so each deal is played from each side).
+    func play(seed: UInt64, newSeat: Int) -> Int? {
+        let engine = CribbageEngine(seed: seed)
+        var rng = SeededGenerator(seed: seed &+ 999)
+        var actions = 0
+        while engine.state.phase != .gameOver, actions < 5000 {
+            switch engine.state.phase {
+            case .discarding:
+                for seat in [0, 1] where !engine.state.discardsSubmitted.contains(seat) {
+                    let hand = engine.state.hands[seat]!
+                    let isD = seat == engine.state.dealerSeat
+                    let d = seat == newSeat ? CribbageBot.discard(hand: hand, isDealer: isD, rng: &rng)
+                                            : CribbageBot.legacyDiscard(hand: hand, isDealer: isD, rng: &rng)
+                    _ = engine.apply(.discardToCrib(cards: d.map(\.id)), from: seat); actions += 1
+                }
+            case .pegging:
+                let p = engine.state.pegging!, seat = p.turnSeat
+                let hand = engine.state.hands[seat]!
+                let seq = p.sequence.map(\.card)
+                let c = seat == newSeat
+                    ? CribbageBot.pegPlay(hand: hand, sequence: seq, count: p.count, rng: &rng,
+                                          seen: [engine.state.starter!], opponentCards: engine.state.hands[1 - seat]?.count)!
+                    : CribbageBot.legacyPegPlay(hand: hand, sequence: seq, count: p.count, rng: &rng)!
+                _ = engine.apply(.playCard(cardID: c.id), from: seat); actions += 1
+            case .handComplete: _ = engine.apply(.advance, from: 0); actions += 1
+            case .gameOver: break
+            }
+        }
+        return engine.state.winnerSeat
+    }
+    var newWins = 0
+    for seed in 1...50 { for newSeat in 0...1 where play(seed: UInt64(seed), newSeat: newSeat) == newSeat { newWins += 1 } }
+    print("Cribbage: new bot beat the original heuristic in \(newWins)/100 seeded games")
+    check(newWins >= 50, "cribbage: the new bot wins at least half of 100 seeded games against the old heuristic (won \(newWins))")
+}
+
+// --- Dots & Boxes ------------------------------------------------------
+
+do {
+    // Double-cross: row 0 is a 4-chain already opened on the left, row 2 is an
+    // untouched 4-chain, every other line is drawn. Taking all four boxes
+    // leaves the bot to open the other chain (4-4); the right play is to take
+    // two, decline the last two with the far-end line, and keep control (6-2).
+    let n = 4
+    var claims: [DotsAndBoxesEdge: Int] = Dictionary(uniqueKeysWithValues: dabAllEdges(gridSize: n).map { ($0, 1) })
+    var owners: [[Int?]] = Array(repeating: Array(repeating: 1, count: n), count: n)
+    for col in 1...4 { claims[DotsAndBoxesEdge(orientation: .vertical, row: 0, col: col)] = nil }
+    for col in 0...4 { claims[DotsAndBoxesEdge(orientation: .vertical, row: 2, col: col)] = nil }
+    for col in 0..<n { owners[0][col] = nil; owners[2][col] = nil }
+    var st = DotsAndBoxesState(gridSize: n, players: makeDABPlayers(2, bots: true), seed: 3)
+    st.claimedBy = claims; st.boxOwner = owners; st.turnIndex = 0
+    for i in 0..<2 { st.players[i].score = 0 }
+    func finish(legacy0: Bool) -> (Int, Int) {
+        let e = DotsAndBoxesEngine(restoring: st)
+        if legacy0 { e.legacyBotSeats = [0] }
+        var g = 0
+        while !e.state.isGameOver, g < 50 { g += 1; _ = e.performBotMove(for: e.state.turnIndex) }
+        return (e.state.players[0].score, e.state.players[1].score)
+    }
+    let (smart0, smart1) = finish(legacy0: false)
+    check(smart0 == 6 && smart1 == 2, "dots&boxes: the bot declines the last two boxes of a chain to keep control (got \(smart0)-\(smart1), want 6-2)")
+    let (old0, old1) = finish(legacy0: true)
+    check(old0 <= old1, "dots&boxes: the old greedy bot, taking everything, loses the endgame it should win (\(old0)-\(old1))")
+    let e = DotsAndBoxesEngine(restoring: st)
+    _ = e.performBotMove(for: 0); _ = e.performBotMove(for: 0)
+    let declining = e.chooseBotEdge(for: 0)
+    check(declining == DotsAndBoxesEdge(orientation: .vertical, row: 0, col: 4),
+          "dots&boxes: with two boxes left in the open chain, the bot plays the far-end line (the double-cross decline)")
+}
+do {
+    // Chain counting: with a 1-chain and a 3-chain left and nothing capturable, the bot opens the 1-chain.
+    let n = 4
+    var claims: [DotsAndBoxesEdge: Int] = Dictionary(uniqueKeysWithValues: dabAllEdges(gridSize: n).map { ($0, 1) })
+    var owners: [[Int?]] = Array(repeating: Array(repeating: 1, count: n), count: n)
+    claims[DotsAndBoxesEdge(orientation: .vertical, row: 0, col: 0)] = nil
+    claims[DotsAndBoxesEdge(orientation: .vertical, row: 0, col: 1)] = nil
+    owners[0][0] = nil
+    for col in 0...3 { claims[DotsAndBoxesEdge(orientation: .vertical, row: 2, col: col)] = nil }
+    for col in 0..<3 { owners[2][col] = nil }
+    var st = DotsAndBoxesState(gridSize: n, players: makeDABPlayers(2, bots: true), seed: 3)
+    st.claimedBy = claims; st.boxOwner = owners; st.turnIndex = 0
+    let e = DotsAndBoxesEngine(restoring: st)
+    let pick = e.chooseBotEdge(for: 0)!
+    check(pick.orientation == .vertical && pick.row == 0, "dots&boxes: forced to open a chain, the bot opens the 1-box chain, not the 3-chain")
+}
+do {
+    var newWins = 0, oldWins = 0, ties = 0
+    for seed in 1...25 {
+        for newSeat in 0...1 {
+            let e = DotsAndBoxesEngine(gridSize: 4, players: makeDABPlayers(2, bots: true), seed: UInt64(seed))
+            e.legacyBotSeats = [1 - newSeat]
+            var g = 0
+            while !e.state.isGameOver, g < 500 { g += 1; _ = e.performBotMove(for: e.state.turnIndex) }
+            let a = e.state.players[newSeat].score, b = e.state.players[1 - newSeat].score
+            if a > b { newWins += 1 } else if a < b { oldWins += 1 } else { ties += 1 }
+        }
+    }
+    print("Dots & Boxes 4x4: new bot \(newWins) wins, old bot \(oldWins) wins, \(ties) ties over 50 seeded games")
+    check(newWins > oldWins * 2, "dots&boxes: the new bot beats the old one by more than 2:1 over 50 seeded 4x4 games (\(newWins)-\(oldWins))")
+}
+
+// --- Yahtzee -----------------------------------------------------------
+
+do {
+    check(YahtzeeStrategy.score(dice: [2, 2, 3, 3, 3], category: 8) == 25, "yahtzee strategy: full house scores 25")
+    check(YahtzeeStrategy.score(dice: [1, 2, 3, 4, 6], category: 9) == 30 && YahtzeeStrategy.score(dice: [1, 2, 3, 4, 6], category: 10) == 0,
+          "yahtzee strategy: small but not large straight")
+    check(YahtzeeStrategy.score(dice: [2, 3, 4, 5, 6], category: 10) == 40, "yahtzee strategy: large straight 40")
+    check(YahtzeeStrategy.score(dice: [4, 4, 4, 4, 4], category: 11) == 50 && YahtzeeStrategy.score(dice: [4, 4, 4, 4, 1], category: 11) == 0,
+          "yahtzee strategy: yahtzee 50")
+    check(YahtzeeStrategy.score(dice: [1, 2, 3, 4, 5], category: 8, isJoker: true) == 25, "yahtzee strategy: joker full house")
+    let empty = YahtzeeStrategy.Sheet()
+    check(YahtzeeStrategy.chooseHolds(dice: [6, 6, 6, 2, 3], rollsLeft: 2, sheet: empty) == [true, true, true, false, false],
+          "yahtzee: keeps three sixes")
+    check(YahtzeeStrategy.chooseHolds(dice: [1, 2, 3, 4, 6], rollsLeft: 2, sheet: empty) == [true, true, true, true, false],
+          "yahtzee: keeps the four-run and rerolls the 6 to chase a large straight")
+    check(YahtzeeStrategy.chooseHolds(dice: [5, 5, 5, 5, 5], rollsLeft: 2, sheet: empty).allSatisfy { $0 },
+          "yahtzee: keeps a made yahtzee")
+    check(YahtzeeStrategy.chooseHolds(dice: [3, 3, 3, 3, 5], rollsLeft: 1, sheet: empty) == [true, true, true, true, false],
+          "yahtzee: keeps four of a kind and rerolls the odd die")
+    check(YahtzeeStrategy.chooseCategory(dice: [6, 6, 6, 6, 6], sheet: empty) == 11, "yahtzee: five sixes go in the Yahtzee box")
+    check(YahtzeeStrategy.chooseCategory(dice: [1, 1, 2, 5, 6], sheet: empty) == 0, "yahtzee: a junk roll is sacrificed to the ones")
+    var after = empty
+    after.record(dice: [6, 6, 6, 6, 6], category: 11)
+    check(after.isJoker([3, 3, 3, 3, 3]) && after.total == 50, "yahtzee: a second five-of-a-kind plays as a joker once the box holds 50")
+    check(YahtzeeStrategy.chooseHolds(dice: [1, 2, 3, 4, 6], rollsLeft: 2, sheet: empty)
+          == YahtzeeStrategy.chooseHolds(dice: [1, 2, 3, 4, 6], rollsLeft: 2, sheet: empty), "yahtzee holds are deterministic")
+
+    func game(seed: UInt64, p: BotPersonality = .neutral) -> Int {
+        var rng = SeededGenerator(seed: seed)
+        var sheet = YahtzeeStrategy.Sheet()
+        for _ in 0..<13 {
+            var dice = (0..<5).map { _ in Int.random(in: 1...6, using: &rng) }
+            var rollsLeft = 2
+            while rollsLeft > 0 {
+                let keep = YahtzeeStrategy.chooseHolds(dice: dice, rollsLeft: rollsLeft, sheet: sheet, personality: p)
+                if keep.allSatisfy({ $0 }) { break }
+                for i in 0..<5 where !keep[i] { dice[i] = Int.random(in: 1...6, using: &rng) }
+                rollsLeft -= 1
+            }
+            sheet.record(dice: dice, category: YahtzeeStrategy.chooseCategory(dice: dice, sheet: sheet, personality: p))
+        }
+        check(sheet.isComplete, "yahtzee sim: every category filled after 13 turns")
+        return sheet.total
+    }
+    let scores = (1...200).map { game(seed: UInt64($0)) }
+    let avg = Double(scores.reduce(0, +)) / 200
+    print("Yahtzee: average score over 200 seeded solo games = \(avg) (min \(scores.min()!), max \(scores.max()!))")
+    check(avg >= 225 && avg <= 275, "yahtzee: the bot averages 225-275 over 200 seeded solo games (\(avg))")
+}
+
+// --- Zilch -------------------------------------------------------------
+
+do {
+    check(ZilchStrategy.groups(in: [1, 2, 3, 4, 5, 6]) == [ZilchStrategy.Group(dice: 6, points: 1500)], "zilch strategy: straight")
+    check(ZilchStrategy.groups(in: [2, 2, 3, 3, 4, 4]) == [ZilchStrategy.Group(dice: 6, points: 1000)], "zilch strategy: three pairs")
+    check(ZilchStrategy.groups(in: [1, 1, 1, 5, 2, 3]).map(\.points) == [1000, 50], "zilch strategy: triple ones plus a single five")
+    check(ZilchStrategy.groups(in: [2, 3, 4, 6, 2, 3]).isEmpty, "zilch strategy: junk is a bust")
+    check(ZilchStrategy.groups(in: [4, 4, 4, 4, 2, 3]).map(\.points) == [800], "zilch strategy: four fours double the triple")
+    let neutral = ZilchStrategy.Context()
+    check(ZilchStrategy.shouldPress(diceLeft: 6, turnScore: 0, ctx: neutral), "zilch: with six dice and nothing at risk, roll")
+    check(ZilchStrategy.shouldPress(diceLeft: 6, turnScore: 300, ctx: neutral), "zilch: six dice and 300 at risk, still roll")
+    check(!ZilchStrategy.shouldPress(diceLeft: 2, turnScore: 1000, ctx: neutral), "zilch: two dice and 1000 at risk, bank")
+    check(!ZilchStrategy.shouldPress(diceLeft: 1, turnScore: 400, ctx: neutral), "zilch: one die and 400 at risk, bank")
+    let cautious = ZilchStrategy.Context(personality: BotPersonality.forName("Julie"))
+    let bold = ZilchStrategy.Context(personality: BotPersonality.forName("Ruthie"))
+    var monotone = true
+    for dice in 1...6 { for t in stride(from: 0, through: 2000, by: 50) {
+        if ZilchStrategy.shouldPress(diceLeft: dice, turnScore: t, ctx: cautious) && !ZilchStrategy.shouldPress(diceLeft: dice, turnScore: t, ctx: bold) { monotone = false }
+    } }
+    check(monotone, "zilch: a cautious bot never presses where a bold one banks")
+    check(ZilchStrategy.expectedTurnValue(dice: 6, turnScore: 0) > 400, "zilch: a fresh turn is worth over 400 on average")
+    let chase = ZilchStrategy.Context(bankedScore: 3000, bestOpponentScore: 4900, finalChaseActive: true, chasersAfterMe: 0)
+    check(ZilchStrategy.shouldPress(diceLeft: 2, turnScore: 600, ctx: chase), "zilch final chase: trailing and banking cannot win, so keep rolling")
+    let lead = ZilchStrategy.Context(bankedScore: 4800, bestOpponentScore: 4000, finalChaseActive: true, chasersAfterMe: 0)
+    check(!ZilchStrategy.shouldPress(diceLeft: 5, turnScore: 400, ctx: lead), "zilch final chase: last chaser already ahead banks")
+    let picks = ZilchStrategy.chooseGroups([.init(dice: 3, points: 1000), .init(dice: 1, points: 50)], diceRolled: 6, turnScore: 0, ctx: neutral)
+    check(picks.contains(0) && !picks.isEmpty, "zilch: always sets aside the big triple")
+    check(ZilchStrategy.chooseGroups([], diceRolled: 4, turnScore: 100, ctx: neutral).isEmpty, "zilch: no groups, nothing to take")
+
+    // Measured: solo turns and head-to-head against the original threshold bot.
+    func roll(_ n: Int, _ rng: inout SeededGenerator) -> [Int] { (0..<n).map { _ in Int.random(in: 1...6, using: &rng) } }
+    func turn(legacy: Bool, banked: Int, best: Int, chase: Bool, rng: inout SeededGenerator) -> (pts: Int, bust: Bool) {
+        var t = 0, live = 6
+        while true {
+            let gs = ZilchStrategy.groups(in: roll(live, &rng))
+            if gs.isEmpty { return (0, true) }
+            if legacy {
+                t += gs.reduce(0) { $0 + $1.points }; live -= gs.reduce(0) { $0 + $1.dice }
+                if live == 0 { live = 6 }
+                let trailing = chase && banked + t < best
+                if live >= (trailing ? 2 : 3) && t < (trailing ? 450 : 300) { continue }
+                return (t, false)
+            }
+            let ctx = ZilchStrategy.Context(bankedScore: banked, bestOpponentScore: best, finalChaseActive: chase, chasersAfterMe: 0)
+            let take = ZilchStrategy.chooseGroups(gs, diceRolled: live, turnScore: t, ctx: ctx)
+            check(!take.isEmpty && take.allSatisfy { gs.indices.contains($0) }, "zilch sim: the bot always sets aside a valid group")
+            t += take.reduce(0) { $0 + gs[$1].points }; live -= take.reduce(0) { $0 + gs[$1].dice }
+            if live == 0 { live = 6 }
+            if !ZilchStrategy.shouldPress(diceLeft: live, turnScore: t, ctx: ctx) { return (t, false) }
+        }
+    }
+    var stats: [Bool: (Int, Int)] = [:]
+    for legacy in [true, false] {
+        var rng = SeededGenerator(seed: 99)
+        var tot = 0, busts = 0
+        for _ in 0..<6000 { let r = turn(legacy: legacy, banked: 0, best: 0, chase: false, rng: &rng); tot += r.pts; if r.bust { busts += 1 } }
+        stats[legacy] = (tot, busts)
+    }
+    let newAvg = Double(stats[false]!.0) / 6000, oldAvg = Double(stats[true]!.0) / 6000
+    print("Zilch: new bot avg/turn \(newAvg), bust rate \(Double(stats[false]!.1) / 6000); old bot avg/turn \(oldAvg), bust rate \(Double(stats[true]!.1) / 6000)")
+    check(newAvg > oldAvg * 1.1, "zilch: the new bot banks over 10% more per turn than the old threshold bot (\(newAvg) vs \(oldAvg))")
+    func match(newFirst: Bool, seed: UInt64) -> Bool { // true if the NEW bot wins
+        var rng = SeededGenerator(seed: seed)
+        var score = [0, 0]; var seat = 0; var chaseSeat: Int?
+        while true {
+            let isNew = (seat == 0) == newFirst
+            let r = turn(legacy: !isNew, banked: score[seat], best: score[1 - seat], chase: chaseSeat != nil, rng: &rng)
+            score[seat] += r.pts
+            if let c = chaseSeat, c != seat {
+                let newSeat = newFirst ? 0 : 1
+                return score[newSeat] > score[1 - newSeat]
+            } else if chaseSeat == nil && score[seat] >= 5000 { chaseSeat = seat }
+            seat = 1 - seat
+        }
+    }
+    var wins = 0
+    for i in 1...100 { for first in [true, false] where match(newFirst: first, seed: UInt64(i)) { wins += 1 } }
+    print("Zilch: new bot won \(wins)/200 seeded games against the old bot")
+    check(wins >= 120, "zilch: the new bot wins at least 60% of 200 seeded games (\(wins))")
+}
+
+// --- Shut the Box ------------------------------------------------------
+
+do {
+    let full = [Bool](repeating: true, count: 9)
+    let v = ShutBoxStrategy.expectedScore(standing: full)
+    check(v > 10.5 && v < 11.6, "shut the box: optimal expected score from a full box is about 11 (\(v))")
+    check(ShutBoxStrategy.chooseSet(standing: full, sum: 12).map { $0.reduce(0, +) } == 12, "shut the box: the chosen set adds to the roll")
+    var partial = full; partial[8] = false; partial[7] = false
+    check(ShutBoxStrategy.chooseSet(standing: partial, sum: 12)!.allSatisfy { partial[$0 - 1] }, "shut the box: only standing tiles are flipped")
+    check(ShutBoxStrategy.chooseSet(standing: [true, false, false, false, false, false, false, false, false], sum: 5) == nil, "shut the box: no set means bust")
+    var onlyOne = [Bool](repeating: false, count: 9); onlyOne[0] = true
+    check(ShutBoxStrategy.shouldUseOneDie(standing: onlyOne), "shut the box: with only the 1 left, one die is better (two dice can never roll 1)")
+    check(!ShutBoxStrategy.shouldUseOneDie(standing: full), "shut the box: the one-die option is locked while 7-8-9 stand")
+    check(ShutBoxStrategy.expectedScore(standing: [Bool](repeating: false, count: 9)) == 0, "shut the box: an empty board scores 0")
+
+    func legal(_ standing: [Bool], _ sum: Int) -> [[Int]] {
+        var res: [[Int]] = []
+        for m in 1..<512 {
+            var s = 0, ok = true; var t: [Int] = []
+            for i in 0..<9 where m & (1 << i) != 0 { if !standing[i] { ok = false }; s += i + 1; t.append(i + 1) }
+            if ok && s == sum { res.append(t) }
+        }
+        return res
+    }
+    func play(newBot: Bool, rng: inout SeededGenerator) -> Int {
+        var standing = full
+        while true {
+            var one = false
+            if newBot { one = ShutBoxStrategy.shouldUseOneDie(standing: standing) }
+            else if !standing[6] && !standing[7] && !standing[8] {
+                let h1 = (1...6).filter { !legal(standing, $0).isEmpty }.count
+                var h2 = 0
+                for a in 1...6 { for b in 1...6 where !legal(standing, a + b).isEmpty { h2 += 1 } }
+                one = Double(h1) / 6 > Double(h2) / 36
+            }
+            let sum = one ? Int.random(in: 1...6, using: &rng) : Int.random(in: 1...6, using: &rng) + Int.random(in: 1...6, using: &rng)
+            let subsets = legal(standing, sum)
+            if subsets.isEmpty { return (0..<9).filter { standing[$0] }.reduce(0) { $0 + $1 + 1 } }
+            let chosen = newBot ? ShutBoxStrategy.chooseSet(standing: standing, sum: sum)!
+                : subsets.min { a, b in a.count != b.count ? a.count < b.count : (a.max() ?? 0) > (b.max() ?? 0) }!
+            for t in chosen { standing[t - 1] = false }
+            if !standing.contains(true) { return 0 }
+        }
+    }
+    var newTotal = 0, oldTotal = 0, newShut = 0, oldShut = 0
+    var r1 = SeededGenerator(seed: 5), r2 = SeededGenerator(seed: 5)
+    for _ in 0..<1500 {
+        let a = play(newBot: true, rng: &r1), b = play(newBot: false, rng: &r2)
+        newTotal += a; oldTotal += b
+        if a == 0 { newShut += 1 }
+        if b == 0 { oldShut += 1 }
+    }
+    print("Shut the Box: exact-DP bot avg \(Double(newTotal) / 1500) (shut \(newShut)); old heuristic avg \(Double(oldTotal) / 1500) (shut \(oldShut)) over 1500 seeded games")
+    check(newTotal <= oldTotal, "shut the box: the exact-expectation bot averages no worse than the old heuristic")
+}
+
+// --- UNO / Crazy Eights / Wizard / Oh Hell -----------------------------
+
+func bxSeats(_ n: Int) -> [Seat] {
+    let names = ["Hank", "Ruthie", "Marco", "Mae", "Tucker", "Julie"]
+    return (0..<n).map { Seat(id: $0, playerName: names[$0 % 6], colorIndex: $0, isConnected: true, isHost: $0 == 0) }
+}
+
+func bxPlayCardGame(kind: GameKind, players: Int, newSeat: Int, seed: UInt64) -> (winner: Int?, ok: Bool) {
+    let rules = RulesConfig()
+    let e = HostEngine(seats: bxSeats(players), gameKind: kind, rules: rules, seed: seed)
+    _ = e.apply(.startGame(kind, rules, seed: seed))
+    for _ in 0..<30000 {
+        let st = e.state
+        switch st.phase {
+        case .gameOver: return (st.hands.first { $0.value.isEmpty }?.key, true)
+        case .choosingTrump(let seat):
+            let useNew = seat == newSeat
+            let suit: Suit = kind == .uno
+                ? (useNew ? UnoBrain.declare(state: st, seat: seat) : UnoBrain.legacyDeclare(state: st, seat: seat))
+                : (useNew ? CrazyEightsBrain.declare(state: st, seat: seat) : CrazyEightsBrain.legacyDeclare(state: st, seat: seat))
+            _ = e.apply(.declareSuit(suit), from: seat)
+        case .playing:
+            let seat = st.round!.turnSeat
+            let useNew = seat == newSeat
+            let act: PlayerAction? = kind == .uno
+                ? (useNew ? UnoBrain.play(state: st, seat: seat) : UnoBrain.legacyPlay(state: st, seat: seat))
+                : (useNew ? CrazyEightsBrain.play(state: st, seat: seat) : CrazyEightsBrain.legacyPlay(state: st, seat: seat))
+            guard let a = act else { return (nil, false) } // dry table: both draw piles empty
+            if isIllegal(e.apply(a, from: seat)) { print("ILLEGAL bot move \(a) in \(kind)"); return (nil, false) }
+        default: return (nil, false)
+        }
+    }
+    return (nil, false)
+}
+
+do {
+    for (kind, players, label) in [(GameKind.uno, 2, "UNO 2p"), (.uno, 4, "UNO 4p"), (.crazyEights, 2, "Crazy Eights 2p"), (.crazyEights, 4, "Crazy Eights 4p")] {
+        var wins = 0, games = 0, bad = 0
+        let n = 400
+        for i in 0..<n {
+            let r = bxPlayCardGame(kind: kind, players: players, newSeat: i % players, seed: UInt64(i + 1))
+            if !r.ok && r.winner == nil { bad += 1 } else { games += 1; if r.winner == i % players { wins += 1 } }
+        }
+        let rate = Double(wins) / Double(max(games, 1)), fair = 1.0 / Double(players)
+        print("\(label): new bot won \(wins)/\(games) = \(rate) (fair share \(fair)); dry-table stalls \(bad)")
+        check(bad <= n / 40, "\(label): bot games finish (stalls \(bad) of \(n), only dry-table draws allowed)")
+        check(rate >= fair - 0.03, "\(label): the new bot is no worse than the old heuristic (\(rate) vs fair \(fair))")
+    }
+}
+
+do {
+    // Scenario: next player (seat 1) has exactly one card left; we hold a red Skip that matches the top.
+    let skipID = uno.first { $0.unoColor == .red && $0.unoSymbol == .skip }!.id
+    let wildID = uno.first { $0.unoSymbol == .wild }!.id
+    let h: [Card] = [ucard("u_r3a"), ucard("u_b9a"), ucard(skipID), ucard(wildID)]
+    let e = unoEngine(hands: [0: h, 1: [ucard("u_g5a")], 2: [ucard("u_y1a"), ucard("u_g2a"), ucard("u_y3a")]],
+                      top: ucard("u_r5a"), turn: 0, players: 3)
+    if case .playCard(let id, _)? = UnoBrain.play(state: e.state, seat: 0) {
+        check(id == skipID, "uno: with the next player on one card, the bot plays its Skip")
+    } else { check(false, "uno: the bot returns a card play in the skip scenario") }
+    // Wild is held when a colored card is legal and nobody is close to out.
+    let e2 = unoEngine(hands: [0: [ucard("u_r3a"), ucard(wildID)], 1: [ucard("u_g5a"), ucard("u_y1a"), ucard("u_g2a"), ucard("u_y3a"), ucard("u_b4a")]],
+                       top: ucard("u_r5a"), turn: 0, players: 2)
+    if case .playCard(let id, _)? = UnoBrain.play(state: e2.state, seat: 0) {
+        check(id == "u_r3a", "uno: the bot keeps its wild as the guaranteed last card")
+    } else { check(false, "uno: card play in the wild-hold scenario") }
+    let e3 = unoEngine(hands: [0: [ucard("u_r3a"), ucard("u_r7a"), ucard("u_g2a"), ucard("u_g4a"), ucard("u_g6a"), ucard("u_g8a")], 1: [ucard("u_b1a")]],
+                       top: ucard("u_r5a"), turn: 0, players: 2, declared: nil)
+    check(UnoBrain.declare(state: e3.state, seat: 0) == .clubs, "uno: names the color it holds most of (green -> clubs)")
+    // Pending penalty: stacks a Draw Two when the rules allow it, otherwise absorbs.
+    let d2 = uno.first { $0.unoColor == .red && $0.unoSymbol == .drawTwo }!
+    let top2 = uno.first { $0.unoColor == .blue && $0.unoSymbol == .drawTwo }!
+    let stackRules = RulesConfig()
+    let e4 = unoEngine(hands: [0: [d2, ucard("u_r3a")]], top: top2, turn: 0, players: 2, pending: 2, rules: stackRules)
+    if case .playCard(let id, _)? = UnoBrain.play(state: e4.state, seat: 0) { check(id == d2.id, "uno: stacks a Draw Two onto a pending penalty") }
+    else if UnoBrain.play(state: e4.state, seat: 0) == .drawCard { check(!stackRules.stackDrawCards, "uno: absorbs a penalty only when stacking is off") }
+}
+
+do {
+    // Wizard / Oh Hell: bids are calibrated and games complete legally.
+    func run(kind: GameKind, players: Int, newSeat: Int, seed: UInt64) -> (diff: Double, bidBias: Double, bidAbs: Double, n: Int)? {
+        let rules = RulesConfig()
+        let e = HostEngine(seats: bxSeats(players), gameKind: kind, rules: rules, seed: seed)
+        _ = e.apply(.startGame(kind, rules, seed: seed))
+        for _ in 0..<20000 {
+            let st = e.state
+            switch st.phase {
+            case .gameOver:
+                let totals = Scoring.totals(history: st.roundHistory, kind: kind, missScoresTricks: rules.missScoresTricks)
+                var bias = 0.0, abs_ = 0.0, n = 0
+                for r in st.roundHistory { if let b = r.bids[newSeat] { let t = r.tricksWon[newSeat] ?? 0; bias += Double(b - t); abs_ += Double(abs(b - t)); n += 1 } }
+                let others = totals.filter { $0.key != newSeat }.values.map(Double.init)
+                return (Double(totals[newSeat] ?? 0) - others.reduce(0, +) / Double(others.count), bias, abs_, n)
+            case .bidding:
+                let seat = st.round!.turnSeat
+                _ = e.apply(.placeBid(TrickBrain.bid(state: st, seat: seat, legacy: seat != newSeat, personality: BotPersonality.forName(st.seats[seat].playerName))), from: seat)
+            case .choosingTrump(let seat): _ = e.apply(.chooseTrump(TrickBrain.chooseTrump(state: st, seat: seat)), from: seat)
+            case .playing:
+                let seat = st.round!.turnSeat
+                guard let a = TrickBrain.play(state: st, seat: seat, legacy: seat != newSeat) else { return nil }
+                if isIllegal(e.apply(a, from: seat)) { return nil }
+            case .trickComplete: _ = e.apply(.nextTrick)
+            case .roundComplete: _ = e.apply(.nextRound)
+            default: return nil
+            }
+        }
+        return nil
+    }
+    for (kind, players, label) in [(GameKind.wizard, 3, "Wizard 3p"), (.wizard, 4, "Wizard 4p"), (.ohHell, 3, "Oh Hell 3p")] {
+        var diff = 0.0, bias = 0.0, absErr = 0.0, nb = 0, games = 0
+        for i in 0..<150 {
+            guard let r = run(kind: kind, players: players, newSeat: i % players, seed: UInt64(i + 1)) else {
+                check(false, "\(label): seeded bot game \(i) completed with only legal moves"); continue
+            }
+            games += 1; diff += r.diff; bias += r.bidBias; absErr += r.bidAbs; nb += r.n
+        }
+        print("\(label): new bidder score edge vs old \(diff / Double(games)), mean(bid-tricks) \(bias / Double(nb)), mean|err| \(absErr / Double(nb))")
+        check(diff / Double(games) > 0, "\(label): the recalibrated bidder outscores the old one on average")
+        check(abs(bias / Double(nb)) < 1.1, "\(label): bids are no longer wildly under (mean bid-tricks \(bias / Double(nb)))")
+    }
+}
+
+// MARK: - BotAI END
+
+// MARK: - Save/resume snapshot round-trips (ResumeCatalog / SaveSlots)
+//
+// Every state the app parks on disk (Sources/App/Save) must survive JSON
+// and rebuild an engine that agrees with the original. The dice games'
+// controller snapshots live in Engine/DiceSaveTypes.swift for exactly this
+// check.
+
+func rtRoundTrip<T: Codable & Equatable>(_ value: T, _ name: String) -> T {
+    let data = try! JSONEncoder().encode(value)
+    let back = try! JSONDecoder().decode(T.self, from: data)
+    check(back == value, "\(name) survives a JSON round-trip")
+    return back
+}
+
+do {
+    let crib = CribbageEngine(seed: 7)
+    let back = rtRoundTrip(crib.state, "CribbageState")
+    check(CribbageEngine(restoring: back).state == crib.state, "CribbageEngine(restoring:) matches the saved state")
+}
+do {
+    let ship = BattleshipEngine(seed: 3)
+    for s in BattleshipBot.placement(seed: 3) {
+        _ = ship.apply(.placeShip(kind: s.kind, row: s.row, col: s.col, orientation: s.orientation), from: 0)
+    }
+    let back = rtRoundTrip(ship.state, "BattleshipState (mid-placement)")
+    check(BattleshipEngine(restoring: back).state == ship.state, "BattleshipEngine(restoring:) matches the saved state")
+}
+do {
+    let gin = GinRummyEngine(seed: 5)
+    let back = rtRoundTrip(gin.state, "GinRummyState")
+    check(GinRummyEngine(restoring: back).state == gin.state, "GinRummyEngine(restoring:) matches the saved state")
+}
+do {
+    let bj = BlackjackEngine(seed: 9, seatCount: 3)
+    _ = bj.apply(.placeBet(bj.state.config.minBet), from: 0)
+    let back = rtRoundTrip(bj.state, "BlackjackState (one bet down)")
+    check(BlackjackEngine(restoring: back).state == bj.state, "BlackjackEngine(restoring:) matches the saved state")
+}
+do {
+    let liar = LiarsDiceEngine(seed: 11, seatCount: 4)
+    _ = liar.rollAll(seed: 11)
+    let back = rtRoundTrip(liar.state, "LiarsDiceState (dice rolled)")
+    check(LiarsDiceEngine(restoring: back).state == liar.state, "LiarsDiceEngine(restoring:) matches the saved state")
+}
+do {
+    let fish = GoFishEngine(seed: 13, playerCount: 3)
+    let back = rtRoundTrip(fish.state, "GoFishState")
+    check(GoFishEngine(restoring: back).state == fish.state, "GoFishEngine(restoring:) matches the saved state")
+}
+do {
+    let maid = OldMaidEngine(seed: 17, playerCount: 3)
+    let back = rtRoundTrip(maid.state, "OldMaidState")
+    check(OldMaidEngine(restoring: back).state == maid.state, "OldMaidEngine(restoring:) matches the saved state")
+}
+do {
+    let war = WarEngine(seed: 19)
+    _ = war.apply(.flip, from: 0)
+    let back = rtRoundTrip(war.state, "WarState (one battle in)")
+    check(WarEngine(restoring: back).state == war.state, "WarEngine(restoring:) matches the saved state")
+}
+do {
+    let mancala = MancalaEngine(players: [MancalaPlayer(name: "A", isBot: false), MancalaPlayer(name: "B", isBot: true)])
+    _ = mancala.apply(.sow(pit: 2), from: 0)
+    let back = rtRoundTrip(mancala.state, "MancalaState (one sowing)")
+    check(MancalaEngine(restoring: back).state == mancala.state, "MancalaEngine(restoring:) matches the saved state")
+}
+do {
+    let checkers = CheckersEngine(players: [CheckersPlayer(name: "A", isBot: false), CheckersPlayer(name: "B", isBot: true)])
+    if let move = checkers.state.legalMoves.first { _ = checkers.apply(.move(move), from: 0) }
+    let back = rtRoundTrip(checkers.state, "CheckersState (one move)")
+    check(CheckersEngine(restoring: back).state == checkers.state, "CheckersEngine(restoring:) matches the saved state")
+}
+do {
+    let four = ConnectFourEngine(players: [ConnectFourPlayer(name: "A", isBot: false), ConnectFourPlayer(name: "B", isBot: true)])
+    _ = four.apply(.drop(column: 3), from: 0)
+    let back = rtRoundTrip(four.state, "ConnectFourState (one disc)")
+    check(ConnectFourEngine(restoring: back).state == four.state, "ConnectFourEngine(restoring:) matches the saved state")
+}
+do {
+    let dots = DotsAndBoxesEngine(gridSize: 3, players: [DotsAndBoxesPlayer(name: "A", colorIndex: 0, isBot: false),
+                                                          DotsAndBoxesPlayer(name: "B", colorIndex: 1, isBot: true)], seed: 1)
+    _ = dots.performBotMove(for: 0)
+    let back = rtRoundTrip(dots.state, "DotsAndBoxesState (one line)")
+    check(DotsAndBoxesEngine(restoring: back).state == dots.state, "DotsAndBoxesEngine(restoring:) matches the saved state")
+}
+do {
+    let quarto = QuartoEngine(players: [QuartoPlayer(name: "A", isBot: false), QuartoPlayer(name: "B", isBot: true)])
+    _ = quarto.apply(.selectPiece(0), from: 0)
+    let back = rtRoundTrip(quarto.state, "QuartoState (piece handed over)")
+    check(QuartoEngine(restoring: back).state == quarto.state, "QuartoEngine(restoring:) matches the saved state")
+}
+do {
+    let sol = SolitaireEngine(seed: 23)
+    _ = sol.draw()
+    let back = rtRoundTrip(sol.state, "SolitaireState (one draw)")
+    check(SolitaireEngine(state: back).state == sol.state, "SolitaireEngine(state:) matches the saved state")
+}
+do {
+    let seats = [DiceSavedSeat(id: 0, name: "Hank", isBot: true, deviceID: nil, colorIndex: 6),
+                 DiceSavedSeat(id: 1, name: "Mae", isBot: false, deviceID: "dev-mae", colorIndex: 1)]
+    _ = rtRoundTrip(LcrSaveState(seats: seats, chips: [3, 1], centerPot: 2, turnSeat: 1), "LcrSaveState")
+    _ = rtRoundTrip(YahtzeeSaveState(seats: seats, turnSeat: 0, scorecards: [
+        YahtzeeSavedCard(entries: ["ones": 3, "yahtzee": 50], yahtzeeBonusCount: 1),
+        YahtzeeSavedCard(entries: [:], yahtzeeBonusCount: 0)]), "YahtzeeSaveState")
+    _ = rtRoundTrip(ZilchSaveState(seats: seats, bankedScore: [1500, 300], turnSeat: 1, turnScore: 250,
+                                   heldIndices: [0, 4], finalChaseSeat: nil, finalChaseRemaining: []), "ZilchSaveState")
+    _ = rtRoundTrip(ShutBoxSaveState(seats: seats, standing: [true, false, true, true, false, true, true, true, true],
+                                     turnSeat: 1, roundIndex: 0, roundsToWin: 1, roundsWon: [0, 0],
+                                     roundScores: [12, nil], usingOneDie: false, oneDieAvailable: false,
+                                     shutTheBoxSeat: nil), "ShutBoxSaveState (nil round score encodes)")
+}
+
 // MARK: - Summary
 
 let total = passCount + failCount

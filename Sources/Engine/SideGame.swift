@@ -11,7 +11,7 @@ import Foundation
 /// opaque JSON keyed by `kind`; the host/client route by kind and never
 /// learn the concrete types. A peer that doesn't know a kind simply has no
 /// view registered for it and ignores the payload — forward-compatible.
-public struct SideGamePayload: Codable, Equatable {
+public struct SideGamePayload: Codable, Equatable, Sendable {
     public let kind: String
     public let data: Data
 

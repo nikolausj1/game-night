@@ -17,6 +17,8 @@ import SwiftUI
 /// against numbers this view already computed for layout.
 struct QuartoView: View {
     var onClose: () -> Void
+    /// Mount straight into the parked game (`ResumeCatalog`), skipping setup.
+    var resumeSaved = false
 
     @State private var controller: QuartoController?
     @Environment(\.accessibilityReduceMotion) private var motionReduced
@@ -44,11 +46,21 @@ struct QuartoView: View {
             if QuartoDemo.wantsQuartoDemo, controller == nil {
                 controller = QuartoDemo.makeMidGameController()
             }
+            if controller == nil, resumeSaved, let saved = LocalGameSave.loadQuarto() {
+                let restored = QuartoController(restoring: saved)
+                controller = restored
+                restored.scheduleBotIfNeeded()
+            }
+        }
+        .onChange(of: controller?.revision) { _, _ in
+            // Autosave 2s after the last placement; game over clears it.
+            if let controller { LocalGameSave.noteQuarto(controller.state) }
         }
     }
 
     private func startGame(playerOneName: String, playerTwoName: String,
                            playerOneIsBot: Bool, playerTwoIsBot: Bool, use2x2Variant: Bool) {
+        LocalGameSave.clear(.board("quarto"))
         let players = [QuartoPlayer(name: playerOneName, isBot: playerOneIsBot),
                        QuartoPlayer(name: playerTwoName, isBot: playerTwoIsBot)]
         let fresh = QuartoController(players: players, use2x2Variant: use2x2Variant, firstPlayer: 0)
@@ -77,19 +89,42 @@ struct QuartoView: View {
         }
         .overlay {
             if controller.state.phase == .gameOver {
-                QuartoResultOverlay(state: controller.state, onRematch: {
-                    // The player who did NOT win (or, on a draw, whoever
-                    // wasn't left holding the last move) opens the rematch
-                    // — a small, familiar "loser breaks" courtesy.
-                    let lastActor = controller.state.winner ?? controller.state.currentPlayer
-                    controller.restart(players: controller.state.players,
-                                       use2x2Variant: controller.state.use2x2Variant,
-                                       firstPlayer: 1 - lastActor)
-                }, onClose: onClose)
-                .transition(.scale(scale: 0.92).combined(with: .opacity))
+                recap(controller: controller)
+                    .transition(.scale(scale: 0.92).combined(with: .opacity))
             }
         }
         .animation(.easeInOut(duration: 0.3), value: controller.state.phase)
+    }
+
+    // MARK: - Game over
+
+    /// A win names the shared attribute ("Four tall, four dark!"), a draw
+    /// gets its own honest line. The player who did NOT win (or, on a
+    /// draw, whoever wasn't left holding the last move) opens the rematch
+    /// — a small, familiar "loser breaks" courtesy.
+    private func recap(controller: QuartoController) -> some View {
+        let state = controller.state
+        let placed = [0, 1].map { seat in
+            // Pieces alternate: whoever placed last placed the odd one out.
+            let total = state.moveCount
+            let lastPlacer = state.winner ?? state.currentPlayer
+            return total / 2 + (total % 2 == 1 && seat == lastPlacer ? 1 : 0)
+        }
+        let order = [0, 1].sorted { (state.winner == $0) || (state.winner != $1 && $0 < $1) }
+        let rows = order.map { seat in
+            RecapRow(id: seat, name: state.players[seat].name, colorIndex: seat,
+                     score: "\(placed[seat])", detail: "pieces placed", isWinner: state.winner == seat)
+        }
+        let title = state.winner.map { "\(state.players[$0].name) wins Quarto" } ?? "It's a draw"
+        var highlight = "Every cell is full and no line ever matched: a clean stalemate"
+        if state.winner != nil, let line = state.winningLine {
+            highlight = QuartoRules.winCallout(attributes: state.winningAttributes, line: line, board: state.board)
+        }
+        return GameRecapCard(title: title, rows: rows, highlight: highlight, onRematch: {
+            let lastActor = state.winner ?? state.currentPlayer
+            controller.restart(players: state.players, use2x2Variant: state.use2x2Variant,
+                               firstPlayer: 1 - lastActor)
+        }, onDone: onClose)
     }
 
     // MARK: - Board

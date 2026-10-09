@@ -94,6 +94,56 @@ struct HandView: View {
         isMyTurn && client.pendingIllegal == nil && !showDrawPenaltyBanner
     }
 
+    // MARK: hearts passing
+
+    // The three cards picked to pass, in tap order. Local until the host
+    // confirms it (then `committedPassIDs` mirrors it back); cleared the
+    // moment the phase moves on. See passPanel / handlePassDrag*.
+    @State private var passSelection: [String] = []
+
+    private var isHeartsPassing: Bool {
+        guard let snap = client.snapshot else { return false }
+        return snap.gameKind == .hearts && snap.phase == .passing
+    }
+
+    /// This seat's pass as the host has recorded it (the snapshot keeps our
+    /// own ids; other seats' are redacted to "?"). nil until committed.
+    private var committedPassIDs: [String]? {
+        guard let snap = client.snapshot, let seat = client.mySeat else { return nil }
+        return snap.round?.passSelections[seat]
+    }
+
+    private var myPassCommitted: Bool { committedPassIDs != nil }
+
+    private var passDirection: PassDirection { client.snapshot?.round?.passDirection ?? .hold }
+
+    /// Who receives our three: "Mae" for the direction label and the button.
+    private var passTargetName: String? {
+        guard let snap = client.snapshot, let seat = client.mySeat, passDirection != .hold else { return nil }
+        let target = HeartsRules.passTarget(from: seat, direction: passDirection, playerCount: snap.seats.count)
+        return snap.seats.first { $0.id == target }?.playerName
+    }
+
+    /// Seats (other than ours) that still owe a pass, in seat order.
+    private var passWaitingNames: [String] {
+        guard let snap = client.snapshot, let round = snap.round else { return [] }
+        return snap.seats
+            .filter { $0.id != snap.mySeat && round.passSelections[$0.id] == nil }
+            .map(\.playerName)
+    }
+
+    /// Cards that arrived in this round's pass, highlighted until the first
+    /// trick is in so you can see what you were handed.
+    private var receivedPassIDs: Set<String> {
+        guard let snap = client.snapshot, snap.gameKind == .hearts, let round = snap.round,
+              snap.phase == .playing, round.completedTricks.isEmpty else { return [] }
+        return Set(round.passReceived[snap.mySeat] ?? [])
+    }
+
+    private var passAnimation: Animation {
+        motionReduced ? .easeOut(duration: 0.12) : .spring(response: 0.34, dampingFraction: 0.72)
+    }
+
     var body: some View {
         GeometryReader { geo in
             ZStack {
@@ -102,16 +152,24 @@ struct HandView: View {
                 VStack(spacing: 0) {
                     HandStatusStrip(client: client, onLeave: onLeave)
                     Spacer()
-                    if showDrawPenaltyBanner {
-                        DrawPenaltyBanner(count: pendingDraw,
-                                          shakeTrigger: drawShakeTrigger,
-                                          onTapDraw: { client.drawCard() })
+                    if isHeartsPassing {
+                        // Hearts passing: the pass panel takes the turn
+                        // banner's spot and the play-zone hint's, since
+                        // "swipe up to play" is exactly wrong right now.
+                        passPanel
                             .transition(.scale(scale: 0.9).combined(with: .opacity))
-                    } else if showYourTurnBanner {
-                        TurnBanner(hint: turnHintText, unoColor: activeUnoColor)
-                            .transition(.scale(scale: 0.9).combined(with: .opacity))
+                    } else {
+                        if showDrawPenaltyBanner {
+                            DrawPenaltyBanner(count: pendingDraw,
+                                              shakeTrigger: drawShakeTrigger,
+                                              onTapDraw: { client.drawCard() })
+                                .transition(.scale(scale: 0.9).combined(with: .opacity))
+                        } else if showYourTurnBanner {
+                            TurnBanner(hint: turnHintText, unoColor: activeUnoColor)
+                                .transition(.scale(scale: 0.9).combined(with: .opacity))
+                        }
+                        playZoneHint
                     }
-                    playZoneHint
                     Spacer()
                     // First time it's your turn with cards to play — a
                     // one-shot TipKit nudge toward the flick gesture.
@@ -166,12 +224,36 @@ struct HandView: View {
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: client.pendingIllegal?.cardID)
             .animation(.spring(response: 0.4, dampingFraction: 0.8), value: showYourTurnBanner)
             .animation(.spring(response: 0.4, dampingFraction: 0.8), value: showDrawPenaltyBanner)
+            .animation(motionReduced ? .easeOut(duration: 0.15) : .spring(response: 0.4, dampingFraction: 0.8),
+                       value: isHeartsPassing)
+            .animation(motionReduced ? .easeOut(duration: 0.15) : .spring(response: 0.4, dampingFraction: 0.8),
+                       value: myPassCommitted)
             .onAppear {
                 motion.start()
                 HandFlickTip.isEligible = showYourTurnBanner && !hand.isEmpty
+                HeartsPassTip.isEligible = isHeartsPassing && !myPassCommitted
+                if let ids = committedPassIDs { passSelection = ids }
                 applyDemoGestureIfAsked(size: geo.size)
             }
             .onDisappear { motion.stop() }
+            .onChange(of: isHeartsPassing) { _, passing in
+                HeartsPassTip.isEligible = passing && !myPassCommitted
+                if !passing {
+                    // The swap happened (or the phase moved on): the fan
+                    // settles, the passed cards leave, the received ones
+                    // fly in via handleHandArrivals.
+                    withAnimation(passAnimation) { passSelection = [] }
+                }
+            }
+            .onChange(of: committedPassIDs) { _, ids in
+                // The host's record wins (reconnects, a pass sent from a
+                // previous view instance): mirror it so the lifted cards
+                // match what will actually leave the hand.
+                if let ids, !ids.isEmpty, !ids.contains("?") {
+                    withAnimation(passAnimation) { passSelection = ids }
+                    HeartsPassTip.isEligible = false
+                }
+            }
             .onChange(of: showYourTurnBanner) { _, newValue in
                 HandFlickTip.isEligible = newValue && !hand.isEmpty
             }
@@ -314,6 +396,12 @@ struct HandView: View {
             ForEach(Array(hand.enumerated()), id: \.element.id) { index, card in
                 let isSelected = selectedCardID == card.id
                 let slot = layout.slot(for: index, selected: isSelected, scrollOffset: clampedScroll)
+                // Hearts passing: a picked card lifts clear of the fan and
+                // wears a brass check; a card received in the pass wears a
+                // gold rim for the first trick.
+                let isPassPicked = isHeartsPassing && passSelection.contains(card.id)
+                let passLift: CGFloat = isPassPicked ? -(cardWidth * 0.42) : 0
+                let isReceived = receivedPassIDs.contains(card.id)
                 let dragOffset = isSelected ? dragState.translation : .zero
                 let elevation = isSelected
                     ? dragState.elevation(handHeight: size.height)
@@ -360,22 +448,39 @@ struct HandView: View {
                             ? 1.0
                             : 0.55 + 0.30 * Double(index) / Double(max(hand.count - 1, 1))))
                     .frame(width: cardWidth)
+                    .overlay {
+                        if isReceived {
+                            RoundedRectangle(cornerRadius: CardStyle.cornerRadius(width: cardWidth), style: .continuous)
+                                .strokeBorder(CardStyle.gold.opacity(0.9), lineWidth: 2.5)
+                                .shadow(color: CardStyle.gold.opacity(0.6), radius: 6)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .overlay(alignment: .top) {
+                        if isPassPicked {
+                            PassCheckBadge()
+                                .offset(y: -12)
+                                .transition(motionReduced ? .opacity : .scale(scale: 0.4).combined(with: .opacity))
+                                .allowsHitTesting(false)
+                        }
+                    }
                     .rotationEffect(isSelected && dragState.isDragging
                         ? tiltWhileDragging(slot.angle, handHeight: size.height)
                         : slot.angle)
                     .offset(x: slot.offset.width + dragOffset.width + cardParallax.width + fisheye.x,
-                            y: slot.offset.height + dragOffset.height + cardParallax.height + fisheye.y + arrivalOffset)
+                            y: slot.offset.height + dragOffset.height + cardParallax.height + fisheye.y + arrivalOffset + passLift)
                     .zIndex(isSelected ? 100 : (isArriving ? 95 : slot.zIndex + fisheye.zBoost))
                     .opacity(departingCardID == card.id ? 0 : edgeOpacity)
-                    .gesture(playGesture(for: card, index: index, in: size))
+                    .gesture(fanGesture(for: card, index: index, in: size))
                     .animation(.spring(response: 0.34, dampingFraction: 0.72),
                                value: selectedCardID)
                     .animation(.spring(response: 0.22, dampingFraction: 0.7),
                                value: browseFingerX)
+                    .animation(passAnimation, value: isPassPicked)
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(card.accessibleName)
-                    .accessibilityHint(isMyTurn ? "Flick up to play" : "")
-                    .accessibilityAddTraits(.isButton)
+                    .accessibilityLabel(isReceived ? "\(card.accessibleName), passed to you" : card.accessibleName)
+                    .accessibilityHint(passAccessibilityHint(isPicked: isPassPicked))
+                    .accessibilityAddTraits(isPassPicked ? [.isButton, .isSelected] : .isButton)
             }
         }
         .frame(maxWidth: .infinity)
@@ -508,7 +613,7 @@ struct HandView: View {
                 Haptics.tick()
                 withAnimation(motionReduced ? .easeOut(duration: 0.12)
                                             : .spring(response: 0.5, dampingFraction: 0.75)) {
-                    arrivingCardIDs.remove(id)
+                    _ = arrivingCardIDs.remove(id)
                 }
             }
         }
@@ -557,9 +662,13 @@ struct HandView: View {
     /// trackBrowseStationary), that card arms and the rest of the drag
     /// plays it (armFromBrowse). Resuming horizontal motion before release
     /// cancels back to browse (cancelArmedPlayBackToBrowse).
-    private func playGesture(for card: Card, index: Int, in size: CGSize) -> some Gesture {
+    private func fanGesture(for card: Card, index: Int, in size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
+                if isHeartsPassing {
+                    handlePassDragChanged(value, index: index, in: size)
+                    return
+                }
                 let dx = value.translation.width
                 let dy = value.translation.height
 
@@ -606,6 +715,10 @@ struct HandView: View {
                 }
             }
             .onEnded { value in
+                if isHeartsPassing {
+                    handlePassDragEnded(value, card: card, in: size)
+                    return
+                }
                 switch gestureIntent {
                 case .browse:
                     endBrowse(value: value, in: size)
@@ -671,7 +784,7 @@ struct HandView: View {
     /// math relative to the ORIGINAL touch-down, which `browseAnchorScroll`
     /// stays fixed against for the whole gesture regardless of how intent
     /// flip-flops mid-drag.
-    private func updateBrowse(value: DragGesture.Value, index: Int, in size: CGSize) {
+    private func updateBrowse(value: DragGesture.Value, index: Int, in size: CGSize, armOnPause: Bool = true) {
         let dx = value.translation.width
         let layout = fanLayout(in: size)
         let bounds = layout.scrollBounds()
@@ -687,7 +800,146 @@ struct HandView: View {
             Haptics.tick()
             focusedCardIndex = newFocus
         }
-        trackBrowseStationary(value: value)
+        if armOnPause { trackBrowseStationary(value: value) }
+    }
+
+    // MARK: hearts passing gesture
+
+    /// Passing-phase shape of the same drag: a horizontal scrub still
+    /// browses a wide hand (13 cards in 4-player hearts), but there is no
+    /// play to arm, so pausing never lifts a card. Anything else resolves
+    /// on release (see handlePassDragEnded).
+    private func handlePassDragChanged(_ value: DragGesture.Value, index: Int, in size: CGSize) {
+        let dx = value.translation.width
+        let dy = value.translation.height
+        if gestureIntent == .undetermined && max(abs(dx), abs(dy)) >= 12 {
+            gestureIntent = abs(dx) > abs(dy) ? .browse : .play
+            if gestureIntent == .browse {
+                browseAnchorScroll = fanScroll
+            }
+        }
+        if gestureIntent == .browse {
+            updateBrowse(value: value, index: index, in: size, armOnPause: false)
+        }
+    }
+
+    /// A tap toggles the card in and out of the pass; so does a short
+    /// upward flick, since that is what the thumb already knows. A browse
+    /// settles exactly like it does in play.
+    private func handlePassDragEnded(_ value: DragGesture.Value, card: Card, in size: CGSize) {
+        switch gestureIntent {
+        case .browse:
+            endBrowse(value: value, in: size)
+        case .undetermined:
+            togglePassSelection(card)
+        case .play:
+            if value.translation.height < -24 { togglePassSelection(card) }
+        }
+        gestureIntent = .undetermined
+        isPlayArmedFromBrowse = false
+        browseStationaryWorkItem?.cancel()
+        browseStationaryWorkItem = nil
+        browseStationaryAnchor = nil
+    }
+
+    private func togglePassSelection(_ card: Card) {
+        guard !myPassCommitted else { return }
+        if let at = passSelection.firstIndex(of: card.id) {
+            Haptics.tick()
+            withAnimation(passAnimation) { _ = passSelection.remove(at: at) }
+        } else if passSelection.count < HeartsRules.passCount {
+            Haptics.arm()
+            withAnimation(passAnimation) { passSelection.append(card.id) }
+        } else {
+            // Three already lifted: a fourth tap is a no, not a swap —
+            // tap one of the lifted cards to put it back first.
+            Haptics.tick()
+        }
+    }
+
+    private func commitPass() {
+        guard passSelection.count == HeartsRules.passCount else { return }
+        Haptics.play()
+        HeartsPassTip.isEligible = false
+        client.passCards(passSelection)
+    }
+
+    private func passAccessibilityHint(isPicked: Bool) -> String {
+        if isHeartsPassing {
+            if myPassCommitted { return "" }
+            return isPicked ? "Tap to keep this card" : "Tap to pass this card"
+        }
+        return isMyTurn ? "Flick up to play" : ""
+    }
+
+    /// The passing-phase banner: direction, the running three-of-three,
+    /// the pass button, then the waiting line once it's sent.
+    private var passPanel: some View {
+        VStack(spacing: 10) {
+            Text(passHeadline)
+                .font(.system(.headline, design: .serif).weight(.heavy))
+                .tracking(3)
+                .foregroundStyle(CardStyle.gold)
+                .multilineTextAlignment(.center)
+            if myPassCommitted {
+                HStack(spacing: 8) {
+                    ProgressView().tint(.white.opacity(0.6))
+                    Text(passWaitingText)
+                        .font(.system(.footnote, design: .serif))
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+                .accessibilityElement(children: .combine)
+            } else {
+                Text(passTargetName.map { "Pick three cards to hand \($0)" } ?? "Pick three cards to pass")
+                    .font(.system(.footnote, design: .serif))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .multilineTextAlignment(.center)
+                PassCountDots(count: passSelection.count, total: HeartsRules.passCount)
+                Button {
+                    commitPass()
+                } label: {
+                    Text(passSelection.count == HeartsRules.passCount
+                         ? "Pass these three" : "Pass \(HeartsRules.passCount) cards")
+                        .font(.headline.weight(.bold))
+                        .padding(.horizontal, 26)
+                        .padding(.vertical, 10)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(CardStyle.gold)
+                .foregroundStyle(CardStyle.ink)
+                .disabled(passSelection.count != HeartsRules.passCount)
+                .opacity(passSelection.count == HeartsRules.passCount ? 1 : 0.55)
+                .accessibilityLabel(passTargetName.map { "Pass three cards to \($0)" } ?? "Pass three cards")
+                .accessibilityHint(passSelection.count == HeartsRules.passCount
+                                   ? "" : "\(HeartsRules.passCount - passSelection.count) more to pick")
+                GhostHintTipView(tip: HeartsPassTip())
+                    .padding(.top, 2)
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(.black.opacity(0.3))
+                .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(CardStyle.gold.opacity(0.5), lineWidth: 1.5))
+        )
+        .padding(.horizontal, 24)
+    }
+
+    private var passHeadline: String {
+        switch passDirection {
+        case .left: return "PASS LEFT"
+        case .right: return "PASS RIGHT"
+        case .across: return "PASS ACROSS"
+        case .hold: return "NO PASS"
+        }
+    }
+
+    private var passWaitingText: String {
+        let names = passWaitingNames
+        if names.isEmpty { return "Everyone's in — swapping cards…" }
+        return "Waiting for \(ListFormatter.localizedString(byJoining: names))…"
     }
 
     /// If the finger holds still (within ~6pt) for 0.35s while browsing,
@@ -810,6 +1062,50 @@ struct HandView: View {
             return "Swipe up to play — house rules apply"
         }
         return isMyTurn ? "Swipe a card up to play" : "Waiting for your turn…"
+    }
+}
+
+/// Three brass dots that fill as cards are picked for the pass.
+private struct PassCountDots: View {
+    let count: Int
+    let total: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(0..<total, id: \.self) { index in
+                Circle()
+                    .fill(index < count ? CardStyle.gold : .clear)
+                    .overlay(Circle().strokeBorder(CardStyle.gold.opacity(0.7), lineWidth: 1.5))
+                    .frame(width: 11, height: 11)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(count) of \(total) picked")
+    }
+}
+
+/// The brass check that sits on a card picked for the pass: same radial
+/// gold-to-bronze stamp as the table's dealer button.
+private struct PassCheckBadge: View {
+    var body: some View {
+        Circle()
+            .fill(
+                RadialGradient(colors: [
+                    Color(red: 0.99, green: 0.92, blue: 0.72),
+                    CardStyle.gold,
+                    Color(red: 0.52, green: 0.39, blue: 0.19)
+                ], center: UnitPoint(x: 0.35, y: 0.28), startRadius: 0, endRadius: 16)
+            )
+            .overlay(Circle().strokeBorder(.black.opacity(0.4), lineWidth: 1))
+            .overlay(
+                Image(systemName: "checkmark")
+                    .font(.system(size: 12, weight: .black))
+                    .foregroundStyle(CardStyle.ink)
+                    .shadow(color: .white.opacity(0.35), radius: 0, x: 0, y: 0.7)
+            )
+            .frame(width: 24, height: 24)
+            .shadow(color: .black.opacity(0.45), radius: 2, y: 1.5)
+            .accessibilityHidden(true)
     }
 }
 

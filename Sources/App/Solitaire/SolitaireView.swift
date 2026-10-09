@@ -66,13 +66,19 @@ struct SolitaireView: View {
     @State private var closeRingProgress: CGFloat = 0
     @State private var boardSize: CGSize = .zero
 
-    init(onClose: @escaping () -> Void) {
+    /// `resumeSaved`: mount straight into the parked game (`ResumeCatalog`),
+    /// cards already where they were, no deal ceremony. Falls back to a
+    /// fresh deal if there's nothing on disk.
+    init(onClose: @escaping () -> Void, resumeSaved: Bool = false) {
         self.onClose = onClose
         if SolitaireDemo.wantsDemo {
             // The demo harness wants a static, already-mid-game board for
             // screenshotting — skip the deal ceremony entirely rather than
             // racing a screenshot against a multi-second animation.
             _game = State(initialValue: SolitaireGame(engine: SolitaireDemo.makeDemoEngine()))
+            _dealCompleted = State(initialValue: true)
+        } else if resumeSaved, let saved = LocalGameSave.loadSolitaire(), !saved.isWon {
+            _game = State(initialValue: SolitaireGame(engine: SolitaireEngine(state: saved)))
             _dealCompleted = State(initialValue: true)
         } else {
             _game = State(initialValue: SolitaireGame(seed: UInt64.random(in: UInt64.min...UInt64.max)))
@@ -95,7 +101,7 @@ struct SolitaireView: View {
                 flightOverlay(size: geo.size)
                 chromeOverlay(size: geo.size)
                 if showWinCelebration {
-                    SolitaireWinCelebration()
+                    winRecap
                         .zIndex(700)
                 }
             }
@@ -104,6 +110,10 @@ struct SolitaireView: View {
                 runOpeningDeal(size: geo.size)
             }
             .onChange(of: geo.size) { _, newSize in boardSize = newSize }
+            .onChange(of: game.state) { _, state in
+                // Autosave 2s after the last move; a won game clears it.
+                if dealCompleted { LocalGameSave.noteSolitaire(state) }
+            }
         }
         .sheet(isPresented: $showRulesSheet) {
             SolitaireRulesSheet(drawMode: drawModeBinding, onNewDeal: { showNewDealConfirm = true })
@@ -671,6 +681,20 @@ struct SolitaireView: View {
         withAnimation(.easeOut(duration: 0.4)) { showWinCelebration = true }
     }
 
+    /// The trophy moment: every card home. "New deal" is Solitaire's
+    /// rematch (same draw mode, fresh shuffle); Done leaves the table.
+    private var winRecap: some View {
+        let moves = game.state.moveCount
+        let mode = game.state.drawMode == .drawThree ? "draw three" : "draw one"
+        return GameRecapCard(
+            title: "You win!",
+            rows: [RecapRow(id: 0, name: "Every card home", score: "\(moves) moves", detail: mode, isWinner: true)],
+            highlight: "All 52 cards up in \(moves) moves",
+            rematchLabel: "New deal",
+            onRematch: { startNewDeal() },
+            onDone: onClose)
+    }
+
     // MARK: - Chrome
 
     @ViewBuilder
@@ -710,6 +734,7 @@ struct SolitaireView: View {
 
     private func startNewDeal() {
         Haptics.arm()
+        LocalGameSave.clear(.solitaire)
         inFlight.removeAll()
         dragSource = nil; dragRunIDs = []; dragCardOrigins = [:]; dragTranslation = .zero
         showWinCelebration = false

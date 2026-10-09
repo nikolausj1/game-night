@@ -9,6 +9,8 @@ import SwiftUI
 /// sits across the table. The far seat's plaque is rotated 180 degrees.
 struct CheckersView: View {
     var onClose: () -> Void
+    /// Mount straight into the parked game (`ResumeCatalog`), skipping setup.
+    var resumeSaved = false
 
     @State private var controller: CheckersController?
     @Environment(\.accessibilityReduceMotion) private var motionReduced
@@ -29,11 +31,22 @@ struct CheckersView: View {
                 controller = demo
                 demo.scheduleBotIfNeeded()
             }
+            if controller == nil, resumeSaved, let saved = LocalGameSave.loadCheckers() {
+                let restored = CheckersController(restoring: saved)
+                restored.reduceMotion = motionReduced
+                controller = restored
+                restored.scheduleBotIfNeeded()
+            }
         }
         .onChange(of: motionReduced) { _, reduced in controller?.reduceMotion = reduced }
+        .onChange(of: controller?.revision) { _, _ in
+            // Autosave 2s after the last completed move; game over clears it.
+            if let controller, controller.prefix.isEmpty { LocalGameSave.noteCheckers(controller.state) }
+        }
     }
 
     private func start(names: [String], bots: [Bool]) {
+        LocalGameSave.clear(.board("checkers"))
         let players = [CheckersPlayer(name: names[0], isBot: bots[0]), CheckersPlayer(name: names[1], isBot: bots[1])]
         let fresh = CheckersController(players: players, firstPlayer: 0)
         fresh.reduceMotion = motionReduced
@@ -59,14 +72,35 @@ struct CheckersView: View {
         }
         .overlay {
             if controller.isOver {
-                CheckersResultOverlay(state: controller.state, onRematch: {
-                    let last = controller.state.winner ?? controller.state.currentPlayer
-                    controller.restart(players: controller.state.players, firstPlayer: 1 - last)
-                }, onClose: onClose)
-                .transition(.scale(scale: 0.92).combined(with: .opacity))
+                recap(controller)
+                    .transition(.scale(scale: 0.92).combined(with: .opacity))
             }
         }
         .animation(.easeInOut(duration: 0.3), value: controller.isOver)
+    }
+
+    /// End of game: how it ended, captures each side, rematch.
+    private func recap(_ controller: CheckersController) -> some View {
+        let state = controller.state
+        let pile = controller.stage.pile
+        let order = [0, 1].sorted { (state.winner == $0) || (state.winner != $1 && pile[$0] > pile[$1]) }
+        let rows = order.map { seat -> RecapRow in
+            let captured = pile.indices.contains(seat) ? pile[seat] : 0
+            return RecapRow(id: seat, name: state.players[seat].name, colorIndex: seat == 0 ? 1 : 0,
+                            score: "\(captured)", detail: "captured", isWinner: state.winner == seat)
+        }
+        let title = state.winner.map { "\(state.players[$0].name) wins Checkers" } ?? "A draw"
+        let highlight: String
+        switch state.endReason {
+        case .noPieces: highlight = "Every one of their pieces was captured"
+        case .noMoves: highlight = "No legal move left on the board"
+        case .noCaptureLimit: highlight = "Forty moves each without a capture. Honours even."
+        case nil: highlight = "\(state.moveCount) moves played"
+        }
+        return GameRecapCard(title: title, rows: rows, highlight: highlight, onRematch: {
+            let last = state.winner ?? state.currentPlayer
+            controller.restart(players: state.players, firstPlayer: 1 - last)
+        }, onDone: onClose)
     }
 
     private func plaque(_ controller: CheckersController, seat: Int) -> some View {

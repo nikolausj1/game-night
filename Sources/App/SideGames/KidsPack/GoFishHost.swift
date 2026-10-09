@@ -107,6 +107,49 @@ final class GoFishHost: SideGameHost {
         scheduleBotIfNeeded()
     }
 
+    /// Resume: the engine's saved hands/pool/books, no opening deal to
+    /// narrate (the table settles straight from state), bots re-seeded.
+    init(restoring state: GoFishState, seats: [SeatSpec]) {
+        engine = GoFishEngine(restoring: state)
+        var names: [Int: String] = [:]
+        var bots = Set<Int>()
+        for spec in seats where spec.id >= 0 && spec.id < state.playerCount {
+            names[spec.id] = spec.name.isEmpty ? "Player \(spec.id + 1)" : spec.name
+            if spec.isBot { bots.insert(spec.id) }
+        }
+        for id in 0..<state.playerCount where names[id] == nil { names[id] = "Player \(id + 1)" }
+        seatNames = names
+        botSeats = bots
+        botRNG = SeededGenerator(seed: state.seed ^ 0x60F1_5400_60F1_5400 &+ UInt64(state.askLog.count &+ 1))
+        scheduleBotIfNeeded()
+    }
+
+    // MARK: save / resume
+
+    convenience init?(restoring data: Data, seats: [SeatSpec]) {
+        guard let state = try? JSONDecoder().decode(GoFishState.self, from: data),
+              state.phase != .gameOver else { return nil }
+        self.init(restoring: state, seats: seats)
+    }
+
+    /// The engine state before any ask still in flight — a resumed game
+    /// simply asks again.
+    func snapshot() -> Data? {
+        guard engine.state.phase != .gameOver else { return nil }
+        return try? JSONEncoder().encode(engine.state)
+    }
+
+    var resumeSubtitle: String {
+        let s = engine.state
+        let counts = s.books.mapValues(\.count)
+        let leader = (0..<s.playerCount).max { (counts[$0] ?? 0) < (counts[$1] ?? 0) }
+        let best = leader.map { counts[$0] ?? 0 } ?? 0
+        if let leader, best > 0 {
+            return "\(name(s.turnSeat)) to ask · \(name(leader)) has \(best) book\(best == 1 ? "" : "s")"
+        }
+        return "\(name(s.turnSeat)) to ask · no books yet"
+    }
+
     // MARK: SideGameHost
 
     func handle(action: SideGamePayload, from seat: Int) {

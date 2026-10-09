@@ -1,38 +1,27 @@
 import SwiftUI
 
-/// A compact disclosure exposing the selected game's house-rule toggles in
-/// plain language. Collapsed by default — the deal button stays reachable
-/// without scrolling past rules nobody's changing tonight.
+/// House rules for the side games (Blackjack, Liar's Dice, Battleship) the
+/// menu collects before a deal. Every field is the engine's OWN config
+/// type, so this panel can only expose flags the engine actually honors.
+/// Nothing is invented at the menu layer: a toggle here is a toggle the
+/// rules code already reads.
+struct SideGameRules: Equatable {
+    var blackjack = BlackjackConfig()
+    var liarsDice = LiarsDiceConfig()
+    /// Battleship salvo mode: each turn you fire one shot per ship you
+    /// still have afloat (`BattleshipEngine.shotsFor`), instead of one.
+    var battleshipSalvo = false
+}
+
+/// A compact disclosure exposing the selected card game's house-rule
+/// toggles in plain language. Collapsed by default, so the deal button
+/// stays reachable without scrolling past rules nobody's changing tonight.
 struct RulesPanelView: View {
     let game: GameKind
     @Binding var rules: RulesConfig
 
-    @State private var expanded = false
-
     var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 16) {
-                rows
-            }
-            .padding(.top, 14)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "scroll.fill")
-                Text("House Rules")
-            }
-            .font(.system(.headline, design: .serif))
-            .foregroundStyle(CardStyle.gold)
-        }
-        .tint(CardStyle.gold)
-        .padding(18)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.black.opacity(0.22))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(CardStyle.gold.opacity(0.25), lineWidth: 1)
-                )
-        )
+        HouseRulesPanel { rows }
     }
 
     @ViewBuilder
@@ -64,7 +53,7 @@ struct RulesPanelView: View {
             autoDealRow
         case .hearts:
             RuleToggleRow(title: "Pass Three Cards",
-                          subtitle: "Left, right, across, hold — the classic rotation before each hand.",
+                          subtitle: "Left, right, across, hold: the classic rotation before each hand.",
                           isOn: $rules.heartsPassing)
             RuleToggleRow(title: "No Points on the First Trick",
                           subtitle: "Hearts and the queen can't be dumped on the opening trick.",
@@ -78,7 +67,7 @@ struct RulesPanelView: View {
                           subtitle: "Bid nil before looking at your hand for double stakes.",
                           isOn: $rules.spadesBlindNil)
             RuleToggleRow(title: "Cutthroat",
-                          subtitle: "Four players, no partnerships — everyone for themselves.",
+                          subtitle: "No partnerships, everyone for themselves.",
                           isOn: $rules.spadesCutthroat)
             autoDealRow
         case .freePlay:
@@ -90,6 +79,89 @@ struct RulesPanelView: View {
         RuleToggleRow(title: "Auto-Deal",
                       subtitle: "The table deals for you. Off: the dealer hands out every card.",
                       isOn: $rules.autoDeal)
+    }
+}
+
+/// The same disclosure for the side games that expose rule flags. Only
+/// Blackjack, Liar's Dice, and Battleship have engine-level options; the
+/// kids' pack, Gin Rummy, and the dice games have none, and the menu
+/// simply doesn't show a panel for them (`SideGameMenuKind.hasHouseRules`).
+struct SideRulesPanelView: View {
+    let game: SideGameMenuKind
+    @Binding var rules: SideGameRules
+
+    var body: some View {
+        HouseRulesPanel { rows }
+    }
+
+    @ViewBuilder
+    private var rows: some View {
+        switch game {
+        case .blackjack:
+            RuleToggleRow(title: "Dealer Hits Soft 17",
+                          subtitle: "The dealer draws on a soft 17 instead of standing. A touch better for the house.",
+                          isOn: $rules.blackjack.dealerHitsSoft17)
+            RuleToggleRow(title: "Dealer Peeks",
+                          subtitle: "With an ace or ten showing, the dealer checks for blackjack before anyone doubles or splits into it.",
+                          isOn: $rules.blackjack.dealerPeeks)
+            RuleToggleRow(title: "Double After Split",
+                          subtitle: "Doubling down is allowed on a hand made by a split.",
+                          isOn: $rules.blackjack.doubleAfterSplit)
+            RuleToggleRow(title: "Insurance",
+                          subtitle: "When the dealer shows an ace, side-bet half your stake against a dealer blackjack.",
+                          isOn: $rules.blackjack.insuranceEnabled)
+            RuleToggleRow(title: "Late Surrender",
+                          subtitle: "Fold a bad first two cards and keep half your bet.",
+                          isOn: $rules.blackjack.surrenderEnabled)
+        case .liarsDice:
+            RuleToggleRow(title: "Ones Are Wild",
+                          subtitle: "Every 1 counts toward whatever face is bid.",
+                          isOn: $rules.liarsDice.wildOnes)
+            RuleToggleRow(title: "Spot On",
+                          subtitle: "Call a bid exactly right to win back a lost die. Miss, and you lose one.",
+                          isOn: $rules.liarsDice.spotOnEnabled)
+        case .battleship:
+            RuleToggleRow(title: "Salvo",
+                          subtitle: "Fire one shot per ship you still have afloat each turn, instead of one.",
+                          isOn: $rules.battleshipSalvo)
+        case .ginRummy, .goFish, .oldMaid, .war:
+            EmptyView()
+        }
+    }
+}
+
+/// The shared chrome: a gold scroll-icon disclosure on a dark felt plate,
+/// collapsed by default. Both rule panels above render through it so a
+/// Blackjack table and a Wizard table offer their options in one voice.
+private struct HouseRulesPanel<Rows: View>: View {
+    @ViewBuilder let rows: () -> Rows
+
+    @State private var expanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: 16) {
+                rows()
+            }
+            .padding(.top, 14)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "scroll.fill")
+                Text("House Rules")
+            }
+            .font(.system(.headline, design: .serif))
+            .foregroundStyle(CardStyle.gold)
+        }
+        .tint(CardStyle.gold)
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.black.opacity(0.22))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(CardStyle.gold.opacity(0.25), lineWidth: 1)
+                )
+        )
     }
 }
 
@@ -107,6 +179,7 @@ private struct RuleToggleRow: View {
                 Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(CardStyle.stockTop.opacity(0.6))
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .toggleStyle(SwitchToggleStyle(tint: CardStyle.gold))

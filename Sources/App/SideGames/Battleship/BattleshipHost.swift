@@ -53,7 +53,7 @@ final class BattleshipHost: SideGameHost {
     private var ended = false
     private var lastShotWasSunk = false
 
-    init(seats: [SeatSpec], seed: UInt64, salvo: Bool = false) {
+    init(seats: [SeatSpec], seed: UInt64, salvo: Bool = false, restoring saved: BattleshipState? = nil) {
         var bots: Set<Int> = []
         var names: [Int: String] = [:]
         for spec in seats where spec.id == 0 || spec.id == 1 {
@@ -69,8 +69,16 @@ final class BattleshipHost: SideGameHost {
         self.botSeats = bots
         self.seatNames = names
         self.seed = seed
-        self.engine = BattleshipEngine(seed: seed, salvo: salvo)
-        self.botRNG = SeededGenerator(seed: seed ^ 0xB477_1E55_1B00_0001)
+        if let saved {
+            // Resume: the engine picks up mid-battle; the bot RNG is
+            // re-derived from how far the game got so a resumed game
+            // doesn't replay the exact shot sequence it already took.
+            self.engine = BattleshipEngine(restoring: saved)
+            self.botRNG = SeededGenerator(seed: seed ^ 0xB477_1E55_1B00_0001 &+ UInt64(saved.shotCounter &+ 1))
+        } else {
+            self.engine = BattleshipEngine(seed: seed, salvo: salvo)
+            self.botRNG = SeededGenerator(seed: seed ^ 0xB477_1E55_1B00_0001)
+        }
         // `onChanged` isn't wired yet; kick the bots on the next runloop tick.
         DispatchQueue.main.async { [weak self] in self?.advanceBots() }
     }
@@ -99,6 +107,37 @@ final class BattleshipHost: SideGameHost {
         ended = true
         botWork?.cancel()
         botWork = nil
+    }
+
+    // MARK: save / resume
+
+    /// `SideGameRegistry` restore: the bytes `snapshot()` wrote, for the
+    /// seats the envelope remembered.
+    convenience init?(restoring data: Data, seats: [SeatSpec]) {
+        guard let saved = try? JSONDecoder().decode(BattleshipState.self, from: data),
+              saved.phase != .gameOver else { return nil }
+        self.init(seats: seats, seed: saved.seed, salvo: saved.salvo, restoring: saved)
+    }
+
+    /// The engine state is the whole game (fleets, every shot, whose turn).
+    func snapshot() -> Data? {
+        guard engine.state.phase != .gameOver else { return nil }
+        return try? JSONEncoder().encode(engine.state)
+    }
+
+    var resumeSubtitle: String {
+        let state = engine.state
+        switch state.phase {
+        case .placement:
+            return "Fleets deploying"
+        case .battle:
+            let turn = state.turnSeat ?? state.firstSeat
+            let name = seatNames[turn] ?? "Seat \(turn + 1)"
+            let sunk = state.sunkShips(of: 1 - turn).count
+            return "Shot \(state.shotCounter + 1) · \(name) to fire · \(sunk) of \(BattleshipRules.fleet.count) sunk"
+        case .gameOver:
+            return "Finished"
+        }
     }
 
     // MARK: table conveniences

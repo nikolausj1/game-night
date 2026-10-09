@@ -60,7 +60,7 @@ struct SeatsBuilderView: View {
                                   accessibilityLabel: "Remove a bot") {
                     Haptics.tick()
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
-                        botDrafts.removeLast()
+                        _ = botDrafts.removeLast()
                     }
                 }
                 Text("Add a Bot")

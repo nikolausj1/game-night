@@ -30,6 +30,17 @@ struct LiarsDicePhoneState: Codable, Equatable {
     var shakenSeats: [Int]
 }
 
+/// What a parked Liar's Dice game writes to disk. Names and bot seats are
+/// kept here (not only in the envelope) because the host may have filled
+/// empty chairs with roster bots the table controller never knew about.
+struct LiarsDiceSave: Codable, Equatable {
+    var state: LiarsDiceState
+    var gameSeed: UInt64
+    var names: [String]
+    var botSeats: [Int]
+    var shaken: [Int]
+}
+
 // MARK: - Timing
 
 /// One clock shared by the host (how long to hold a reveal before the next
@@ -169,6 +180,37 @@ final class LiarsDiceHost: SideGameHost {
         self.init(engine: engine, names: names, botSeats: botSeats, gameSeed: gameSeed, autoplay: autoplay)
         shakenSeats = shaken
         if autoplay { schedule() }
+    }
+
+    /// `SideGameRegistry` restore: the bytes `snapshot()` wrote. Envelope
+    /// seat names win over the saved ones where they're set (a renamed
+    /// phone), bots and dice come straight from the save.
+    convenience init?(restoring data: Data, seats: [SeatSpec]) {
+        guard let save = try? JSONDecoder().decode(LiarsDiceSave.self, from: data),
+              save.state.phase != .gameOver, save.names.count == save.state.diceCounts.count else { return nil }
+        var names = save.names
+        for spec in seats where names.indices.contains(spec.id) && !spec.name.isEmpty { names[spec.id] = spec.name }
+        self.init(restoring: LiarsDiceEngine(restoring: save.state), names: names,
+                  botSeats: Set(save.botSeats), shaken: Set(save.shaken), gameSeed: save.gameSeed, autoplay: true)
+        if engine.state.phase == .awaitingDice {
+            // Parked between rounds: roll the new round's cups now, the way
+            // `perform(.nextRound)` would have.
+            beginRound()
+            schedule()
+        }
+    }
+
+    func snapshot() -> Data? {
+        guard engine.state.phase != .gameOver else { return nil }
+        let save = LiarsDiceSave(state: engine.state, gameSeed: gameSeed, names: names,
+                                 botSeats: botSeats.sorted(), shaken: shakenSeats.sorted())
+        return try? JSONEncoder().encode(save)
+    }
+
+    var resumeSubtitle: String {
+        let s = engine.state
+        let live = s.liveSeats.count
+        return "Round \(max(1, s.roundNumber)) · \(live) still in · \(name(of: s.turnSeat)) to bid"
     }
 
     /// Cautious / balanced / reckless, by name. The six `BotRoster` regulars

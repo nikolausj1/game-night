@@ -39,13 +39,19 @@ enum KidsPackIntegration {
     static let registryEntries: [String: SideGameRegistry.Entry] = [
         GoFishEngine.kind: SideGameRegistry.Entry(
             table: { AnyView(GoFishTableView(host: $0, onClose: $1)) },
-            hand: { AnyView(GoFishHandView(client: $0)) }),
+            hand: { AnyView(GoFishHandView(client: $0)) },
+            restore: { GoFishHost(restoring: $0, seats: $1) },
+            fresh: { GoFishHost(seats: $0, seed: $1) }),
         OldMaidEngine.kind: SideGameRegistry.Entry(
             table: { AnyView(OldMaidTableView(host: $0, onClose: $1)) },
-            hand: { AnyView(OldMaidHandView(client: $0)) }),
+            hand: { AnyView(OldMaidHandView(client: $0)) },
+            restore: { OldMaidHost(restoring: $0, seats: $1) },
+            fresh: { OldMaidHost(seats: $0, seed: $1) }),
         WarEngine.kind: SideGameRegistry.Entry(
             table: { AnyView(WarTableView(host: $0, onClose: $1)) },
-            hand: { AnyView(WarHandView(client: $0)) }),
+            hand: { AnyView(WarHandView(client: $0)) },
+            restore: { WarHost(restoring: $0, seats: $1) },
+            fresh: { WarHost(seats: $0, seed: $1) }),
     ]
 
     private static func randomSeed() -> UInt64 { UInt64.random(in: UInt64.min...UInt64.max) }

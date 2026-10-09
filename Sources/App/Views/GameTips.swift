@@ -51,6 +51,39 @@ struct TableNudgeTip: Tip {
     var options: [TipOption] { MaxDisplayCount(1) }
 }
 
+/// Hand, Hearts: the first passing phase. The three-card pass is the one
+/// Hearts mechanic that isn't "play a card", so it gets its own nudge.
+struct HeartsPassTip: Tip {
+    @Parameter
+    static var isEligible: Bool = false
+
+    var title: Text { Text("Tap three cards to pass them on") }
+
+    var message: Text? { Text("High hearts and the queen of spades are good riddance.") }
+
+    var rules: [Rule] {
+        #Rule(Self.$isEligible) { $0 == true }
+    }
+
+    var options: [TipOption] { MaxDisplayCount(1) }
+}
+
+/// Hand, Spades: the first bid. Nil is the bet most new players miss.
+struct SpadesNilTip: Tip {
+    @Parameter
+    static var isEligible: Bool = false
+
+    var title: Text { Text("Bid Nil to bet on taking no tricks") }
+
+    var message: Text? { Text("Make it for a big bonus; take even one trick and it costs you the same.") }
+
+    var rules: [Rule] {
+        #Rule(Self.$isEligible) { $0 == true }
+    }
+
+    var options: [TipOption] { MaxDisplayCount(1) }
+}
+
 /// The default TipKit popover reads as a stray system control against
 /// green felt — this renders the same title in the app's own italic
 /// ghost-hint voice (gold-on-dark, serif) with a tap-to-dismiss instead.

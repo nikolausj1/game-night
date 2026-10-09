@@ -102,6 +102,7 @@ final class ZilchController {
 
     private let host: GameHostController
     private var rollCounter = 0
+    private let autosave = SaveDebouncer()
 
     init(host: GameHostController, seats specs: [SeatSpec]) {
         self.host = host
@@ -131,6 +132,7 @@ final class ZilchController {
         }
         seats = built
         bankedScore = Array(repeating: 0, count: built.count)
+        SaveSlots.clear(kind: .dice(.zilch)) // an explicit new game supersedes any parked one
 
         host.diceSeatByDevice = deviceMap
         host.onDicePour = { [weak self] seat, intensity in
@@ -143,6 +145,70 @@ final class ZilchController {
         Announcer.shared.announceGameStart(playerNames: built.map(\.name))
         broadcast()
         scheduleBotIfNeeded()
+    }
+
+    /// Resume (see `DiceSave`): banked totals, the live turn total and the
+    /// dice already set aside, the final-chase bookkeeping. Scoring groups
+    /// from the last roll that were never tapped aren't kept (those dice
+    /// get re-thrown) — see `ZilchSaveState`.
+    init?(host: GameHostController, restoring saved: ZilchSaveState) {
+        guard !saved.seats.isEmpty, saved.bankedScore.count == saved.seats.count,
+              saved.seats.indices.contains(saved.turnSeat) else { return nil }
+        self.host = host
+        seats = saved.seats.map {
+            DiceSeat(id: $0.id, name: $0.name, isBot: $0.isBot, deviceID: $0.deviceID, colorIndex: $0.colorIndex)
+        }
+        bankedScore = saved.bankedScore
+        turnSeat = saved.turnSeat
+        turnScore = max(0, saved.turnScore)
+        let held = Set(saved.heldIndices.filter { (0..<diceCount).contains($0) })
+        heldIndices = held.count >= diceCount ? [] : held // all six aside = hot dice already owed
+        finalChaseSeat = saved.finalChaseSeat
+        finalChaseRemaining = Set(saved.finalChaseRemaining.filter { seats.indices.contains($0) })
+        wireHost()
+        broadcast()
+        scheduleBotIfNeeded()
+    }
+
+    /// Host dice routing from the seats' durable deviceIDs — what the fresh
+    /// init builds inline; resume rebuilds it from the saved seats.
+    private func wireHost() {
+        var deviceMap: [String: Int] = [:]
+        for seat in seats {
+            if let deviceID = seat.deviceID { deviceMap[deviceID] = seat.id }
+        }
+        host.diceSeatByDevice = deviceMap
+        host.onDicePour = { [weak self] seat, intensity in
+            self?.roll(from: seat, intensity: intensity)
+        }
+        host.onDiceHello = { [weak self] deviceID in
+            self?.resendState(toDevice: deviceID)
+        }
+    }
+
+    // MARK: - Save (see Sources/App/Save/DiceSave.swift)
+
+    /// Writes the game between rolls, 2s after the last change; a finished
+    /// game clears its slot. Skipped mid-roll and during the ZILCH / hot-
+    /// dice beats, whose consequences haven't landed yet.
+    private func persist() {
+        if gameOver {
+            SaveSlots.clear(kind: .dice(.zilch))
+            return
+        }
+        guard !rollInFlight, !zilchFlash, !hotDiceFlash, seats.indices.contains(turnSeat) else { return }
+        let saved = ZilchSaveState(seats: savedSeats, bankedScore: bankedScore, turnSeat: turnSeat,
+                                   turnScore: turnScore, heldIndices: heldIndices.sorted(),
+                                   finalChaseSeat: finalChaseSeat, finalChaseRemaining: finalChaseRemaining.sorted())
+        let prefix = finalChaseSeat != nil ? "Final chase" : "\(seats[turnSeat].name) rolling"
+        let subtitle = DiceSave.leaderSubtitle(prefix: prefix,
+                                               standings: seats.map { ($0.name, bankedScore[$0.id]) })
+        SaveSlots.write(kind: .dice(.zilch), title: "Zilch", subtitle: subtitle,
+                        seats: DiceSave.envelopeSeats(savedSeats), payload: saved)
+    }
+
+    private var savedSeats: [DiceSavedSeat] {
+        seats.map { DiceSavedSeat(id: $0.id, name: $0.name, isBot: $0.isBot, deviceID: $0.deviceID, colorIndex: $0.colorIndex) }
     }
 
     // MARK: - Turn-progress gate
@@ -479,6 +545,7 @@ final class ZilchController {
             guard let deviceID = seat.deviceID else { continue }
             host.sendDiceState(state(for: seat.id), toDevice: deviceID)
         }
+        autosave.schedule { [weak self] in self?.persist() }
     }
 
     private func resendState(toDevice deviceID: String) {
@@ -540,6 +607,9 @@ final class ZilchController {
     /// Tear-down: every phone gets the "dice closed" sentinel, same
     /// contract as `DiceGameController.end()`.
     func end() {
+        // Park it now (the debounced write may not have landed yet).
+        autosave.cancel()
+        persist()
         let sentinel = DiceClientState(
             kind: .zilch, mySeat: -1, seatNames: [], chips: [], centerPot: 0,
             turnSeat: -1, isMyTurn: false, gameOver: true, winnerSeat: nil)

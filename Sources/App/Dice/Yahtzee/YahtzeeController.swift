@@ -95,6 +95,7 @@ final class YahtzeeController {
     private var rng: SplitMix64
     private var rollCounter = 0
     private var scoreEventCounter = 0
+    private let autosave = SaveDebouncer()
 
     init(host: GameHostController, seats specs: [SeatSpec]) {
         self.host = host
@@ -126,6 +127,7 @@ final class YahtzeeController {
         }
         seats = built
         scorecards = Array(repeating: YahtzeeScorecard(), count: built.count)
+        SaveSlots.clear(kind: .dice(.yahtzee)) // an explicit new game supersedes any parked one
 
         host.diceSeatByDevice = deviceMap
         host.onDicePour = { [weak self] seat, intensity in
@@ -138,6 +140,77 @@ final class YahtzeeController {
         Announcer.shared.announceGameStart(playerNames: built.map(\.name))
         broadcast()
         scheduleBotIfNeeded()
+    }
+
+    /// Resume (see `DiceSave`): every scoresheet and whose turn, from the
+    /// top of that turn — see `YahtzeeSaveState` for what a mid-turn save
+    /// forgets. Host dice routing is rebuilt from the seats' durable
+    /// deviceIDs so returning phones land straight back in their cups.
+    init?(host: GameHostController, restoring saved: YahtzeeSaveState) {
+        guard !saved.seats.isEmpty, saved.scorecards.count == saved.seats.count,
+              saved.seats.indices.contains(saved.turnSeat) else { return nil }
+        self.host = host
+        rng = SplitMix64(seed: UInt64.random(in: .min ... .max))
+        dieValues = Array(repeating: nil, count: Self.diceCount)
+        seats = saved.seats.map {
+            YahtzeeSeat(id: $0.id, name: $0.name, isBot: $0.isBot, deviceID: $0.deviceID, colorIndex: $0.colorIndex)
+        }
+        scorecards = saved.scorecards.map { card in
+            var entries: [YahtzeeCategory: Int] = [:]
+            for (key, value) in card.entries {
+                if let category = YahtzeeCategory(rawValue: key) { entries[category] = value }
+            }
+            return YahtzeeScorecard(entries: entries, yahtzeeBonusCount: card.yahtzeeBonusCount)
+        }
+        turnSeat = saved.turnSeat
+        wireHost()
+        broadcast()
+        scheduleBotIfNeeded()
+    }
+
+    /// Host dice routing from the seats' durable deviceIDs — what the fresh
+    /// init builds inline; resume rebuilds it from the saved seats.
+    private func wireHost() {
+        var deviceMap: [String: Int] = [:]
+        for seat in seats {
+            if let deviceID = seat.deviceID { deviceMap[deviceID] = seat.id }
+        }
+        host.diceSeatByDevice = deviceMap
+        host.onDicePour = { [weak self] seat, intensity in
+            self?.roll(from: seat, intensity: intensity)
+        }
+        host.onDiceHello = { [weak self] deviceID in
+            self?.resendState(toDevice: deviceID)
+        }
+    }
+
+    // MARK: - Save (see Sources/App/Save/DiceSave.swift)
+
+    /// Writes the game between rolls, 2s after the last change; a finished
+    /// game clears its slot. Nothing is written while a roll is in the
+    /// air — the physical dice are the result, and they can't be saved —
+    /// so the slot always holds the last settled moment.
+    private func persist() {
+        if gameOver {
+            SaveSlots.clear(kind: .dice(.yahtzee))
+            return
+        }
+        guard !rollInFlight, seats.indices.contains(turnSeat) else { return }
+        let cards = scorecards.map { card in
+            YahtzeeSavedCard(entries: Dictionary(uniqueKeysWithValues: card.entries.map { ($0.key.rawValue, $0.value) }),
+                             yahtzeeBonusCount: card.yahtzeeBonusCount)
+        }
+        let saved = YahtzeeSaveState(seats: savedSeats, turnSeat: turnSeat, scorecards: cards)
+        let round = (scorecards.map { $0.entries.count }.min() ?? 0) + 1
+        let subtitle = DiceSave.leaderSubtitle(
+            prefix: "Round \(min(round, YahtzeeCategory.allCases.count)) of \(YahtzeeCategory.allCases.count)",
+            standings: seats.map { ($0.name, scorecards[$0.id].total) })
+        SaveSlots.write(kind: .dice(.yahtzee), title: "Yahtzee", subtitle: subtitle,
+                        seats: DiceSave.envelopeSeats(savedSeats), payload: saved)
+    }
+
+    private var savedSeats: [DiceSavedSeat] {
+        seats.map { DiceSavedSeat(id: $0.id, name: $0.name, isBot: $0.isBot, deviceID: $0.deviceID, colorIndex: $0.colorIndex) }
     }
 
     // MARK: - Rolling
@@ -485,6 +558,7 @@ final class YahtzeeController {
             guard let deviceID = seat.deviceID else { continue }
             host.sendDiceState(state(for: seat.id), toDevice: deviceID)
         }
+        autosave.schedule { [weak self] in self?.persist() }
     }
 
     /// One seat's personalized view of the game right now. `chips` is
@@ -535,6 +609,9 @@ final class YahtzeeController {
     /// host's dice routing is unhooked — identical contract to
     /// `DiceGameController.end`.
     func end() {
+        // Park it now (the debounced write may not have landed yet).
+        autosave.cancel()
+        persist()
         let sentinel = DiceClientState(
             kind: kind, mySeat: -1, seatNames: [], chips: [], centerPot: 0,
             turnSeat: -1, isMyTurn: false, gameOver: true, winnerSeat: nil)

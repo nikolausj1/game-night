@@ -490,57 +490,29 @@ struct WarTableContent: View {
         let counts = game.engine.counts()
         let c0 = counts[0] ?? 0, c1 = counts[1] ?? 0
         let title: String
-        let subtitle: String
+        let highlight: String
         if state.endReason == .roundCap {
             if let w = state.winner {
-                title = "\(game.name(w)) wins on cards!"
-                subtitle = "Time's up after \(state.round) battles: \(max(c0, c1)) cards to \(min(c0, c1))."
+                title = "\(game.name(w)) wins!"
+                highlight = "Time's up after \(state.round) battles: \(max(c0, c1)) cards to \(min(c0, c1))"
             } else {
-                title = "It's a draw!"
-                subtitle = "Time's up after \(state.round) battles, \(c0) cards each."
+                title = "It's a tie!"
+                highlight = "Time's up after \(state.round) battles, \(c0) cards each"
             }
         } else if let w = state.winner {
-            title = "\(game.name(w)) wins every card!"
-            subtitle = "All 52 cards in \(state.round) battles."
+            title = "\(game.name(w)) wins!"
+            highlight = "Every card, in \(state.round) battles"
         } else {
             title = "Good game!"
-            subtitle = ""
+            highlight = ""
         }
-        return ScorecardPanel(title: title) {
-            Text(subtitle)
-                .font(.system(.title3, design: .serif).italic())
-                .foregroundStyle(CardStyle.stockTop.opacity(0.85))
-                .multilineTextAlignment(.center)
-            ForEach(0..<2, id: \.self) { seat in
-                HStack {
-                    Circle().fill(PlayerPalette.color(seat)).frame(width: 12, height: 12)
-                    Text(game.name(seat)).font(.system(.title3, design: .serif))
-                    Spacer()
-                    Text("\(counts[seat] ?? 0) cards").font(.title3.weight(.bold).monospacedDigit())
-                }
-                .foregroundStyle(state.winner == seat ? CardStyle.gold : CardStyle.stockTop)
-            }
-        } action: {
-            HStack(spacing: 14) {
-                if let onPlayAgain {
-                    Button(action: onPlayAgain) {
-                        Text("Play again")
-                            .font(.title3.weight(.bold))
-                            .padding(.horizontal, 30).padding(.vertical, 12)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(CardStyle.gold)
-                    .foregroundStyle(CardStyle.ink)
-                }
-                Button { onClose?() } label: {
-                    Text("Back to menu")
-                        .font(.title3.weight(.semibold))
-                        .padding(.horizontal, 22).padding(.vertical, 12)
-                }
-                .buttonStyle(.bordered)
-                .tint(CardStyle.stockTop)
-            }
+        let rows = [0, 1].sorted { (counts[$0] ?? 0) > (counts[$1] ?? 0) }.map { seat in
+            RecapRow(id: seat, name: game.name(seat), colorIndex: seat,
+                     score: "\(counts[seat] ?? 0) cards", isWinner: state.winner == seat)
         }
+        return GameRecapCard(title: title, rows: rows, highlight: highlight, kidMode: true,
+                             rematchLabel: onPlayAgain == nil ? nil : "Rematch",
+                             onRematch: onPlayAgain, onDone: { onClose?() })
     }
 }
 

@@ -51,7 +51,7 @@ struct TableGameView: View {
     /// so the cup-by-the-plate flow is screenshot-testable — simctl can't
     /// tap the tray toggle.
     @State private var freePlayDiceOn = CommandLine.arguments.contains("-demoFreePlayDice")
-    @State private var freePlayCoinsOn = false
+    @State private var freePlayCoinsOn = CommandLine.arguments.contains("-demoFreePlayCoins")
     @State private var freePlayRoll: DiceGameController.Roll?
     @State private var freePlayRollCounter = 10_000 // clear of LCR roll ids
 
@@ -1359,7 +1359,7 @@ struct DealFlightView: View {
                 ? "\(state.seats[seat].playerName) is naming a suit…"
                 : "\(state.seats[seat].playerName) is choosing trump…")
         case .passing:
-            TableBanner(text: "Passing three cards…")
+            TableBanner(text: passingBanner(state: state))
         case .trickComplete(let winner):
             TrickWonBanner(name: state.seats[winner].playerName,
                            color: PlayerPalette.color(state.seats[winner].colorIndex))
@@ -1376,6 +1376,25 @@ struct DealFlightView: View {
         guard let round = state.round else { return "Bidding…" }
         let waiting = state.seats[round.turnSeat].playerName
         return "Round \(round.roundNumber) — \(waiting) is bidding…"
+    }
+
+    /// Hearts: the direction plus who the table is still waiting on, so
+    /// the iPad narrates the simultaneous phase the way it narrates turns.
+    /// The plates carry the per-seat check / pulse (see SeatPlateView).
+    private func passingBanner(state: GameState) -> String {
+        guard let round = state.round else { return "Passing three cards…" }
+        let direction: String
+        switch round.passDirection {
+        case .left: direction = "left"
+        case .right: direction = "right"
+        case .across: direction = "across"
+        case .hold, nil: direction = ""
+        }
+        let waiting = state.seats.filter { round.passSelections[$0.id] == nil }.map(\.playerName)
+        let lead = direction.isEmpty ? "Passing three cards" : "Passing three cards \(direction)"
+        if waiting.isEmpty { return "\(lead)…" }
+        if waiting.count == state.seats.count { return "\(lead) — everyone is picking…" }
+        return "\(lead) — waiting on \(ListFormatter.localizedString(byJoining: waiting))…"
     }
 
     // MARK: pacing

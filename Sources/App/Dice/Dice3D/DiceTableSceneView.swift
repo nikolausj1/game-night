@@ -1267,6 +1267,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
 
     func physicsWorld(_ world: SCNPhysicsWorld, didBegin contact: SCNPhysicsContact) {
         contactThrottle?.register(contact)
+        CoinImpactBus.shared.dicePing(contact: contact, in: view)
     }
 }
 

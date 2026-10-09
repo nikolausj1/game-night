@@ -5,8 +5,25 @@ import Foundation
 /// inputs, they never fake render state.
 enum DemoData {
     static var wantsTableDemo: Bool { CommandLine.arguments.contains("-demoTable") }
-    static var wantsHandDemo: Bool { CommandLine.arguments.contains("-demoHand") }
+    /// Any offline hand demo: the generic Wizard one plus the hearts /
+    /// spades variants below. Everything that gates "no Multipeer session"
+    /// keys off this, so the variants stay offline too.
+    static var wantsHandDemo: Bool {
+        CommandLine.arguments.contains("-demoHand") || wantsHandHeartsDemo || wantsHandSpadesDemo
+    }
     static var wantsFreePlayDemo: Bool { CommandLine.arguments.contains("-demoFreePlay") }
+
+    /// Hearts/Spades UI wave: `-demoHandHearts` puts seat 0's phone in the
+    /// round-1 passing phase (pass left, nothing committed yet). Add
+    /// `-demoHandHeartsPassed` to have seats 1 and 2 already committed, so
+    /// the hand shows the "Waiting for ..." state with one seat still out
+    /// (seat 0 itself still picks; the screenshot covers the per-seat
+    /// progress copy). `-demoHandSpades` lands on seat 0's own bid turn
+    /// with blind nil ON and the other three bids already in, so the bid
+    /// sheet shows the face-down "Blind Nil / Peek" choice plus the
+    /// partner's bid line.
+    static var wantsHandHeartsDemo: Bool { CommandLine.arguments.contains("-demoHandHearts") }
+    static var wantsHandSpadesDemo: Bool { CommandLine.arguments.contains("-demoHandSpades") }
 
     /// Wave-4 fan-layout screenshot verification hook: `-demoHandCount N`
     /// forces exactly N cards into the `-demoHand` snapshot instead of
@@ -140,6 +157,46 @@ enum DemoData {
         if case .trickComplete = phase { return true }; return false
     }
 
+    /// 4-seat hearts, round 1 (pass left), seat 0 still to pass. With
+    /// `-demoHandHeartsPassed`, seats 1 and 2 have committed via the real
+    /// engine bot so the waiting copy names exactly one outstanding seat.
+    static func makeHeartsHandEngine() -> HostEngine {
+        let seats = names.enumerated().map {
+            Seat(id: $0.offset, playerName: $0.element, colorIndex: $0.offset,
+                 isConnected: true, isHost: false)
+        }
+        let engine = HostEngine(seats: seats, gameKind: .hearts,
+                                rules: RulesConfig(), seed: 20261009)
+        _ = engine.apply(.startGame(.hearts, RulesConfig(), seed: 20261009))
+        if CommandLine.arguments.contains("-demoHandHeartsPassed") {
+            for seat in [1, 2] {
+                if let action = TrickBots.action(for: engine.state, seat: seat) {
+                    _ = engine.apply(action, from: seat)
+                }
+            }
+        }
+        return engine
+    }
+
+    /// 4-seat partnership spades with blind nil on, bids from seats 1-3
+    /// already in (the engine bots' own picks), seat 0 on turn.
+    static func makeSpadesHandEngine() -> HostEngine {
+        let seats = names.enumerated().map {
+            Seat(id: $0.offset, playerName: $0.element, colorIndex: $0.offset,
+                 isConnected: true, isHost: false)
+        }
+        let rules = RulesConfig(spadesBlindNil: true)
+        let engine = HostEngine(seats: seats, gameKind: .spades, rules: rules, seed: 20261009)
+        _ = engine.apply(.startGame(.spades, rules, seed: 20261009))
+        var guardCount = 0
+        while engine.state.phase == .bidding, let turn = engine.state.round?.turnSeat, turn != 0 {
+            guardCount += 1; if guardCount > 8 { break }
+            guard let action = TrickBots.action(for: engine.state, seat: turn) else { break }
+            _ = engine.apply(action, from: turn)
+        }
+        return engine
+    }
+
     /// A hand-screen snapshot: seat 0's real view of that same table state.
     /// Honors `demoHandCountOverride` (see above) by refilling `myHand`
     /// from the same real engine's remaining cards — drawn hands, the draw
@@ -148,6 +205,8 @@ enum DemoData {
     /// snapshot untouched, so the rest of HandView behaves exactly as it
     /// would mid-game; only the fan's card count is under test.
     static func makeHandSnapshot() -> ClientSnapshot {
+        if wantsHandHeartsDemo { return makeHeartsHandEngine().state.snapshot(for: 0) }
+        if wantsHandSpadesDemo { return makeSpadesHandEngine().state.snapshot(for: 0) }
         let engine = makeTableEngine()
         let base = engine.state.snapshot(for: 0)
         guard let count = demoHandCountOverride, count >= 0 else { return base }

@@ -73,7 +73,7 @@ final class BotDirector {
         guard scheduledSeat == nil,
               let host,
               let state = host.state,
-              let (seat, decision) = Self.pendingDecision(in: state),
+              let (seat, decision) = Self.pendingDecision(in: state, botSeats: host.botSeats),
               host.botSeats.contains(seat)
         else { return }
 
@@ -92,7 +92,7 @@ final class BotDirector {
         guard let host, let state = host.state else { return }
         // The world may have moved on while we "thought" — only act if this
         // exact decision is still the one the engine is waiting on.
-        guard let (currentSeat, currentDecision) = Self.pendingDecision(in: state),
+        guard let (currentSeat, currentDecision) = Self.pendingDecision(in: state, botSeats: host.botSeats),
               currentSeat == seat,
               currentDecision == decision,
               host.botSeats.contains(seat)
@@ -109,7 +109,10 @@ final class BotDirector {
 
     /// What is the engine waiting on, and from whom? nil covers lobby,
     /// dealing, trickComplete/roundComplete (table-driven), and gameOver.
-    static func pendingDecision(in state: GameState) -> (seat: Int, decision: BotDecision)? {
+    ///
+    /// `botSeats` only matters for simultaneous phases (hearts passing):
+    /// turn-based phases have exactly one seat to wait on, bot or not.
+    static func pendingDecision(in state: GameState, botSeats: Set<Int> = []) -> (seat: Int, decision: BotDecision)? {
         switch state.phase {
         case .bidding:
             guard let round = state.round else { return nil }
@@ -120,12 +123,18 @@ final class BotDirector {
             guard state.gameKind != .freePlay, let round = state.round else { return nil }
             return (round.turnSeat, .play)
         case .passing:
-            // Everyone passes at once; serve the lowest seat still owing a
-            // selection. evaluate() re-fires after each bot pass, so bots
-            // chain through; a slow human simply holds the ones after it.
+            // Everyone passes at once. Serve the lowest BOT seat still owing
+            // a selection: evaluate() re-fires after each bot pass, so the
+            // bots chain through in seat order, and a human who is still
+            // deciding never holds up the bots seated after them. Once
+            // every bot has passed, the only pending seats are humans and
+            // this returns nil, so the phase simply waits on them (no
+            // schedule, no stall, no deadlock). With no bots given, fall
+            // back to the lowest pending seat of any kind.
             guard let round = state.round else { return nil }
-            let pending = state.seats.indices.first { round.passSelections[$0] == nil }
-            return pending.map { ($0, .pass) }
+            let pending = state.seats.map(\.id).filter { round.passSelections[$0] == nil }
+            let candidates = botSeats.isEmpty ? pending : pending.filter { botSeats.contains($0) }
+            return candidates.min().map { ($0, .pass) }
         case .lobby, .dealing, .trickComplete, .roundComplete, .gameOver:
             return nil
         }

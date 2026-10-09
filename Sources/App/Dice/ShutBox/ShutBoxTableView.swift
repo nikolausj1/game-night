@@ -332,75 +332,33 @@ struct ShutBoxTableView: View {
     // MARK: - Game over
 
     private var gameOverBanner: some View {
-        let ranked = controller.seats.indices
-            .compactMap { seat -> (String, Int)? in
-                guard let score = controller.roundScores[seat] else { return nil }
-                return (controller.seats[seat].name, score)
-            }
-            .sorted { $0.1 < $1.1 }
-        return VStack(spacing: 14) {
-            if controller.winnerSeats.count == 1, let winner = controller.winnerSeats.first {
-                Text(controller.seats[winner].name)
-                    .font(.system(.largeTitle, design: .serif).weight(.bold))
-                    .foregroundStyle(CardStyle.gold)
-                Text(controller.roundScores[winner] == 0 ? "shut the box!" : "wins the round")
-                    .font(.system(.title2, design: .serif))
-                    .foregroundStyle(CardStyle.stockTop)
-            } else if !controller.winnerSeats.isEmpty {
-                Text("It's a tie!")
-                    .font(.system(.largeTitle, design: .serif).weight(.bold))
-                    .foregroundStyle(CardStyle.gold)
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(ranked.enumerated()), id: \.offset) { _, entry in
-                    HStack {
-                        Text(entry.0)
-                            .font(.system(.body, design: .serif))
-                            .foregroundStyle(CardStyle.stockTop.opacity(0.9))
-                        Spacer()
-                        Text("\(entry.1)")
-                            .font(.body.weight(.bold))
-                            .foregroundStyle(CardStyle.gold)
-                    }
-                }
-            }
-            .frame(width: 220)
-            HStack(spacing: 16) {
-                Button {
-                    Haptics.arm()
-                    controller.restart()
-                } label: {
-                    Text("Roll again")
-                        .font(.headline.weight(.bold))
-                        .padding(.horizontal, 28)
-                        .padding(.vertical, 12)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(CardStyle.gold)
-                .foregroundStyle(CardStyle.ink)
-                if let onClose {
-                    Button {
-                        Haptics.tick()
-                        onClose()
-                    } label: {
-                        Text("Back to menu")
-                            .font(.headline)
-                            .padding(.horizontal, 22)
-                            .padding(.vertical, 12)
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(CardStyle.stockTop)
-                }
-            }
+        let winners = controller.winnerSeats
+        let order = controller.seats.indices.sorted {
+            (controller.roundScores[$0] ?? Int.max) < (controller.roundScores[$1] ?? Int.max)
         }
-        .padding(36)
-        .background(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(.black.opacity(0.55))
-                .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .strokeBorder(CardStyle.gold.opacity(0.5), lineWidth: 1.5))
-        )
-        .transition(.scale(scale: 0.85).combined(with: .opacity))
+        let rows = order.map { seat -> RecapRow in
+            let score = controller.roundScores[seat]
+            return RecapRow(id: seat, name: controller.seats[seat].name, colorIndex: controller.seats[seat].colorIndex,
+                            score: score.map { $0 == 0 ? "shut" : "\($0)" } ?? "—",
+                            detail: score == 0 ? "shut the box" : (score == nil ? "never rolled" : "left standing"),
+                            isWinner: winners.contains(seat))
+        }
+        let title: String
+        if winners.count == 1, let w = winners.first {
+            title = "\(controller.seats[w].name) wins Shut the Box"
+        } else if winners.count > 1 {
+            title = "It's a tie!"
+        } else {
+            title = "Game over"
+        }
+        var highlight = "Lowest total takes it"
+        if let shut = controller.shutTheBoxSeat {
+            highlight = "\(controller.seats[shut].name) shut the box!"
+        } else if winners.count == 1, let w = winners.first, let score = controller.roundScores[w] {
+            highlight = "\(controller.seats[w].name) left just \(score) standing"
+        }
+        return GameRecapCard(title: title, rows: rows, highlight: highlight, rematchLabel: "Roll again",
+                             onRematch: { controller.restart() }, onDone: { onClose?() })
     }
 }
 

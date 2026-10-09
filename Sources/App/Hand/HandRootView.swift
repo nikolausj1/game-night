@@ -312,9 +312,19 @@ struct HandRecapView: View {
                     .font(.system(.title2, design: .serif).weight(.semibold))
                     .foregroundStyle(.white)
             }
-            if let bid = myBid, let taken = myTricksWon {
-                Text(bid == taken ? "Nailed it: \(taken) of \(bid) ✓"
-                                  : "Took \(taken), bid \(bid)")
+            if client.snapshot?.gameKind == .hearts {
+                // Hearts has no bids: the table carries the penalty points.
+                if let taken = myTricksWon {
+                    Text(taken == 0 ? "Clean hand: no tricks taken"
+                                    : "Took \(taken) trick\(taken == 1 ? "" : "s")")
+                        .font(.title3)
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+            } else if let bid = myBid, let taken = myTricksWon {
+                let isNil = client.snapshot?.gameKind == .spades && bid == 0
+                Text(isNil ? (taken == 0 ? "Nil made ✓" : "Set on nil: took \(taken)")
+                           : (bid == taken ? "Nailed it: \(taken) of \(bid) ✓"
+                                           : "Took \(taken), bid \(bid)"))
                     .font(.title3)
                     .foregroundStyle(bid == taken ? Color(red: 0.4, green: 0.8, blue: 0.5)
                                                   : .white.opacity(0.8))

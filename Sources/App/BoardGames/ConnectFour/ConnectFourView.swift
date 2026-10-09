@@ -9,6 +9,8 @@ import SwiftUI
 /// the far plaque is rotated 180 degrees.
 struct ConnectFourView: View {
     var onClose: () -> Void
+    /// Mount straight into the parked game (`ResumeCatalog`), skipping setup.
+    var resumeSaved = false
 
     @State private var controller: ConnectFourController?
     @Environment(\.accessibilityReduceMotion) private var motionReduced
@@ -29,11 +31,22 @@ struct ConnectFourView: View {
                 controller = demo
                 demo.scheduleBotIfNeeded()
             }
+            if controller == nil, resumeSaved, let saved = LocalGameSave.loadConnectFour() {
+                let restored = ConnectFourController(restoring: saved)
+                restored.reduceMotion = motionReduced
+                controller = restored
+                restored.scheduleBotIfNeeded()
+            }
         }
         .onChange(of: motionReduced) { _, reduced in controller?.reduceMotion = reduced }
+        .onChange(of: controller?.revision) { _, _ in
+            // Autosave 2s after the last disc settles; game over clears it.
+            if let controller { LocalGameSave.noteConnectFour(controller.state) }
+        }
     }
 
     private func start(names: [String], bots: [Bool]) {
+        LocalGameSave.clear(.board("connectFour"))
         let players = [ConnectFourPlayer(name: names[0], isBot: bots[0]), ConnectFourPlayer(name: names[1], isBot: bots[1])]
         let fresh = ConnectFourController(players: players, firstPlayer: 0)
         fresh.reduceMotion = motionReduced
@@ -56,14 +69,31 @@ struct ConnectFourView: View {
         }
         .overlay {
             if controller.resultVisible, controller.state.phase == .gameOver {
-                ConnectFourResultOverlay(state: controller.state, onRematch: {
-                    let last = controller.state.winner ?? controller.state.currentPlayer
-                    controller.restart(players: controller.state.players, firstPlayer: 1 - last)
-                }, onClose: onClose)
-                .transition(.scale(scale: 0.92).combined(with: .opacity))
+                recap(controller)
+                    .transition(.scale(scale: 0.92).combined(with: .opacity))
             }
         }
         .animation(.easeInOut(duration: 0.3), value: controller.resultVisible)
+    }
+
+    /// End of game: the line (or a full, lineless board), discs each, rematch.
+    private func recap(_ controller: ConnectFourController) -> some View {
+        let state = controller.state
+        let discs = [0, 1].map { seat in state.cells.filter { $0 == seat }.count }
+        let order = [0, 1].sorted { (state.winner == $0) || (state.winner != $1 && discs[$0] > discs[$1]) }
+        let rows = order.map { seat in
+            RecapRow(id: seat, name: state.players[seat].name, colorIndex: seat == 0 ? 1 : 2,
+                     score: "\(discs[seat])", detail: seat == 0 ? "red discs" : "yellow discs",
+                     isWinner: state.winner == seat)
+        }
+        let title = state.winner.map { "\(state.players[$0].name) wins Connect Four" } ?? "A draw"
+        let highlight = state.winner == nil
+            ? "Every hole is filled and nobody lined up four"
+            : "Four in a row on move \(state.moveCount)"
+        return GameRecapCard(title: title, rows: rows, highlight: highlight, onRematch: {
+            let last = state.winner ?? state.currentPlayer
+            controller.restart(players: state.players, firstPlayer: 1 - last)
+        }, onDone: onClose)
     }
 
     private func plaque(_ controller: ConnectFourController, seat: Int) -> some View {

@@ -31,6 +31,11 @@ struct RoleRouter: View {
     }
 
     var body: some View {
+        routed.modifier(A11yProbeOverlay())
+    }
+
+    @ViewBuilder
+    private var routed: some View {
         // Sim-verify hook: -autoCupPreview shows the dice cup interior
         // standalone (see DiceCupPreviewHarness).
         if CommandLine.arguments.contains("-autoCupPreview") {
@@ -52,6 +57,22 @@ struct RoleRouter: View {
             // Sim-verify hook: -demoQuarto, same shape as -demoSolitaire
             // above (see QuartoDemo's doc comment).
             QuartoView(onClose: {})
+        } else if MancalaDemo.wantsDemo {
+            // Sim-verify hooks: -demoMancala / -demoMancalaBots /
+            // -demoMancalaSow (see MancalaDemo). Local board game, so the
+            // same no-host, no-op-close shape as -demoSolitaire.
+            MancalaView(onClose: {})
+        } else if CheckersDemo.wantsDemo {
+            // Sim-verify hooks: -demoCheckers / -demoCheckersBots.
+            CheckersView(onClose: {})
+        } else if ConnectFourDemo.wantsDemo {
+            // Sim-verify hooks: -demoConnectFour / -demoConnectFourBots /
+            // -demoConnectFourWin.
+            ConnectFourView(onClose: {})
+        } else if let kind = RecapDemo.requestedKind {
+            // Sim-verify hook: -demoRecap <kind> drops straight into a
+            // finished game's recap card (see RecapDemo).
+            RecapDemo.view(for: kind)
         } else {
             roleSwitch
         }

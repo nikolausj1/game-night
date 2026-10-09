@@ -546,42 +546,29 @@ struct LiarsDiceTableScene: View {
 
     private func gameOverPanel(_ state: LiarsDiceState, winner: Int) -> some View {
         let order = [winner] + state.eliminationOrder.reversed()
-        return ScorecardPanel(title: "\(game.name(of: winner)) wins Liar's Dice!") {
-            ForEach(Array(order.enumerated()), id: \.offset) { place, seat in
-                HStack {
-                    Circle()
-                        .fill(PlayerPalette.color(BotRoster.identity(named: game.name(of: seat))?.colorIndex ?? seat))
-                        .frame(width: 12, height: 12)
-                    Text("\(place + 1).")
-                        .font(.system(.title3, design: .serif).monospacedDigit())
-                        .foregroundStyle(CardStyle.gold)
-                    Text(game.name(of: seat))
-                        .font(.system(.title3, design: .serif))
-                    Spacer()
-                    Text(state.diceCounts[seat] > 0 ? "\(state.diceCounts[seat]) dice left" : "out")
-                        .font(.system(.subheadline, design: .serif).italic())
-                        .foregroundStyle(CardStyle.stockTop.opacity(0.7))
-                }
-                .foregroundStyle(CardStyle.stockTop)
-            }
-        } action: {
-            HStack(spacing: 14) {
-                Button { onPlayAgain() } label: {
-                    Text("Play again")
-                        .font(.title3.weight(.bold))
-                        .padding(.horizontal, 30).padding(.vertical, 12)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(CardStyle.gold)
-                .foregroundStyle(CardStyle.ink)
-                Button { onClose() } label: {
-                    Text("Back to menu")
-                        .font(.title3.weight(.semibold))
-                        .padding(.horizontal, 22).padding(.vertical, 12)
-                }
-                .buttonStyle(.bordered)
-                .tint(CardStyle.stockTop)
-            }
+        let rows = order.enumerated().map { place, seat in
+            let left = state.diceCounts.indices.contains(seat) ? state.diceCounts[seat] : 0
+            return RecapRow(id: seat, name: game.name(of: seat),
+                            colorIndex: BotRoster.identity(named: game.name(of: seat))?.colorIndex ?? seat,
+                            score: left > 0 ? "\(left) dice" : "out",
+                            detail: place == 0 ? "last cup standing" : "\(ordinal(place + 1)) place",
+                            isWinner: seat == winner)
+        }
+        var highlight = "Last cup standing after \(state.roundNumber) rounds"
+        if let r = state.lastResolution {
+            let call = r.kind == .spotOn ? "called spot on" : "called"
+            highlight = "\(game.name(of: r.caller)) \(call) \(game.name(of: r.bid.seat))'s \(LiarsDiceWords.bid(r.bid.quantity, r.bid.face)): there were \(r.actualCount)"
+        }
+        return GameRecapCard(title: "\(game.name(of: winner)) wins Liar's Dice", rows: rows, highlight: highlight,
+                             onRematch: { onPlayAgain() }, onDone: { onClose() })
+    }
+
+    private func ordinal(_ n: Int) -> String {
+        switch n {
+        case 1: return "1st"
+        case 2: return "2nd"
+        case 3: return "3rd"
+        default: return "\(n)th"
         }
     }
 

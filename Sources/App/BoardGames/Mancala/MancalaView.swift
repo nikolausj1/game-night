@@ -13,6 +13,8 @@ import SwiftUI
 /// from where that player sits.
 struct MancalaView: View {
     var onClose: () -> Void
+    /// Mount straight into the parked game (`ResumeCatalog`), skipping setup.
+    var resumeSaved = false
 
     @State private var controller: MancalaController?
     @Environment(\.accessibilityReduceMotion) private var motionReduced
@@ -33,11 +35,22 @@ struct MancalaView: View {
                 controller = demo
                 demo.scheduleBotIfNeeded()
             }
+            if controller == nil, resumeSaved, let saved = LocalGameSave.loadMancala() {
+                let restored = MancalaController(restoring: saved)
+                restored.reduceMotion = motionReduced
+                controller = restored
+                restored.scheduleBotIfNeeded()
+            }
         }
         .onChange(of: motionReduced) { _, reduced in controller?.reduceMotion = reduced }
+        .onChange(of: controller?.revision) { _, _ in
+            // Autosave 2s after the last settled move; game over clears it.
+            if let controller { LocalGameSave.noteMancala(controller.state) }
+        }
     }
 
     private func start(names: [String], bots: [Bool]) {
+        LocalGameSave.clear(.board("mancala"))
         let players = [MancalaPlayer(name: names[0], isBot: bots[0]), MancalaPlayer(name: names[1], isBot: bots[1])]
         let fresh = MancalaController(players: players, firstPlayer: 0)
         fresh.reduceMotion = motionReduced
@@ -80,14 +93,30 @@ struct MancalaView: View {
         }
         .overlay {
             if controller.isOver {
-                MancalaResultOverlay(state: controller.state, onRematch: {
-                    let last = controller.state.winner ?? controller.state.currentPlayer
-                    controller.restart(players: controller.state.players, firstPlayer: 1 - last)
-                }, onClose: onClose)
-                .transition(.scale(scale: 0.92).combined(with: .opacity))
+                recap(controller)
+                    .transition(.scale(scale: 0.92).combined(with: .opacity))
             }
         }
         .animation(.easeInOut(duration: 0.3), value: controller.isOver)
+    }
+
+    /// End of game: winner (or an honest draw), final store counts, rematch.
+    private func recap(_ controller: MancalaController) -> some View {
+        let state = controller.state
+        let scores = state.scores
+        let order = [0, 1].sorted { scores[$0] > scores[$1] }
+        let rows = order.map { seat in
+            RecapRow(id: seat, name: state.players[seat].name, colorIndex: seat,
+                     score: "\(scores[seat])", detail: "stones in store", isWinner: state.winner == seat)
+        }
+        let title = state.winner.map { "\(state.players[$0].name) wins Mancala" } ?? "A draw"
+        let highlight = state.winner == nil
+            ? "Twenty-four stones each. Perfectly matched."
+            : "Won by \(abs(scores[0] - scores[1])) stones after \(state.moveCount) sowings"
+        return GameRecapCard(title: title, rows: rows, highlight: highlight, onRematch: {
+            let last = state.winner ?? state.currentPlayer
+            controller.restart(players: state.players, firstPlayer: 1 - last)
+        }, onDone: onClose)
     }
 
     private func plaque(_ controller: MancalaController, seat: Int) -> some View {

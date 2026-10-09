@@ -65,13 +65,15 @@ public enum CribbageBot {
                                                        starter: s.starter, isCrib: true).points
             }
             let cribEV = scenarios.isEmpty ? 0 : Double(cribTotal) / Double(scenarios.count)
-            let total = handEV + (isDealer ? cribEV : -cribEV)
+            let total = handEV + cribWeight * (isDealer ? cribEV : -cribEV)
             return DiscardEvaluation(discard: choice.discard, kept: choice.kept,
                                      handEV: handEV, cribEV: cribEV, total: total)
         }
     }
 
     public static let cribScenarioCount = 240
+    /// Weight on the crib term (1.0 = exact expectation).
+    static let cribWeight = 1.0
 
     private struct CribScenario {
         let opponentDiscard: [Card]

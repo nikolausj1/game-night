@@ -80,6 +80,42 @@ final class OldMaidHost: SideGameHost {
         scheduleBotIfNeeded()
     }
 
+    /// Resume: hands and laid pairs straight from the saved engine state.
+    init(restoring state: OldMaidState, seats: [SeatSpec]) {
+        engine = OldMaidEngine(restoring: state)
+        var names: [Int: String] = [:]
+        var bots = Set<Int>()
+        for spec in seats where spec.id >= 0 && spec.id < state.playerCount {
+            names[spec.id] = spec.name.isEmpty ? "Player \(spec.id + 1)" : spec.name
+            if spec.isBot { bots.insert(spec.id) }
+        }
+        for id in 0..<state.playerCount where names[id] == nil { names[id] = "Player \(id + 1)" }
+        seatNames = names
+        botSeats = bots
+        botRNG = SeededGenerator(seed: state.seed ^ 0x01D0_4A1D_01D0_4A1D &+ UInt64(state.shuffleCounter &+ 1))
+        scheduleBotIfNeeded()
+    }
+
+    // MARK: save / resume
+
+    convenience init?(restoring data: Data, seats: [SeatSpec]) {
+        guard let state = try? JSONDecoder().decode(OldMaidState.self, from: data),
+              state.phase != .gameOver else { return nil }
+        self.init(restoring: state, seats: seats)
+    }
+
+    func snapshot() -> Data? {
+        guard engine.state.phase != .gameOver else { return nil }
+        return try? JSONEncoder().encode(engine.state)
+    }
+
+    var resumeSubtitle: String {
+        let s = engine.state
+        let left = s.hands.values.reduce(0) { $0 + $1.count }
+        let safe = s.outSeats.count
+        return "\(left) cards left · \(name(s.turnSeat)) to draw" + (safe > 0 ? " · \(safe) safe" : "")
+    }
+
     // MARK: SideGameHost
 
     func handle(action: SideGamePayload, from seat: Int) {

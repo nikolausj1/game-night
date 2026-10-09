@@ -63,6 +63,10 @@ struct CribbageTableView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                         .zIndex(10)
                 }
+                .onChange(of: host.stateVersion) { _, _ in
+                    // Autosave, 2s after the last mutation (ResumeCatalog).
+                    CribbageSave.noteChanged(host: host)
+                }
                 .onChange(of: host.cribbageRecentEvents) { _, events in
                     handle(events, state: host.cribbageEngine?.state ?? state)
                 }
@@ -412,45 +416,18 @@ struct CribbageTableView: View {
 
     private func gameOverOverlay(state: CribbageState) -> some View {
         let winner = state.winnerSeat ?? 0
-        let winnerName = host.cribbageSeatNames[winner] ?? "Seat \(winner + 1)"
-        let skunkSuffix = (state.skunk ?? false) ? " — a skunk!" : ""
-        return ScorecardPanel(title: "🏆 \(winnerName) wins the crib!\(skunkSuffix)") {
-            ForEach([0, 1], id: \.self) { seat in
-                HStack {
-                    Circle().fill(PlayerPalette.color(seat)).frame(width: 12, height: 12)
-                    Text(host.cribbageSeatNames[seat] ?? "Seat \(seat + 1)")
-                        .font(.system(.title3, design: .serif))
-                    Spacer()
-                    Text("\(state.scores[seat] ?? 0)")
-                        .font(.title3.weight(.bold).monospacedDigit())
-                }
-                .foregroundStyle(CardStyle.stockTop)
-            }
-        } action: {
-            HStack(spacing: 14) {
-                Button {
-                    host.restartCribbage()
-                } label: {
-                    Text("Play again")
-                        .font(.title3.weight(.bold))
-                        .padding(.horizontal, 30)
-                        .padding(.vertical, 12)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(CardStyle.gold)
-                .foregroundStyle(CardStyle.ink)
-
-                Button {
-                    onClose?()
-                } label: {
-                    Text("Back to menu")
-                        .font(.title3.weight(.semibold))
-                        .padding(.horizontal, 22)
-                        .padding(.vertical, 12)
-                }
-                .buttonStyle(.bordered)
-                .tint(CardStyle.stockTop)
-            }
+        let loser = 1 - winner
+        func name(_ seat: Int) -> String { host.cribbageSeatNames[seat] ?? "Seat \(seat + 1)" }
+        let rows = [winner, loser].map { seat in
+            RecapRow(id: seat, name: name(seat), colorIndex: seat, score: "\(state.scores[seat] ?? 0)",
+                     detail: seat == state.dealerSeat ? "dealt the last hand" : nil, isWinner: seat == winner)
         }
+        let margin = (state.scores[winner] ?? 0) - (state.scores[loser] ?? 0)
+        let hands = max(1, state.handNumber)
+        let highlight = (state.skunk ?? false)
+            ? "A skunk! \(name(loser)) never reached 91"
+            : "Pegged out \(margin) ahead over \(hands) hand\(hands == 1 ? "" : "s")"
+        return GameRecapCard(title: "\(name(winner)) wins the crib", rows: rows, highlight: highlight,
+                             onRematch: { host.restartCribbage() }, onDone: { onClose?() })
     }
 }

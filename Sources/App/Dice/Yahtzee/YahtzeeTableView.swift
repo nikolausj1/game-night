@@ -307,60 +307,41 @@ struct YahtzeeTableView: View {
     // MARK: - Game over
 
     private var gameOverBanner: some View {
-        VStack(spacing: 14) {
-            if controller.winnerSeats.count == 1, let winner = controller.winnerSeats.first,
-               controller.seats.indices.contains(winner) {
-                Text(controller.seats[winner].name)
-                    .font(.system(.largeTitle, design: .serif).weight(.bold))
-                    .foregroundStyle(CardStyle.gold)
-                Text("wins with \(controller.scorecards[safe: winner]?.total ?? 0) points!")
-                    .font(.system(.title2, design: .serif))
-                    .foregroundStyle(CardStyle.stockTop)
-            } else if controller.winnerSeats.count > 1 {
-                Text("It's a tie!")
-                    .font(.system(.largeTitle, design: .serif).weight(.bold))
-                    .foregroundStyle(CardStyle.gold)
-                let names = controller.winnerSeats.compactMap { controller.seats[safe: $0]?.name }
-                Text(names.joined(separator: " & "))
-                    .font(.system(.title2, design: .serif))
-                    .foregroundStyle(CardStyle.stockTop)
-            }
-            HStack(spacing: 16) {
-                Button {
-                    Haptics.arm()
-                    controller.restart()
-                } label: {
-                    Text("Play again")
-                        .font(.headline.weight(.bold))
-                        .padding(.horizontal, 28)
-                        .padding(.vertical, 12)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(CardStyle.gold)
-                .foregroundStyle(CardStyle.ink)
-                if let onClose {
-                    Button {
-                        Haptics.tick()
-                        onClose()
-                    } label: {
-                        Text("Back to menu")
-                            .font(.headline)
-                            .padding(.horizontal, 22)
-                            .padding(.vertical, 12)
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(CardStyle.stockTop)
-                }
-            }
+        let winners = controller.winnerSeats
+        let order = controller.seats.indices.sorted {
+            (controller.scorecards[safe: $0]?.total ?? 0) > (controller.scorecards[safe: $1]?.total ?? 0)
         }
-        .padding(36)
-        .background(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(.black.opacity(0.55))
-                .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .strokeBorder(CardStyle.gold.opacity(0.5), lineWidth: 1.5))
-        )
-        .transition(.scale(scale: 0.85).combined(with: .opacity))
+        func yahtzees(_ seat: Int) -> Int {
+            guard let card = controller.scorecards[safe: seat] else { return 0 }
+            return ((card.entries[.yahtzee] ?? 0) > 0 ? 1 : 0) + card.yahtzeeBonusCount
+        }
+        let rows = order.map { seat -> RecapRow in
+            let card = controller.scorecards[safe: seat]
+            var detail: String?
+            let y = yahtzees(seat)
+            if y > 0 { detail = "\(y) Yahtzee\(y == 1 ? "" : "s")" }
+            else if (card?.upperBonus ?? 0) > 0 { detail = "upper bonus" }
+            return RecapRow(id: seat, name: controller.seats[seat].name, colorIndex: controller.seats[seat].colorIndex,
+                            score: "\(card?.total ?? 0)", detail: detail, isWinner: winners.contains(seat))
+        }
+        let title: String
+        if winners.count == 1, let w = winners.first, controller.seats.indices.contains(w) {
+            title = "\(controller.seats[w].name) wins Yahtzee"
+        } else {
+            title = "It's a tie!"
+        }
+        var highlight: String
+        if let most = order.max(by: { yahtzees($0) < yahtzees($1) }), yahtzees(most) > 0 {
+            let n = yahtzees(most)
+            highlight = "\(controller.seats[most].name) rolled \(n) Yahtzee\(n == 1 ? "" : "s")"
+        } else if order.count >= 2 {
+            let margin = (controller.scorecards[safe: order[0]]?.total ?? 0) - (controller.scorecards[safe: order[1]]?.total ?? 0)
+            highlight = margin == 0 ? "Dead even on the final sheet" : "Won by \(margin) point\(margin == 1 ? "" : "s")"
+        } else {
+            highlight = "Every box filled"
+        }
+        return GameRecapCard(title: title, rows: rows, highlight: highlight,
+                             onRematch: { controller.restart() }, onDone: { onClose?() })
     }
 }
 

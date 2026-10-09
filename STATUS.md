@@ -2,7 +2,7 @@
 title: "STATUS - Digital Card Games"
 created: 2026-07-24
 modified: 2026-10-09
-version: 3.0
+version: 3.1
 author: Claude Fable 5.1 (claude-fable-5-1)
 tags:
 ---
@@ -19,7 +19,7 @@ Active Development (feature-rich beta-adjacent: 25 games, computer players with 
 
 ## Health
 
-🟡 At-risk - 2026-10-09 night 2 LANDED IN CODE, UNVERIFIED ON SCREEN. Ten work packages built by ~20 workers under a lead: (1) card physics v2 (FeltSim: cards shove, spin and stack each other, rail rebound, 240 Hz, 16/16 headless checks); (2) coin physics v2 (CoinSim: collisions with spin transfer, edge-rolls that wobble down like a real coin, dice impacts scatter coins, synthesized clink SFX, 26/26 checks); (3) Core Haptics cup (rattle texture, contact transients, pour gesture, table echo), pour-from-the-cup-mouth dice launch with a tipping table cup, photoreal cross-section cup interior; (4) linen card stock + gyro sheen; (5) attract-mode lobby (idle riffles, dice, card slides) with a lamp model lighting the felt, plates, deck and rail hands, plus brass place settings; (6) bots that play like people: Quarto made deterministic (node budgets), exact-EV Cribbage discards + 2-ply pegging, Dots & Boxes chain/double-cross solver (74-18 vs old), Yahtzee expectimax (avg 241-247), Zilch exact press tables (75% head-to-head), Shut the Box exact solution, UNO/Crazy Eights card counting, Wizard/Oh Hell bid scaling, six named personalities; (7) eight hidden-info and table games on a new generic side-game seam (Battleship, Gin Rummy, Go Fish, Old Maid, War, Hearts, Spades, Blackjack, Liar's Dice) and three local board games (Mancala, Checkers, Connect Four) with real photo assets; (8) Hearts passing + Spades nil/blind-nil UI on the phone, table signage and team recaps; (9) save/resume + game-over recap card + uniform rematch for every game, one ResumeCatalog feeding the lobby; (10) a scripted verification machine (`tools/verify.sh`: 30-entry screenshot matrix, two-sim Multipeer join assertion, frame strips). Engine suite 3,489 -> 22,793 checks, all green. `tools/build.sh sim` BUILD SUCCEEDED on the integrated tree; commit cf2435f pushed. WHY AT-RISK: the Mac was overloaded all night by other sessions (load 300-1000, disk down to 170 MB free), both dedicated simulators wedged in first-boot data migration, so NOTHING from tonight has been seen on a screen or felt on a device yet. Every worker shipped an honest "unverified" list; the verification matrix is the first thing to run once the machine is sane. Previously (2026-10-08/09): project moved to `~/_Developer/Digital Card Games`; the first overnight build landed seven games; waves 3-5 before that.
+🟢 On-track - 2026-10-09 morning: night 2 VERIFIED ON SCREEN. Once the Mac calmed down, 26 targeted simulator screenshots in `_review/night2/` all rendered real content with zero crashes: the 25-tile lobby with resume strip, place settings and a live attract card-slide; felt scatter (cards shoving, spinning, stacking, one against the rail); coin scatter and a coin flicked onto its edge; the pour from the table cup; Hearts (no-trump + hearts-broken signage, per-seat penalty points) and Spades (spade-trump badge, bid dots) tables; the Hearts pass-three phone screen and the Spades blind-nil phone screen; Liar's Dice with its ledger; Battleship mid-game with a sunk ship; Blackjack betting; Cribbage count; Mancala, Checkers, Connect Four (with its recap card); Blackjack/Battleship/Yahtzee recap cards; all three phone cup concepts including the new photoreal cross-section. Earlier white frames were first-launch renders that had not finished under machine load, not bugs. NIGHT 2 IN ONE LINE: ten work packages built by ~20 workers under a lead: card physics v2 (FeltSim), coin physics v2 (CoinSim), Core Haptics cup + pour-from-mouth + photoreal cross-section, linen card stock + gyro sheen, attract lobby + lamp lighting, bots with personalities and a deterministic Quarto, fourteen new games on a generic side-game seam (Battleship, Gin Rummy, Go Fish, Old Maid, War, Hearts, Spades, Blackjack, Liar's Dice, Mancala, Checkers, Connect Four) with Hearts/Spades phone + table UI, save/resume + recap + rematch for every game, a 25-tile lobby, and a scripted verification machine. Engine suite 3,489 -> 22,793 checks green; sim + device builds green; commits cf2435f, 2aba241 and this one pushed. NOT yet verified: anything on a real device (haptics, SceneKit shadows, Multipeer with phones), the two-sim Multipeer join test, and landscape layout (the verification sims run portrait). The iPhone install timed out three times at the network tunnel; the device build is ready in shared DerivedData.
 
 ## Waiting on Me
 
@@ -38,9 +38,9 @@ Active Development (feature-rich beta-adjacent: 25 games, computer players with 
 
 ## Next Up
 
-1. Run the verification machine on a sane machine: `tools/verify.sh --multipeer` plus the targeted night-2 shots (attract, felt scatter, coin scatter, cup concepts, pour, Hearts/Spades, recaps); fix what it finds; deploy to Justin's iPhone and iPad.
-2. Night-2 known gaps to close: Quarto controller does not yet pass personality node budgets; UNO 4-player bot has no measured edge; CribbageScoring counts Ace high in runs (pre-existing engine bug, A-2-3 should be a run); `-demoRecap` and the resume-into-local-view path are unexercised.
-3. Family playtest night.
+1. Deploy to Justin's iPhone (wake or cable it, then `tools/build.sh device` + devicectl install) and play the lobby, the pour, a coin flick and one Hearts round.
+2. Night-2 nits seen in screenshots: the attract card-slide draws ABOVE the shelf tiles instead of under them; place settings overlap the Solo & Table shelf in portrait; Liar's Dice "to bid" banner overlaps the top plate; Cribbage "The Count" pad bleeds past the right rail in portrait; the Hearts pass TipKit tip sits on top of the Pass button; LCR "You" plate hidden behind the cup. Then the known gaps: Quarto controller personality budgets, UNO 4-player bot edge, Cribbage Ace-high-in-runs engine bug, `-demoRecap` + resume-into-local-view unexercised live.
+3. `tools/verify.sh --multipeer` on a quiet machine, then family playtest night.
 
 ## Ideas Shelf
 
@@ -52,7 +52,7 @@ Active Development (feature-rich beta-adjacent: 25 games, computer players with 
 
 ## Biggest Risk
 
-Twenty-five games and a physics rewrite landed in one night with zero human eyes on any of it; the simulator matrix will catch crashes and blank screens but not "this feels wrong", and the only cure for that is Justin playing it.
+Twenty-five games and a physics rewrite landed in one night and are now screenshot-verified, but no human has touched any of it: the simulator proves "renders, no crash", not "feels right", and only Justin playing it retires that.
 
 ---
 

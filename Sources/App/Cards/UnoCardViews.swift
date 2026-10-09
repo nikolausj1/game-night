@@ -632,7 +632,9 @@ struct UnoCardBackView: View {
                     .strokeBorder(.white, lineWidth: max(1.5, w * 0.035))
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .strokeBorder(.black.opacity(0.14), lineWidth: 0.75)
+                CardMaterial(width: w, seed: 0, linen: 0.30, ink: 0, wear: 0.5)
             }
+            .compositingGroup()
         }
         .aspectRatio(CardStyle.aspectRatio, contentMode: .fit)
     }

@@ -1,0 +1,40 @@
+{
+  "_doc": "Verification matrix. device: ipad|iphone. args: launch args. wait: seconds after launch before screenshot (scaled by --wait-scale). reduce_motion: true => Reduce Motion pref set on that sim for the entry, reset after. rotate: true|false|null (null = auto: iPad entries rotate -90 when the shot is portrait-framed). Add a row, run `tools/verify.sh --only <name>`.",
+  "devices": {
+    "ipad":   {"name": "GameNight iPad",   "udid": "9704894E-AAA0-407F-9462-C11E4F8A251E"},
+    "iphone": {"name": "GameNight iPhone", "udid": "BB8EF1B1-6871-4192-8A39-B47EC8120E0D"}
+  },
+  "bundle_id": "com.levelup.gamenight",
+  "entries": [
+    {"name": "menu-ipad",          "group": "menu",    "device": "ipad",   "args": ["-autoRole", "table"], "wait": 6},
+    {"name": "role-picker-iphone", "group": "menu",    "device": "iphone", "args": [], "wait": 5},
+    {"name": "table-demo",         "group": "cards",   "device": "ipad",   "args": ["-demoTable"], "wait": 8},
+    {"name": "uno",                "group": "cards",   "device": "ipad",   "args": ["-autoRole", "table", "-autoStartUno"], "wait": 14},
+    {"name": "cribbage",           "group": "cards",   "device": "ipad",   "args": ["-autoRole", "table", "-autoStartCribbage"], "wait": 14},
+    {"name": "freeplay",           "group": "freeplay","device": "ipad",   "args": ["-demoFreePlay"], "wait": 8},
+    {"name": "freeplay-dice",      "group": "freeplay","device": "ipad",   "args": ["-demoFreePlay", "-demoFreePlayDice"], "wait": 8},
+    {"name": "lcr-bots",           "group": "dice",    "device": "ipad",   "args": ["-autoRole", "table", "-autoStartLcr"], "wait": 14},
+    {"name": "lcr-human",          "group": "dice",    "device": "ipad",   "args": ["-autoRole", "table", "-autoStartLcrHuman"], "wait": 12},
+    {"name": "yahtzee",            "group": "dice",    "device": "ipad",   "args": ["-autoRole", "table", "-autoStartYahtzee"], "wait": 14},
+    {"name": "zilch",              "group": "dice",    "device": "ipad",   "args": ["-autoRole", "table", "-autoStartZilch"], "wait": 14},
+    {"name": "shutbox",            "group": "dice",    "device": "ipad",   "args": ["-autoRole", "table", "-autoStartShutBox"], "wait": 14},
+    {"name": "solitaire",          "group": "local",   "device": "ipad",   "args": ["-demoSolitaire"], "wait": 7},
+    {"name": "dots-and-boxes",     "group": "local",   "device": "ipad",   "args": ["-demoDotsAndBoxes"], "wait": 7},
+    {"name": "quarto",             "group": "local",   "device": "ipad",   "args": ["-demoQuarto"], "wait": 7},
+    {"name": "cup-0-crosssection", "group": "cup",     "device": "ipad",   "args": ["-autoCupPreview", "-cupConcept", "0"], "wait": 8},
+    {"name": "cup-1-lookin",       "group": "cup",     "device": "ipad",   "args": ["-autoCupPreview", "-cupConcept", "1"], "wait": 8},
+    {"name": "cup-2-concept",      "group": "cup",     "device": "ipad",   "args": ["-autoCupPreview", "-cupConcept", "2"], "wait": 8},
+    {"name": "cup-loaded-demo",    "group": "cup",     "device": "ipad",   "args": ["-autoCupPreview", "-autoCupLoadDemo"], "wait": 8},
+    {"name": "pip-dice",           "group": "cup",     "device": "ipad",   "args": ["-autoCupPreview", "-demoPipDice"], "wait": 8},
+    {"name": "cup-phone",          "group": "cup",     "device": "iphone", "args": ["-autoCupPreview", "-cupConcept", "0"], "wait": 8},
+    {"name": "hand-3",             "group": "hand",    "device": "iphone", "args": ["-demoHand", "-demoHandCount", "3"], "wait": 7},
+    {"name": "hand-7",             "group": "hand",    "device": "iphone", "args": ["-demoHand", "-demoHandCount", "7"], "wait": 7},
+    {"name": "hand-13",            "group": "hand",    "device": "iphone", "args": ["-demoHand", "-demoHandCount", "13"], "wait": 7},
+    {"name": "hand-7-drag-0.5",    "group": "hand",    "device": "iphone", "args": ["-demoHand", "-demoHandCount", "7", "-demoDragProgress", "0.5"], "wait": 7},
+    {"name": "hand-7-drag-1.0",    "group": "hand",    "device": "iphone", "args": ["-demoHand", "-demoHandCount", "7", "-demoDragProgress", "1.0"], "wait": 7},
+    {"name": "hand-13-drag-edge",  "group": "hand",    "device": "iphone", "args": ["-demoHand", "-demoHandCount", "13", "-demoDragProgress", "0.5", "-demoDragX", "1.0"], "wait": 7},
+    {"name": "hand-13-reducemotion","group": "reducemotion", "device": "iphone", "args": ["-demoHand", "-demoHandCount", "13"], "wait": 7, "reduce_motion": true},
+    {"name": "uno-reducemotion",   "group": "reducemotion", "device": "ipad",   "args": ["-autoRole", "table", "-autoStartUno"], "wait": 14, "reduce_motion": true},
+    {"name": "cribbage-reducemotion","group": "reducemotion","device": "ipad",  "args": ["-autoRole", "table", "-autoStartCribbage"], "wait": 14, "reduce_motion": true}
+  ]
+}

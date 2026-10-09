@@ -4,6 +4,10 @@ import Foundation
 /// case only requires a config row below plus a `GameRules` implementation.
 public enum GameKind: String, Codable, CaseIterable, Sendable {
     case wizard, ohHell, crazyEights, uno, freePlay
+    /// Classic trick-takers (open-ended: played to a score, not a round
+    /// schedule). Added after the original five; raw values are new so
+    /// saved games are unaffected.
+    case hearts, spades
 
     public var displayName: String {
         switch self {
@@ -12,6 +16,8 @@ public enum GameKind: String, Codable, CaseIterable, Sendable {
         case .crazyEights: return "Crazy Eights"
         case .uno: return "UNO"
         case .freePlay: return "Free Play"
+        case .hearts: return "Hearts"
+        case .spades: return "Spades"
         }
     }
 
@@ -24,6 +30,10 @@ public enum GameKind: String, Codable, CaseIterable, Sendable {
         // 1 on purpose: solo free play is the "deal myself a hand and
         // fiddle" test mode (and solitaire night is legitimate).
         case .freePlay: return 1
+        case .hearts: return 3
+        // Spades is a 4-player partnership game; 2 and 3 players play the
+        // individual "cutthroat" variant (see `RulesConfig.spadesCutthroat`).
+        case .spades: return 2
         }
     }
 
@@ -34,6 +44,8 @@ public enum GameKind: String, Codable, CaseIterable, Sendable {
         case .crazyEights: return 6
         case .uno: return 8
         case .freePlay: return 8
+        case .hearts: return 5
+        case .spades: return 4
         }
     }
 
@@ -41,10 +53,18 @@ public enum GameKind: String, Codable, CaseIterable, Sendable {
 
     public var isTrickTaking: Bool {
         switch self {
-        case .wizard, .ohHell: return true
+        case .wizard, .ohHell, .hearts, .spades: return true
         case .crazyEights, .uno, .freePlay: return false
         }
     }
+
+    /// Hearts is scored like golf: the LOWEST total wins. Everything else
+    /// (including spades) is highest-wins.
+    public var lowestScoreWins: Bool { self == .hearts }
+
+    /// Played to a target score over an open-ended number of rounds rather
+    /// than a fixed schedule (`roundsSchedule` is empty for these).
+    public var isScoreLimitGame: Bool { self == .hearts || self == .spades }
 
     /// Cards dealt per round, in round order.
     /// Wizard: 1...(60 ÷ players). Oh Hell: 1 up to (52 ÷ players), then back
@@ -60,7 +80,7 @@ public enum GameKind: String, Codable, CaseIterable, Sendable {
             let maxCards = 52 / playerCount
             guard maxCards >= 1 else { return [] }
             return Array(1...maxCards) + Array((1..<maxCards).reversed())
-        case .crazyEights, .uno, .freePlay:
+        case .crazyEights, .uno, .freePlay, .hearts, .spades:
             return []
         }
     }

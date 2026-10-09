@@ -75,14 +75,21 @@ public final class HostEngine {
                 return dealUno(dealerSeat: 0)
             case .freePlay:
                 return setUpFreePlay()
+            case .hearts:
+                return dealHearts(roundNumber: 1, dealerSeat: 0)
+            case .spades:
+                return dealSpades(roundNumber: 1, dealerSeat: 0)
             }
 
         case .nextRound:
             guard state.phase == .roundComplete, let round = state.round else { return [] }
-            return dealTrickRound(
-                roundNumber: round.roundNumber + 1,
-                dealerSeat: nextSeat(after: round.dealerSeat)
-            )
+            let next = round.roundNumber + 1
+            let dealer = nextSeat(after: round.dealerSeat)
+            switch state.gameKind {
+            case .hearts: return dealHearts(roundNumber: next, dealerSeat: dealer)
+            case .spades: return dealSpades(roundNumber: next, dealerSeat: dealer)
+            default: return dealTrickRound(roundNumber: next, dealerSeat: dealer)
+            }
 
         case .nextTrick:
             guard case .trickComplete(let winner) = state.phase, var round = state.round else { return [] }
@@ -114,6 +121,21 @@ public final class HostEngine {
             }
             guard let round = state.round else { return [] }
             switch state.gameKind {
+            case .hearts, .spades:
+                // Mid-game: re-deal the current round. From game over:
+                // start a fresh game (history cleared, round 1).
+                var number = round.roundNumber
+                var dealer = round.dealerSeat
+                if state.phase == .gameOver {
+                    state.roundHistory = []
+                    undoStack = []
+                    undoRequested = false
+                    number = 1
+                    dealer = 0
+                }
+                return state.gameKind == .hearts
+                    ? dealHearts(roundNumber: number, dealerSeat: dealer)
+                    : dealSpades(roundNumber: number, dealerSeat: dealer)
             case .wizard, .ohHell:
                 return dealTrickRound(roundNumber: round.roundNumber, dealerSeat: round.dealerSeat)
             case .crazyEights:
@@ -155,14 +177,23 @@ public final class HostEngine {
             guard !undoStack.isEmpty else { return reject(seat, "Nothing to undo") }
             undoRequested = true
             return []
+        case .passCards(let ids):
+            return handlePassCards(ids, from: seat)
+        case .bidBlindNil:
+            return handleBid(0, blind: true, from: seat)
         }
     }
 
     // MARK: - Bidding & trump
 
-    private func handleBid(_ bid: Int, from seat: Int) -> [GameEvent] {
+    private func handleBid(_ bid: Int, blind: Bool = false, from seat: Int) -> [GameEvent] {
         guard state.phase == .bidding, var round = state.round else {
             return reject(seat, "Bidding isn't open right now")
+        }
+        if blind {
+            guard state.gameKind == .spades, state.rules.spadesBlindNil else {
+                return reject(seat, "Blind nil isn't in play")
+            }
         }
         guard seat == round.turnSeat else {
             return reject(seat, "It's not your turn to bid")
@@ -170,7 +201,7 @@ public final class HostEngine {
         guard (0...round.cardsPerPlayer).contains(bid) else {
             return reject(seat, "Bid must be between 0 and \(round.cardsPerPlayer)")
         }
-        if state.rules.screwTheDealer, seat == round.dealerSeat {
+        if state.rules.screwTheDealer, state.gameKind != .spades, seat == round.dealerSeat {
             let othersTotal = round.bids.values.reduce(0, +)
             if othersTotal + bid == round.cardsPerPlayer {
                 return reject(seat, "Dealer can't bid \(bid) — bids can't add up to \(round.cardsPerPlayer)")
@@ -179,6 +210,10 @@ public final class HostEngine {
         pushUndo()
         round.bids[seat] = bid
         var events: [GameEvent] = [.bidPlaced(seat: seat, bid: bid)]
+        if blind {
+            round.blindNilSeats.append(seat)
+            events.append(.blindNilBid(seat: seat))
+        }
         if round.bids.count == state.seats.count {
             events.append(.biddingComplete)
             round.leadSeat = nextSeat(after: round.dealerSeat)
@@ -212,6 +247,92 @@ public final class HostEngine {
         return []
     }
 
+    // MARK: - Hearts passing
+
+    private func handlePassCards(_ ids: [String], from seat: Int) -> [GameEvent] {
+        guard state.gameKind == .hearts, state.phase == .passing, var round = state.round,
+              let direction = round.passDirection, direction != .hold else {
+            return reject(seat, "Passing isn't open right now")
+        }
+        let hand = state.hands[seat] ?? []
+        guard ids.count == HeartsRules.passCount, Set(ids).count == ids.count else {
+            return reject(seat, "Pick exactly \(HeartsRules.passCount) cards to pass")
+        }
+        guard ids.allSatisfy({ id in hand.contains { $0.id == id } }) else {
+            return reject(seat, "Those cards aren't all in your hand")
+        }
+        pushUndo()
+        round.passSelections[seat] = ids
+        var events: [GameEvent] = [.passSubmitted(seat: seat)]
+        if state.seats.allSatisfy({ round.passSelections[$0.id] != nil }) {
+            events += executePass(round: round, direction: direction)
+        } else {
+            state.round = round
+        }
+        return events
+    }
+
+    /// Every seat has committed: swap atomically, remember what each seat
+    /// received, then open play with the 2♣ holder on lead.
+    private func executePass(round: RoundState, direction: PassDirection) -> [GameEvent] {
+        var round = round
+        let count = state.seats.count
+        var newHands = state.hands
+        var incoming: [Int: [Card]] = [:]
+        var events: [GameEvent] = []
+        for seatInfo in state.seats {
+            let from = seatInfo.id
+            let ids = round.passSelections[from] ?? []
+            let to = HeartsRules.passTarget(from: from, direction: direction, playerCount: count)
+            let cards = ids.compactMap { id in state.hands[from]?.first { $0.id == id } }
+            newHands[from] = (newHands[from] ?? []).filter { !ids.contains($0.id) }
+            incoming[to, default: []] += cards
+            events.append(.cardsPassed(from: from, to: to))
+        }
+        var received: [Int: [String]] = [:]
+        for (to, cards) in incoming {
+            newHands[to, default: []] += cards
+            received[to] = cards.map(\.id)
+        }
+        state.hands = newHands
+        round.passSelections = [:]
+        round.passReceived = received
+        state.round = round
+        beginHeartsPlay()
+        return events
+    }
+
+    /// Opens (or skips straight past) the passing phase for the freshly
+    /// dealt hearts round in `state.round`.
+    private func openHeartsRound() {
+        guard var round = state.round else { return }
+        round.passDirection = HeartsRules.passDirection(
+            roundNumber: round.roundNumber, playerCount: state.seats.count,
+            passingEnabled: state.rules.heartsPassing
+        )
+        round.passSelections = [:]
+        round.passReceived = [:]
+        round.heartsBroken = false
+        state.round = round
+        if round.passDirection == .hold {
+            beginHeartsPlay()
+        } else {
+            state.phase = .passing
+        }
+    }
+
+    /// The 2♣ holder leads the first trick.
+    private func beginHeartsPlay() {
+        guard var round = state.round else { return }
+        let holder = state.seats.map(\.id).first { seat in
+            state.hands[seat]?.contains { $0.id == HeartsRules.twoOfClubsID } ?? false
+        } ?? nextSeat(after: round.dealerSeat)
+        round.leadSeat = holder
+        round.turnSeat = holder
+        state.round = round
+        state.phase = .playing
+    }
+
     // MARK: - Playing cards
 
     private func handlePlayCard(_ cardID: String, force: Bool, from seat: Int) -> [GameEvent] {
@@ -224,7 +345,7 @@ public final class HostEngine {
         let card = hand[index]
 
         switch state.gameKind {
-        case .wizard, .ohHell:
+        case .wizard, .ohHell, .hearts, .spades:
             guard var round = state.round else { return reject(seat, "No round in progress") }
             guard seat == round.turnSeat else { return reject(seat, "It's not your turn") }
             var forced = false
@@ -241,6 +362,14 @@ public final class HostEngine {
             state.hands[seat] = hand
             round.currentTrick.append(TrickPlay(seat: seat, card: card, wasForced: forced))
             var events: [GameEvent] = [.cardPlayed(seat: seat, card: card, forced: forced)]
+            if state.gameKind == .hearts, card.suit == .hearts, !round.heartsBroken {
+                round.heartsBroken = true
+                events.append(.heartsBroken)
+            }
+            if state.gameKind == .spades, card.suit == .spades, !round.spadesBroken {
+                round.spadesBroken = true
+                events.append(.spadesBroken)
+            }
             if round.currentTrick.count == state.seats.count {
                 let winner = ruleset.trickWinner(round.currentTrick, trump: round.trumpSuit)
                 round.tricksWon[winner, default: 0] += 1
@@ -616,6 +745,70 @@ public final class HostEngine {
         return events
     }
 
+    private func dealHearts(roundNumber: Int, dealerSeat: Int) -> [GameEvent] {
+        let playerCount = state.seats.count
+        guard roundNumber >= 1, playerCount >= GameKind.hearts.minPlayers,
+              playerCount <= GameKind.hearts.maxPlayers else { return [] }
+        state.phase = .dealing
+        var deck = DeckBuilder.shuffled(HeartsRules.deck(playerCount: playerCount), seed: state.seed &+ dealSerial)
+        dealSerial &+= 1
+        let cardsEach = deck.count / playerCount
+
+        if !state.rules.autoDeal {
+            return setUpManualDeal(deck: deck, roundNumber: roundNumber,
+                                   dealerSeat: dealerSeat, cardsEach: cardsEach)
+        }
+
+        state.hands = [:]
+        for offset in 0..<playerCount {
+            let seat = (dealerSeat + 1 + offset) % playerCount
+            state.hands[seat] = Array(deck.prefix(cardsEach))
+            deck.removeFirst(cardsEach)
+        }
+        state.discardPile = []
+        state.drawPile = deck
+        let first = nextSeat(after: dealerSeat)
+        state.round = RoundState(
+            roundNumber: roundNumber, cardsPerPlayer: cardsEach, dealerSeat: dealerSeat,
+            trumpCard: nil, trumpSuit: nil, bids: [:], tricksWon: [:],
+            currentTrick: [], completedTricks: [], leadSeat: first, turnSeat: first
+        )
+        openHeartsRound()
+        return [.dealt]
+    }
+
+    private func dealSpades(roundNumber: Int, dealerSeat: Int) -> [GameEvent] {
+        let playerCount = state.seats.count
+        guard roundNumber >= 1, playerCount >= GameKind.spades.minPlayers,
+              playerCount <= GameKind.spades.maxPlayers else { return [] }
+        state.phase = .dealing
+        var deck = DeckBuilder.shuffled(SpadesRules.deck(playerCount: playerCount), seed: state.seed &+ dealSerial)
+        dealSerial &+= 1
+        let cardsEach = SpadesRules.handSize(playerCount: playerCount)
+
+        if !state.rules.autoDeal {
+            return setUpManualDeal(deck: deck, roundNumber: roundNumber,
+                                   dealerSeat: dealerSeat, cardsEach: cardsEach)
+        }
+
+        state.hands = [:]
+        for offset in 0..<playerCount {
+            let seat = (dealerSeat + 1 + offset) % playerCount
+            state.hands[seat] = Array(deck.prefix(cardsEach))
+            deck.removeFirst(cardsEach)
+        }
+        state.discardPile = []
+        state.drawPile = [] // 2-player: the rest of the deck sits out
+        let first = nextSeat(after: dealerSeat)
+        state.round = RoundState(
+            roundNumber: roundNumber, cardsPerPlayer: cardsEach, dealerSeat: dealerSeat,
+            trumpCard: nil, trumpSuit: .spades, bids: [:], tricksWon: [:],
+            currentTrick: [], completedTricks: [], leadSeat: first, turnSeat: first
+        )
+        state.phase = .bidding
+        return [.dealt]
+    }
+
     private func dealCrazyEights(dealerSeat: Int) -> [GameEvent] {
         let playerCount = state.seats.count
         let cardsEach = 5
@@ -849,6 +1042,21 @@ public final class HostEngine {
             state.phase = .playing
             return [.dealt]
 
+        case .hearts:
+            state.drawPile = []
+            openHeartsRound()
+            return [.dealt]
+
+        case .spades:
+            state.drawPile = []
+            round.trumpSuit = .spades
+            let first = nextSeat(after: round.dealerSeat)
+            round.leadSeat = first
+            round.turnSeat = first
+            state.round = round
+            state.phase = .bidding
+            return [.dealt]
+
         case .freePlay:
             return [] // unreachable: free play never enters manual dealing
         }
@@ -856,8 +1064,71 @@ public final class HostEngine {
 
     // MARK: - Round completion
 
+    /// Hearts / spades: score the round into `scoreDeltas`, then either end
+    /// the game (target reached, sole leader) or wait for the next deal.
+    private func finishScoreLimitRound(_ round: RoundState) -> [GameEvent] {
+        let seatIDs = state.seats.map(\.id)
+        var events: [GameEvent] = []
+        let completed: CompletedRound
+        switch state.gameKind {
+        case .hearts:
+            let points = HeartsRules.pointsTaken(in: round.completedTricks)
+            let result = HeartsRules.scoreRound(
+                points: points, seatIDs: seatIDs, moonSubtracts: state.rules.heartsMoonSubtracts
+            )
+            var raw: [Int: Int] = [:]
+            for seat in seatIDs { raw[seat] = points[seat] ?? 0 }
+            completed = CompletedRound(
+                roundNumber: round.roundNumber, cardsPerPlayer: round.cardsPerPlayer,
+                bids: [:], tricksWon: round.tricksWon,
+                scoreDeltas: result.deltas, heartsPoints: raw, moonShooter: result.moonShooter
+            )
+            if let shooter = result.moonShooter { events.append(.shotTheMoon(seat: shooter)) }
+        default: // spades
+            let teams = SpadesRules.teams(for: state)
+            let scored = SpadesRules.scoreRound(
+                bids: round.bids, tricksWon: round.tricksWon, blindNilSeats: round.blindNilSeats,
+                teams: teams, bagsBefore: SpadesRules.currentBags(history: state.roundHistory)
+            )
+            var deltas: [Int: Int] = [:]
+            var bags: [Int: Int] = [:]
+            for result in scored.results {
+                for member in result.members {
+                    deltas[member] = result.delta
+                    bags[member] = result.bagsAfter
+                }
+            }
+            completed = CompletedRound(
+                roundNumber: round.roundNumber, cardsPerPlayer: round.cardsPerPlayer,
+                bids: round.bids, tricksWon: round.tricksWon,
+                scoreDeltas: deltas, bagsAfter: bags, nilMade: scored.nilMade
+            )
+            for seat in seatIDs.sorted() {
+                if let made = scored.nilMade[seat] { events.append(.nilResult(seat: seat, made: made)) }
+            }
+        }
+        state.roundHistory.append(completed)
+        events.append(.roundScored)
+        let totals = Scoring.totals(history: state.roundHistory, kind: state.gameKind)
+        let winner: Int?
+        if state.gameKind == .hearts {
+            winner = HeartsRules.winner(totals: totals, target: state.rules.heartsTargetScore)
+        } else {
+            winner = SpadesRules.winner(totals: totals, teams: SpadesRules.teams(for: state),
+                                        target: state.rules.spadesTargetScore)
+        }
+        if let winner {
+            state.phase = .gameOver
+            events.append(.gameWon(seat: winner))
+        } else {
+            state.phase = .roundComplete
+        }
+        return events
+    }
+
     private func finishRound() -> [GameEvent] {
         guard let round = state.round else { return [] }
+        if state.gameKind.isScoreLimitGame { return finishScoreLimitRound(round) }
         let completed = CompletedRound(
             roundNumber: round.roundNumber,
             cardsPerPlayer: round.cardsPerPlayer,

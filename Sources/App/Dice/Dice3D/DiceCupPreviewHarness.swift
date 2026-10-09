@@ -19,8 +19,15 @@ import SwiftUI
 /// upPipValue`/`DiceTableSceneView.faceStyle` actually produce a readable
 /// 1-6 die, ahead of any real Yahtzee/Zilch/Shut the Box controller
 /// existing to drive one. Not part of any real game flow.
+///
+/// `-demoPour` (also combine with `-autoCupPreview`): a table felt with a
+/// real TableCupView on the bottom rail wearing the reference
+/// `.tablePourTilt` and a 3-die pool that pours out of its mouth every ~5s
+/// — the night-2 pour trajectory + cup-tip contract on film, without a
+/// phone or a game controller. Use an iPad simulator.
 struct DiceCupPreviewHarness: View {
     @State private var model = DiceCupModel()
+    @State private var demoRollID = 0
     @AppStorage("gn.cupConcept") private var cupConceptRaw = CupConcept.crossSection.rawValue
 
     private var concept: CupConcept {
@@ -37,8 +44,14 @@ struct DiceCupPreviewHarness: View {
         CommandLine.arguments.contains("-demoPipDice")
     }
 
+    private var isPourDemo: Bool {
+        CommandLine.arguments.contains("-demoPour")
+    }
+
     var body: some View {
-        if isPipDemo {
+        if isPourDemo {
+            pourDemo
+        } else if isPipDemo {
             pipTableDemo
         } else {
             cupPreview
@@ -81,6 +94,40 @@ struct DiceCupPreviewHarness: View {
                 diceCount: 5, faceStyle: .pips
             ) { _, _ in }
             .ignoresSafeArea()
+        }
+    }
+
+    /// Bottom-rail seat, geometry copied from DiceTableView (`cupCenter` /
+    /// `cupMouthScreen`): plate at the anchor, cup 92pt beyond it, mouth at
+    /// `TableCupView.mouthOffset`.
+    private var pourDemo: some View {
+        GeometryReader { geo in
+            let anchor = CGPoint(x: 0.5, y: 0.90)
+            let plate = CGPoint(x: anchor.x * geo.size.width, y: anchor.y * geo.size.height)
+            let cup = CGPoint(x: plate.x, y: plate.y + 92)
+            let off = TableCupView.mouthOffset(for: .bottom)
+            ZStack {
+                TableSurface()
+                TableCupView(edge: .bottom, loadedCount: 3, requiredCount: 3)
+                    .tablePourTilt(seat: 0, edge: .bottom)
+                    .position(cup)
+                DiceTableSceneView(
+                    roll: demoRollID == 0 ? nil
+                        : DiceGameController.Roll(id: demoRollID, seat: 0, count: 3,
+                                                  intensity: demoRollID % 2 == 1 ? 1.1 : 0.5),
+                    anchor: anchor,
+                    pourMouthScreen: CGPoint(x: cup.x + off.dx, y: cup.y + off.dy)
+                ) { _, _ in }
+                .ignoresSafeArea()
+            }
+            .ignoresSafeArea()
+            .onAppear {
+                for n in 0..<4 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0 + Double(n) * 5.0) {
+                        demoRollID = n + 1
+                    }
+                }
+            }
         }
     }
 }

@@ -24,6 +24,11 @@ final class GameClientController {
     /// otherwise. HandRootView routes to CribbageHandView whenever it's
     /// non-nil, same shape as `diceState`/DiceCupView.
     private(set) var cribbageSnapshot: CribbageSnapshot?
+    /// Generic side-game mode (see SideGamePayload/SideGameRegistry): the
+    /// table's last redacted state for this seat, nil when not in one.
+    private(set) var sideGameState: SideGamePayload?
+    /// The last side-game events payload, for hand-side animation hooks.
+    private(set) var sideGameEvents: SideGamePayload?
     /// Recent cribbage events, for CribbageHandView's own animation
     /// triggers — mirrors `recentEvents` above.
     private(set) var cribbageRecentEvents: [CribbageEvent] = []
@@ -76,6 +81,10 @@ final class GameClientController {
 
     func placeBid(_ bid: Int) { sendAction(.placeBid(bid)) }
 
+    /// Hearts: pass exactly three card IDs. Spades: blind nil.
+    func passCards(_ cardIDs: [String]) { sendAction(.passCards(cardIDs)) }
+    func bidBlindNil() { sendAction(.bidBlindNil) }
+
     func chooseTrump(_ suit: Suit) { sendAction(.chooseTrump(suit)) }
 
     /// velocity: the flick in points/sec on this screen — presentation
@@ -111,6 +120,16 @@ final class GameClientController {
 
     func requestUndo() { sendAction(.requestUndo) }
 
+    // MARK: side-game actions
+
+    /// Any side game's action, encoded by the caller's own types.
+    func sendSideGameAction<T: Encodable>(kind: String, _ value: T) {
+        guard let payload = try? SideGamePayload(kind: kind, value: value) else { return }
+        if !session.send(.sideGameAction(payload)) {
+            session.refresh()
+        }
+    }
+
     // MARK: cribbage actions
 
     func discardToCrib(_ cardIDs: [String]) { sendCribbageAction(.discardToCrib(cards: cardIDs)) }
@@ -145,6 +164,7 @@ final class GameClientController {
             snapshot = snap
             diceState = nil // a card game superseded dice mode
             cribbageSnapshot = nil // ...and cribbage mode too
+            sideGameState = nil
             runAutoPlayIfAsked(snap)
         case .tableReset:
             // The table's game is gone — drop everything from it. A fresh
@@ -152,6 +172,8 @@ final class GameClientController {
             snapshot = nil
             diceState = nil
             cribbageSnapshot = nil
+            sideGameState = nil
+            sideGameEvents = nil
             pendingIllegal = nil
             mySeat = nil
         case .diceState(let state):
@@ -177,8 +199,15 @@ final class GameClientController {
             diceState = nil
         case .cribbageEvents(let events):
             cribbageRecentEvents = events
+        case .sideGameState(let payload):
+            sideGameState = payload
+            snapshot = nil // a side game superseded any card snapshot
+            diceState = nil
+            cribbageSnapshot = nil
+        case .sideGameEvents(let payload):
+            sideGameEvents = payload
         case .hello, .seatClaim, .action, .heartbeat, .throwInfo, .throwStyle, .dicePour,
-             .cribbageAction:
+             .cribbageAction, .sideGameAction:
             break // client-outbound only
         }
     }

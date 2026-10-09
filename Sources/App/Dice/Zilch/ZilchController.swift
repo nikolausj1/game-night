@@ -97,6 +97,8 @@ final class ZilchController {
     /// extra turn of their own.
     private(set) var finalChaseSeat: Int?
     private var finalChaseRemaining: Set<Int> = []
+    /// A bot's choice of which pending groups to set aside from the current roll.
+    private var botPlan: Set<UUID>?
 
     private let host: GameHostController
     private var rollCounter = 0
@@ -397,17 +399,20 @@ final class ZilchController {
 
     // MARK: - Bots
 
-    /// Bank-vs-press heuristic: press with 3+ live dice and a turn total
-    /// under ~300 (a lower, more aggressive bar late in a final chase when
-    /// this bot is trailing the current leader); bank otherwise. LCR-style
-    /// pacing — a short random beat before every action, one action at a
-    /// time, so the table can actually watch it happen.
+    /// Bots play by `ZilchStrategy`'s expected-value risk model: after each
+    /// roll they decide WHICH scoring groups to set aside (not always all of
+    /// them: leaving a lone 5 live can be worth more than banking its 50),
+    /// then press or bank by comparing the table's expected turn gain with
+    /// the points at risk, nudged by the bot's personality (cautious banks
+    /// earlier, bold rolls on) and by the score gap in the final chase.
+    /// Pacing is a short personality-scaled beat before every action, one
+    /// action at a time, so the table can actually watch it happen.
     private func scheduleBotIfNeeded() {
         guard !gameOver, !rollInFlight, !zilchFlash, !hotDiceFlash,
               seats.indices.contains(turnSeat), seats[turnSeat].isBot else { return }
         let expectedSeat = turnSeat
         let expectedVersion = stateVersion
-        let delay = Double.random(in: 1.0...1.8)
+        let delay = BotPersonality.forName(seats[expectedSeat].name).randomDelay(1.0...1.8)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, self.turnSeat == expectedSeat, self.stateVersion == expectedVersion,
                   !self.rollInFlight else { return }
@@ -418,38 +423,53 @@ final class ZilchController {
     private func botAct(seat: Int) {
         guard seats.indices.contains(seat), seats[seat].isBot, seat == turnSeat,
               !gameOver, !rollInFlight, !zilchFlash, !hotDiceFlash else { return }
+        let personality = BotPersonality.forName(seats[seat].name)
+        let ctx = botContext(seat: seat, personality: personality)
 
-        // A decision is pending: take the first available group (greedy —
-        // a bot never leaves points on the table), one at a time so each
-        // die visibly lands in the tray, then re-check.
-        if let group = pendingGroups.first, let poolIndex = group.positions.first {
-            dieTapped(poolIndex)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-                self?.scheduleBotIfNeeded()
+        // A decision is pending: decide once which groups to set aside, then
+        // tap them one at a time so each die visibly lands in the tray.
+        if !pendingGroups.isEmpty {
+            if botPlan == nil {
+                let groups = pendingGroups.map { ZilchStrategy.Group(dice: $0.positions.count, points: $0.points) }
+                let take = ZilchStrategy.chooseGroups(groups, diceRolled: liveDiceCount,
+                                                      turnScore: turnScore, ctx: ctx)
+                botPlan = Set(take.map { pendingGroups[$0].id })
             }
-            return
+            if let plan = botPlan,
+               let group = pendingGroups.first(where: { plan.contains($0.id) }),
+               let poolIndex = group.positions.first {
+                dieTapped(poolIndex)
+                DispatchQueue.main.asyncAfter(deadline: .now() + personality.randomDelay(0.35...0.55)) { [weak self] in
+                    self?.scheduleBotIfNeeded()
+                }
+                return
+            }
+            // Plan complete: any leftover scoring groups are deliberately
+            // left live to be rerolled.
         }
 
         guard mayAct else { return } // still settling (e.g. hot-dice beat) — its own completion reschedules
+        botPlan = nil
 
         if turnScore == 0 {
             roll(from: seat, intensity: .random(in: 0.5...1.1))
             return
         }
-        let trailing = isTrailingFinalChase(seat: seat)
-        let pressThreshold = trailing ? 450 : 300
-        let minDiceToPress = trailing ? 2 : 3
-        if liveDiceCount >= minDiceToPress && turnScore < pressThreshold {
+        if ZilchStrategy.shouldPress(diceLeft: liveDiceCount, turnScore: turnScore, ctx: ctx) {
             roll(from: seat, intensity: .random(in: 0.5...1.1))
         } else {
             bank(seat: seat)
         }
     }
 
-    private func isTrailingFinalChase(seat: Int) -> Bool {
-        guard finalChaseSeat != nil else { return false }
-        let leader = bankedScore.max() ?? 0
-        return bankedScore[seat] + turnScore < leader
+    private func botContext(seat: Int, personality: BotPersonality) -> ZilchStrategy.Context {
+        let rivals = bankedScore.indices.filter { $0 != seat }.map { bankedScore[$0] }
+        return ZilchStrategy.Context(
+            bankedScore: bankedScore[seat],
+            bestOpponentScore: rivals.max() ?? 0,
+            finalChaseActive: finalChaseSeat != nil,
+            chasersAfterMe: finalChaseRemaining.subtracting([seat]).count,
+            personality: personality)
     }
 
     // MARK: - Outbound (phone broadcast)

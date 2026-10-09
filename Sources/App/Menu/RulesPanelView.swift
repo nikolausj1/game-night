@@ -62,6 +62,25 @@ struct RulesPanelView: View {
                           subtitle: "Can't play? Keep drawing until you can.",
                           isOn: $rules.drawUntilPlayable)
             autoDealRow
+        case .hearts:
+            RuleToggleRow(title: "Pass Three Cards",
+                          subtitle: "Left, right, across, hold — the classic rotation before each hand.",
+                          isOn: $rules.heartsPassing)
+            RuleToggleRow(title: "No Points on the First Trick",
+                          subtitle: "Hearts and the queen can't be dumped on the opening trick.",
+                          isOn: $rules.heartsNoPointsFirstTrick)
+            RuleToggleRow(title: "Moon Subtracts",
+                          subtitle: "Shooting the moon takes 26 off your score instead of adding 26 to everyone else.",
+                          isOn: $rules.heartsMoonSubtracts)
+            autoDealRow
+        case .spades:
+            RuleToggleRow(title: "Blind Nil",
+                          subtitle: "Bid nil before looking at your hand for double stakes.",
+                          isOn: $rules.spadesBlindNil)
+            RuleToggleRow(title: "Cutthroat",
+                          subtitle: "Four players, no partnerships — everyone for themselves.",
+                          isOn: $rules.spadesCutthroat)
+            autoDealRow
         case .freePlay:
             EmptyView()
         }

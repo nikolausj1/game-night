@@ -380,7 +380,9 @@ final class YahtzeeController {
               seats[turnSeat].isBot else { return }
         let expectedTurn = turnSeat
         let expectedVersion = stateVersion
-        let delay = Double.random(in: 1.2...2.0)
+        // Tempo comes from the bot's stable personality (snappy 0.7x ...
+        // deliberate 1.4x of the base 1.2-2.0s beat).
+        let delay = BotPersonality.forName(seats[expectedTurn].name).randomDelay(1.2...2.0)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !self.gameOver, !self.rollInFlight,
                   self.turnSeat == expectedTurn, self.stateVersion == expectedVersion else { return }
@@ -405,21 +407,44 @@ final class YahtzeeController {
             return
         }
 
-        let holds = YahtzeeBot.chooseHolds(values: currentDieValueMap(), scorecard: scorecards[seat])
+        let personality = BotPersonality.forName(seats[seat].name)
+        let holds = botHolds(seat: seat, personality: personality)
         if rollsUsed < 3, holds.count < Self.diceCount {
             heldIndices = holds
             stateVersion += 1
             broadcast()
             let expectedVersion = stateVersion
-            DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 0.9...1.5)) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + personality.randomDelay(0.9...1.5)) { [weak self] in
                 guard let self, !self.gameOver, self.turnSeat == seat,
                       self.stateVersion == expectedVersion else { return }
                 self.roll(from: seat, intensity: .random(in: 0.5...1.1))
             }
         } else {
-            let category = YahtzeeBot.chooseCategory(dice: dice, scorecard: scorecards[seat])
-            scoreCategory(category, forSeat: seat)
+            let index = YahtzeeStrategy.chooseCategory(dice: dice, sheet: Self.sheet(from: scorecards[seat]),
+                                                       personality: personality)
+            scoreCategory(YahtzeeCategory.allCases[index], forSeat: seat)
         }
+    }
+
+    /// Expected-value holds (see `YahtzeeStrategy`): the dice to keep, as
+    /// table pool indices. Falls back to holding everything if the pool
+    /// isn't fully settled, which just means "score now".
+    private func botHolds(seat: Int, personality: BotPersonality) -> Set<Int> {
+        let values = currentDieValueMap()
+        let indices = values.keys.sorted()
+        guard indices.count == Self.diceCount else { return Set(indices) }
+        let keep = YahtzeeStrategy.chooseHolds(dice: indices.map { values[$0]! },
+                                               rollsLeft: max(1, 3 - rollsUsed),
+                                               sheet: Self.sheet(from: scorecards[seat]),
+                                               personality: personality)
+        return Set(zip(indices, keep).filter { $0.1 }.map { $0.0 })
+    }
+
+    /// App scorecard -> the engine-side strategy sheet (category index =
+    /// `YahtzeeCategory.allCases` order).
+    private static func sheet(from card: YahtzeeScorecard) -> YahtzeeStrategy.Sheet {
+        YahtzeeStrategy.Sheet(scores: YahtzeeCategory.allCases.map { card.entries[$0] },
+                              yahtzeeBonusCount: card.yahtzeeBonusCount)
     }
 
     private func currentDieValueMap() -> [Int: Int] {

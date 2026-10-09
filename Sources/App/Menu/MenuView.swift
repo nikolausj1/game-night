@@ -53,9 +53,12 @@ struct MenuView: View {
 
     var body: some View {
         ZStack {
-            // The felt behind an empty lobby shouldn't read as a void — a
-            // faint deck-and-seats motif underneath the real UI.
-            attractBackdrop
+            // The felt behind the lobby is a SET table: place settings, a
+            // deck by the dealer, and quiet ambient life when idle. All of
+            // it lives in AttractMode.swift; this is its only mount.
+            LobbyStage(seats: lobbySeats, minSeats: seatRange.lowerBound,
+                       capacity: seatRange.upperBound,
+                       suspended: showSettings || localGameRoute != nil)
             ScrollView {
             VStack(spacing: 26) {
                 if !savedGames.isEmpty {
@@ -190,59 +193,18 @@ struct MenuView: View {
         }
     }
 
-    // MARK: attract backdrop
+    // MARK: lobby stage feed
 
-    /// A faint deck-and-seats motif behind the lobby UI, low-opacity enough
-    /// to never compete with the real controls on top — the empty felt
-    /// reads as a table that's already set, not blank cloth. Built from
-    /// `CardBackView` (this module's plain card back, already used above in
-    /// `FannedBacks`) rather than `DeckAndTrumpView`'s draw-pile stack: that
-    /// view is driven by a live `GameState` (draw pile count, game kind,
-    /// round…) the lobby doesn't have one of yet, and standing up a
-    /// throwaway `GameState` purely to paint an idle deck would reach
-    /// further into the engine than a cosmetic backdrop warrants. Its own
-    /// riffle-shuffle flourish only fires on a real draw-pile reshuffle
-    /// anyway, so there's nothing to gain by forcing the dependency.
-    private var attractBackdrop: some View {
-        GeometryReader { geo in
-            ZStack {
-                ZStack {
-                    ForEach(0..<3, id: \.self) { layer in
-                        CardBackView()
-                            .frame(width: 150)
-                            .rotationEffect(.degrees(Double(layer) * 2.2 - 2.2))
-                            .offset(x: CGFloat(layer) * 3, y: CGFloat(layer) * -3)
-                    }
-                }
-                .compositingGroup()
-                .opacity(0.16)
-                .position(x: geo.size.width * 0.5, y: geo.size.height * 0.88)
-
-                // Faint open-seat markers — chairs pulled up to a table
-                // that's ready and waiting, echoing SeatsBuilderView's own
-                // dashed "Open seat" circle language.
-                ForEach(0..<4, id: \.self) { i in
-                    Circle()
-                        .strokeBorder(CardStyle.stockTop.opacity(0.14),
-                                      style: StrokeStyle(lineWidth: 2, dash: [7, 6]))
-                        .frame(width: 46, height: 46)
-                        .position(seatMarkerPosition(index: i, size: geo.size))
-                }
-            }
+    /// Occupied seats for `LobbyStage`'s place settings: humans in lobby
+    /// order, then drafted bots (colors matched to SeatsBuilderView's).
+    private var lobbySeats: [LobbySeat] {
+        let humans = host.lobbyPlayers.enumerated().map { LobbySeat(name: $0.element.name, colorIndex: $0.offset) }
+        let bots = botDrafts.enumerated().map {
+            LobbySeat(name: $0.element.name,
+                      colorIndex: BotRoster.identity(named: $0.element.name)?.colorIndex
+                        ?? (host.lobbyPlayers.count + $0.offset))
         }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-
-    private func seatMarkerPosition(index: Int, size: CGSize) -> CGPoint {
-        let points: [CGPoint] = [
-            CGPoint(x: 0.06, y: 0.5),
-            CGPoint(x: 0.94, y: 0.5),
-            CGPoint(x: 0.5, y: 0.05),
-            CGPoint(x: 0.5, y: 0.97)
-        ]
-        let p = points[index % points.count]
-        return CGPoint(x: p.x * size.width, y: p.y * size.height)
+        return humans + bots
     }
 
     // MARK: masthead
@@ -723,6 +685,8 @@ extension GameKind {
         case .ohHell: return "♠️"
         case .crazyEights: return "8️⃣"
         case .uno: return "🌈"
+        case .hearts: return "♥️"
+        case .spades: return "♠️"
         case .freePlay: return "🃏"
         }
     }
@@ -757,6 +721,12 @@ struct GameEmblem: View {
                 .frame(height: Self.height)
         case .uno:
             UnoCardBackView()
+                .frame(height: Self.height)
+        case .hearts:
+            CardView(card: Card(id: "h12", kind: .standard(suit: .hearts, rank: 12)))
+                .frame(height: Self.height)
+        case .spades:
+            CardView(card: Card(id: "s12", kind: .standard(suit: .spades, rank: 12)))
                 .frame(height: Self.height)
         case .freePlay:
             // A loose spread of backs: no fixed rules, just cards on felt.

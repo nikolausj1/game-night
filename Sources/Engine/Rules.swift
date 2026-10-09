@@ -62,6 +62,36 @@ public struct RulesConfig: Codable, Sendable, Equatable {
     /// the moment every hand reaches the round's target count.
     public var autoDeal: Bool
 
+    /// Hearts only: run the 3-card passing phase (left / right / across /
+    /// hold rotation). Off = every round is a "hold" round. Default on.
+    public var heartsPassing: Bool
+
+    /// Hearts only: nobody may play a point card (any heart or the queen of
+    /// spades) on the first trick unless they hold nothing else. Default on
+    /// (the house rule).
+    public var heartsNoPointsFirstTrick: Bool
+
+    /// Hearts only: when a seat shoots the moon, the shooter scores -26
+    /// instead of every other seat scoring +26. Default off (+26 to others).
+    public var heartsMoonSubtracts: Bool
+
+    /// Hearts only: the game ends once any total reaches this score (and
+    /// the lowest total is not tied). Default 100.
+    public var heartsTargetScore: Int
+
+    /// Spades only: a seat may bid blind nil (before looking at its cards)
+    /// via `PlayerAction.bidBlindNil`. Worth +/-200. Default off.
+    public var spadesBlindNil: Bool
+
+    /// Spades only: individual (no partnerships) play. Always in effect with
+    /// 2 or 3 players; with 4 players this flag turns partnerships off.
+    /// Default off (4 players = N/S vs E/W partnerships).
+    public var spadesCutthroat: Bool
+
+    /// Spades only: the game ends once a team/seat reaches this score (the
+    /// highest total wins; ties continue). Default 500.
+    public var spadesTargetScore: Int
+
     public init(
         screwTheDealer: Bool = false,
         missScoresTricks: Bool = true,
@@ -70,7 +100,14 @@ public struct RulesConfig: Codable, Sendable, Equatable {
         drawUntilPlayable: Bool = true,
         freePlayDeck: FreePlayDeck = .standard52,
         autoDeal: Bool = true,
-        autoDrawPenalty: Bool = false
+        autoDrawPenalty: Bool = false,
+        heartsPassing: Bool = true,
+        heartsNoPointsFirstTrick: Bool = true,
+        heartsMoonSubtracts: Bool = false,
+        heartsTargetScore: Int = 100,
+        spadesBlindNil: Bool = false,
+        spadesCutthroat: Bool = false,
+        spadesTargetScore: Int = 500
     ) {
         self.screwTheDealer = screwTheDealer
         self.missScoresTricks = missScoresTricks
@@ -80,12 +117,21 @@ public struct RulesConfig: Codable, Sendable, Equatable {
         self.freePlayDeck = freePlayDeck
         self.autoDeal = autoDeal
         self.autoDrawPenalty = autoDrawPenalty
+        self.heartsPassing = heartsPassing
+        self.heartsNoPointsFirstTrick = heartsNoPointsFirstTrick
+        self.heartsMoonSubtracts = heartsMoonSubtracts
+        self.heartsTargetScore = heartsTargetScore
+        self.spadesBlindNil = spadesBlindNil
+        self.spadesCutthroat = spadesCutthroat
+        self.spadesTargetScore = spadesTargetScore
     }
 
     /// Older encodes predate the UNO flags and the free-play deck picker;
     /// default them on decode so saved games and old peers still parse.
     private enum CodingKeys: String, CodingKey {
         case screwTheDealer, missScoresTricks, softEnforcement, stackDrawCards, drawUntilPlayable, freePlayDeck, autoDeal, autoDrawPenalty
+        case heartsPassing, heartsNoPointsFirstTrick, heartsMoonSubtracts, heartsTargetScore
+        case spadesBlindNil, spadesCutthroat, spadesTargetScore
     }
 
     public init(from decoder: Decoder) throws {
@@ -98,6 +144,13 @@ public struct RulesConfig: Codable, Sendable, Equatable {
         freePlayDeck = try container.decodeIfPresent(FreePlayDeck.self, forKey: .freePlayDeck) ?? .standard52
         autoDeal = try container.decodeIfPresent(Bool.self, forKey: .autoDeal) ?? true
         autoDrawPenalty = try container.decodeIfPresent(Bool.self, forKey: .autoDrawPenalty) ?? false
+        heartsPassing = try container.decodeIfPresent(Bool.self, forKey: .heartsPassing) ?? true
+        heartsNoPointsFirstTrick = try container.decodeIfPresent(Bool.self, forKey: .heartsNoPointsFirstTrick) ?? true
+        heartsMoonSubtracts = try container.decodeIfPresent(Bool.self, forKey: .heartsMoonSubtracts) ?? false
+        heartsTargetScore = try container.decodeIfPresent(Int.self, forKey: .heartsTargetScore) ?? 100
+        spadesBlindNil = try container.decodeIfPresent(Bool.self, forKey: .spadesBlindNil) ?? false
+        spadesCutthroat = try container.decodeIfPresent(Bool.self, forKey: .spadesCutthroat) ?? false
+        spadesTargetScore = try container.decodeIfPresent(Int.self, forKey: .spadesTargetScore) ?? 500
     }
 }
 

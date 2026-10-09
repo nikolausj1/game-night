@@ -255,3 +255,18 @@ struct FirstLaunchNameView: View {
         playerName = trimmedName
     }
 }
+
+/// Verification probe (tools/verify): `-showA11y` stamps the live
+/// Reduce Motion state on screen so the matrix can prove the setting
+/// actually reached the app.
+struct A11yProbeOverlay: ViewModifier {
+    func body(content: Content) -> some View {
+        content.overlay(alignment: .topLeading) {
+            if CommandLine.arguments.contains("-showA11y") {
+                Text("RM:\(UIAccessibility.isReduceMotionEnabled ? 1 : 0)")
+                    .font(.caption.monospaced()).padding(6)
+                    .background(.black.opacity(0.6)).foregroundStyle(.white)
+            }
+        }
+    }
+}

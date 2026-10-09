@@ -256,6 +256,16 @@ struct HandView: View {
                 return "Or match the symbol"
             }
             return "Match the color or the symbol"
+        case .hearts:
+            if let leadSuit = snap.round?.currentTrick.first?.card.suit {
+                return "Follow \(leadSuit.symbol) if you can — hearts are points"
+            }
+            return (snap.round?.heartsBroken ?? false) ? "You lead — play anything" : "You lead — no hearts yet"
+        case .spades:
+            if let leadSuit = snap.round?.currentTrick.first?.card.suit {
+                return "Follow \(leadSuit.symbol) if you can — spades are trump"
+            }
+            return (snap.round?.spadesBroken ?? false) ? "You lead — play anything" : "You lead — spades not broken"
         case .freePlay:
             return "House rules apply"
         }
@@ -338,6 +348,17 @@ struct HandView: View {
                                                    exempt: isSelected)
 
                 CardView(card: card, faceUp: true, elevation: elevation)
+                    // Glossy-stock sheen: HandMotion's low-passed tilt slides
+                    // a soft band across the card; the fan angle phase-shifts
+                    // it per card so the fan reads as one curved surface.
+                    // Reduce Motion: tilt is pinned to 0 -> static sheen.
+                    .environment(\.cardSheen, CardSheen(
+                        tiltX: motionReduced ? 0 : motion.tiltX,
+                        tiltY: motionReduced ? 0 : motion.tiltY,
+                        fanAngle: slot.angle.degrees,
+                        strength: isSelected
+                            ? 1.0
+                            : 0.55 + 0.30 * Double(index) / Double(max(hand.count - 1, 1))))
                     .frame(width: cardWidth)
                     .rotationEffect(isSelected && dragState.isDragging
                         ? tiltWhileDragging(slot.angle, handHeight: size.height)
@@ -992,27 +1013,47 @@ struct IllegalPlaySheet: View {
 /// to flat color if the asset is ever missing.
 struct FeltBackground: View {
     var body: some View {
-        ZStack {
-            CardStyle.feltGreen.ignoresSafeArea()
-            // Mirror-tiled, still `.tile`: FeltTexture.png has baked
-            // lighting, so a plain tile stamps a seam at every repeat —
-            // but stretching one crop to fill is WORSE here: an
-            // aspectRatio(.fill) image with no frame changes the layout
-            // proposal itself (it inflated the whole hand screen to a
-            // 860×860 square — blowing up the fan geometry and pushing
-            // the status strip offscreen) and magnifies the bake into
-            // huge dark bands. Mirroring 2×2 once at load makes every
-            // tile boundary self-matching, keeps grain at native scale,
-            // and keeps .tile's layout-neutral sizing.
-            Image(uiImage: FeltTile.mirrored)
-                .resizable(resizingMode: .tile)
-                .ignoresSafeArea()
-                .opacity(0.55)
-                .blendMode(.overlay)
-            RadialGradient(colors: [.clear, .black.opacity(0.35)],
-                           center: .center, startRadius: 150, endRadius: 700)
-                .ignoresSafeArea()
+        // One lamp, one falloff — the same stop structure TableSurface uses
+        // (lit center -> felt base -> vignette), anchored to the screen's
+        // own half-diagonal so the phone's felt falls off exactly like the
+        // iPad's does, just seen through a smaller window. The center sits a
+        // little above middle: the lamp hangs over the hand, and the fan
+        // lives in the lower half.
+        GeometryReader { geo in
+            let lampRadius = hypot(geo.size.width, geo.size.height) / 2
+            ZStack {
+                CardStyle.feltGreen
+                RadialGradient(colors: [Color(red: 0.255, green: 0.452, blue: 0.318),
+                                        CardStyle.feltGreen,
+                                        CardStyle.feltGreen.opacity(0.88),
+                                        .black.opacity(0.34)],
+                               center: UnitPoint(x: 0.5, y: 0.42),
+                               startRadius: lampRadius * 0.065,
+                               endRadius: lampRadius)
+                // Mirror-tiled, still `.tile`: FeltTexture.png has baked
+                // lighting, so a plain tile stamps a seam at every repeat —
+                // but stretching one crop to fill is WORSE here: an
+                // aspectRatio(.fill) image with no frame changes the layout
+                // proposal itself (it inflated the whole hand screen to a
+                // 860×860 square — blowing up the fan geometry and pushing
+                // the status strip offscreen) and magnifies the bake into
+                // huge dark bands. Mirroring 2×2 once at load makes every
+                // tile boundary self-matching, keeps grain at native scale,
+                // and keeps .tile's layout-neutral sizing.
+                Image(uiImage: FeltTile.mirrored)
+                    .resizable(resizingMode: .tile)
+                    .opacity(0.55)
+                    .blendMode(.overlay)
+                // Warm lamp bloom: a faint amber wash on the lit patch only,
+                // so the pool reads as light, not just a brighter green.
+                RadialGradient(colors: [Color(red: 1.0, green: 0.86, blue: 0.55).opacity(0.10), .clear],
+                               center: UnitPoint(x: 0.5, y: 0.40),
+                               startRadius: 0,
+                               endRadius: lampRadius * 0.62)
+                    .blendMode(.softLight)
+            }
         }
+        .ignoresSafeArea()
     }
 }
 

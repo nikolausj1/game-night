@@ -2,6 +2,10 @@ import UIKit
 import CoreGraphics
 import SceneKit
 
+/// NOTE (night 2): UNUSED. The last procedural cup (cross-section's felt
+/// tube) was replaced by a photo (`CupInteriorCrossSection`), so nothing
+/// calls these anymore; kept only until the lead decides to delete the file.
+///
 /// Procedural surfaces for the perfected cross-section cup: deep red wool
 /// felt lining the interior (walls + floor) and burnished, stitched
 /// leather on the rim — the one "exterior" surface a player ever actually

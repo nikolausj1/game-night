@@ -23,3 +23,10 @@ This project is tracked by Oracle, a portfolio agent at the `_Projects` root tha
 6. Edits to `STATUS.md` marked "updated via Oracle at Justin's direction" are legitimate and authoritative: Justin dictated them at the portfolio level. Reconcile them with the backlog at session start; do not revert them.
 7. Share what you learn. When this project discovers a reusable technique, fix, or better workflow that other projects could benefit from (environment-level, not project-specific design), record it briefly in an optional `## Lessons` section at the bottom of `STATUS.md`, below the divider. Oracle reviews these every run and promotes vetted ones into the shared Project Build Guide. The master guide at `_Projects/_Templates/Project Build Guide.md` is authoritative; if this folder contains its own older copy, prefer the master and its Changelog.
 
+## Where this project lives (2026-10-09)
+
+- **Live copy: `~/_Developer/Digital Card Games`** (a clean clone of `nikolausj1/game-night`). The old Dropbox folder is a corrupted leftover with a `MOVED.md`; never work there.
+- **Builds: `tools/build.sh [sim|device]` only.** It serializes concurrent workers through one shared DerivedData in the session scratchpad (the disk is small; parallel DerivedData trees have filled it twice). Never call `xcodebuild` with a private `-derivedDataPath`.
+- **Verification: `tools/verify.sh`** runs the launch-arg screenshot matrix and the two-simulator Multipeer check before any deploy. Dedicated simulators: "GameNight iPad" and "GameNight iPhone".
+- **Devices:** deploy freely to Justin's iPhone ("JustinN") and iPad Pro. **Kids' iPads are ON HOLD per Justin (2026-08-28, via Oracle): do not deploy and do not ask; he will say when.**
+- New multiplayer games plug in through the generic side-game seam (`Sources/Engine/SideGame.swift`, `Sources/App/SideGames/`): a `SideGameHost` conformer + one `SideGameRegistry.entries` line, no shared-file edits.

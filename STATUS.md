@@ -1,9 +1,9 @@
 ---
 title: "STATUS - Digital Card Games"
 created: 2026-07-24
-modified: 2026-08-06
-version: 2.8
-author: Claude Fable 5 (claude-fable-5)
+modified: 2026-10-09
+version: 2.9
+author: Claude Fable 5.1 (claude-fable-5-1)
 tags:
 ---
 
@@ -19,7 +19,7 @@ Active Development (feature-rich beta-adjacent: five card games + LCR dice, comp
 
 ## Health
 
-🟢 On-track - THE OVERNIGHT BUILD LANDED: seven new games in one night (Cribbage with a photoreal pegboard and combinatorially exact scoring incl. the 29-hand test; Solitaire dealt onto the felt; Yahtzee/Zilch/Shut the Box on a generalized dice platform with pip dice and tap-to-hold; Dots & Boxes as real pencil on paper; Quarto in turned wood matching Justin's reference). Engine suite grew 375 -> 3,489 checks, all green. New category-shelf home screen (Cards / Dice / Board & Paper). All games bot-capable except Solitaire; all launch paths live-verified by screenshot. UNO reverse glyph redrawn against Justin's reference image. Deployed to both devices. Earlier: Wave 5 (motion + feel) shipped on top of waves 3-4: the hand-fan clipping regression root-caused (a SwiftUI mask silently clips - cards "slid under the felt") and fixed with a permanent mid-gesture screenshot harness; the UNO throw is finally ONE fluid arc (single animated progress scalar drives position/height/rotation/shadow - desync now structurally impossible, proven frame-by-frame from sim video); wild cards glow in their called color (chip removed); coins flick-glide with felt friction and rail bounce; free play got the full cup ceremony; LCR cup-loading perf fixed (throttled hit-tests, motion-gated shadow tracking); and the phone cup went PHOTOREAL - generated photographic interiors with live 3D dice composited over them, replacing the procedural render Justin rejected, plus the deep look-in rebuilt at honest real-cup proportions. Deployed to iPhone (iPad pending unlock). Earlier same day, waves 3-4: manual draw-2/4 penalties, hand-fan geometry finally right at every count (root-caused twice, verified by screenshot at 2/3/7 cards), real rail hands bleeding off the screen edge, photoreal AI-generated table cup + felt/leather textures, real-dice cup loading (drag the actual settled dice into the cup), velocity-layered dice audio, wild-color glow, accessibility floor (Reduce Motion, Dynamic Type, VoiceOver labels) + TipKit. Also fixed two latent product bugs found during verification: MCSession teardown blocking the main thread on every reconnect, and a felt-texture change that silently inflated the whole hand screen's layout. Deployed to Justin's iPhone + iPad.
+🟢 On-track - 2026-10-09: project moved to `~/_Developer/Digital Card Games` (clean clone; the Dropbox clone's `.git` was corrupted by sync conflicts). A second overnight build is in progress tonight: card/coin physics simulations, Core Haptics in the cup, photoreal cross-section cup and card stock, lobby attract mode, bots pass, eight more games (Battleship, Gin Rummy, Go Fish/Old Maid/War, Hearts, Spades, Blackjack, Liar's Dice, Mancala, Checkers, Connect Four), save/resume everywhere, and a scripted verification matrix. Previously: THE OVERNIGHT BUILD LANDED: seven new games in one night (Cribbage with a photoreal pegboard and combinatorially exact scoring incl. the 29-hand test; Solitaire dealt onto the felt; Yahtzee/Zilch/Shut the Box on a generalized dice platform with pip dice and tap-to-hold; Dots & Boxes as real pencil on paper; Quarto in turned wood matching Justin's reference). Engine suite grew 375 -> 3,489 checks, all green. New category-shelf home screen (Cards / Dice / Board & Paper). All games bot-capable except Solitaire; all launch paths live-verified by screenshot. UNO reverse glyph redrawn against Justin's reference image. Deployed to both devices. Earlier: Wave 5 (motion + feel) shipped on top of waves 3-4: the hand-fan clipping regression root-caused (a SwiftUI mask silently clips - cards "slid under the felt") and fixed with a permanent mid-gesture screenshot harness; the UNO throw is finally ONE fluid arc (single animated progress scalar drives position/height/rotation/shadow - desync now structurally impossible, proven frame-by-frame from sim video); wild cards glow in their called color (chip removed); coins flick-glide with felt friction and rail bounce; free play got the full cup ceremony; LCR cup-loading perf fixed (throttled hit-tests, motion-gated shadow tracking); and the phone cup went PHOTOREAL - generated photographic interiors with live 3D dice composited over them, replacing the procedural render Justin rejected, plus the deep look-in rebuilt at honest real-cup proportions. Deployed to iPhone (iPad pending unlock). Earlier same day, waves 3-4: manual draw-2/4 penalties, hand-fan geometry finally right at every count (root-caused twice, verified by screenshot at 2/3/7 cards), real rail hands bleeding off the screen edge, photoreal AI-generated table cup + felt/leather textures, real-dice cup loading (drag the actual settled dice into the cup), velocity-layered dice audio, wild-color glow, accessibility floor (Reduce Motion, Dynamic Type, VoiceOver labels) + TipKit. Also fixed two latent product bugs found during verification: MCSession teardown blocking the main thread on every reconnect, and a felt-texture change that silently inflated the whole hand screen's layout. Deployed to Justin's iPhone + iPad.
 
 ## Waiting on Me
 
@@ -31,8 +31,8 @@ Active Development (feature-rich beta-adjacent: five card games + LCR dice, comp
       - unblocks: icon/bundle ID off placeholder
 - [ ] **500 house rules (kitty, misere, partnerships)** (~15 min)
       - unblocks: building 500 at all
-- [ ] **Go-ahead for the kids' iPads** (decision, ~2 min)
-      - unblocks: 4-hand family game night
+- [ ] **ON HOLD - do NOT deploy to the kids' iPads.** Justin's decision, 2026-08-28, in his words: "The app is not ready to deploy. I will let you know when it is." Do not raise this again; he will say when. (updated via Oracle at Justin's direction, 2026-08-28; carried into the live copy during the move to `~/_Developer`, 2026-10-09)
+      - unblocks: nothing until he lifts the hold
 
 ## Next Up
 

@@ -292,31 +292,39 @@ public final class DotsAndBoxesEngine {
 
     // MARK: - Bot
 
+    /// Seats that play the ORIGINAL heuristic bot (no chain counting, no
+    /// double-cross). Empty by default; tests set this to measure the gain
+    /// of the current bot, and a future "easy" difficulty could use it.
+    public var legacyBotSeats: Set<Int> = []
+
     /// Play the bot's move for `playerIndex` and apply it. No-op (empty
     /// events) if there's nothing legal left or it isn't that seat's turn.
     ///
-    /// Heuristic, in priority order — "solid," not perfect:
-    /// 1. **Take free boxes.** Any line that completes a box is played;
-    ///    among several, the one completing the MOST boxes at once wins
-    ///    (the double-box case).
-    /// 2. **Play safe.** Among lines that complete nothing, prefer one that
-    ///    doesn't hand the opponent a box next turn — i.e. doesn't bring
-    ///    any box to 3 filled sides. Chosen at random (seeded) among the
-    ///    safe set so bot-vs-bot games don't degenerate into the same
-    ///    opening every time.
-    /// 3. **Forced to sacrifice.** If every remaining line gives something
-    ///    away, open the SHORTEST chain — the one whose forced capture
-    ///    cascade (`chainSweepSize`) hands the opponent the fewest boxes.
-    ///    This is real chain awareness, not just "avoid 3-siders"; it does
-    ///    NOT implement the double-cross (declining the last two boxes of a
-    ///    chain to keep turn control) — that's the standard advanced-play
-    ///    refinement and is left as a stretch goal, noted rather than
-    ///    half-built.
+    /// Two-player games use the full strategy; 3+ players fall back to the
+    /// original heuristic (control theory doesn't carry over to free-for-all).
+    ///
+    /// 1. **Exact endgame.** With `exactEndgameEdgeLimit` or fewer lines left
+    ///    the position is solved outright (memoized negamax over the set of
+    ///    drawn lines, extra turns included), so the double-cross, sacrifices
+    ///    that flip control, and the last-chain take-all all fall out exactly.
+    /// 2. **Chain phase.** Once no line is "safe" (every box has at most two
+    ///    open sides, so the board is only chains and loops), a chain/loop
+    ///    value recursion decides everything: when capturing, whether to take
+    ///    every box or decline the last two of a chain (four of a loop) to
+    ///    keep control (the DOUBLE-CROSS); when forced to open, which
+    ///    component to give up (shortest/cheapest by the recursion, and a
+    ///    2-chain is opened in the middle so the opponent cannot decline).
+    /// 3. **Otherwise** the original rules: take free boxes (most at once),
+    ///    else play a safe line, else open the cheapest chain.
     @discardableResult
     public func performBotMove(for playerIndex: Int) -> [DotsAndBoxesEvent] {
         guard let edge = chooseBotEdge(for: playerIndex) else { return [] }
         return claimEdge(edge, by: playerIndex)
     }
+
+    /// Lines-remaining threshold at or below which the bot solves the game
+    /// exactly (2^15 states; a fraction of a second even unoptimized).
+    public static let exactEndgameEdgeLimit = 15
 
     /// Same selection `performBotMove` plays, exposed separately so tests
     /// can inspect the choice without also mutating the engine.
@@ -325,6 +333,16 @@ public final class DotsAndBoxesEngine {
         let legal = legalEdges()
         guard !legal.isEmpty else { return nil }
 
+        if state.players.count == 2, !legacyBotSeats.contains(playerIndex) {
+            if legal.count <= Self.exactEndgameEdgeLimit, let edge = exactEndgameEdge(legal: legal) {
+                return edge
+            }
+            if let edge = chainPhaseEdge(legal: legal) { return edge }
+        }
+        return legacyBotEdge(legal: legal)
+    }
+
+    private func legacyBotEdge(legal: [DotsAndBoxesEdge]) -> DotsAndBoxesEdge {
         let capturing = legal.map { edge in (edge, boxesCompleted(ifPlayed: edge).count) }
             .filter { $0.1 > 0 }
         if let bestCount = capturing.map(\.1).max() {
@@ -343,6 +361,253 @@ public final class DotsAndBoxesEngine {
         guard let minSweep = sweeps.map(\.1).min() else { return pick(among: legal) }
         let shortest = sweeps.filter { $0.1 == minSweep }.map(\.0)
         return pick(among: shortest)
+    }
+
+    // MARK: Exact endgame
+
+    /// Solves the remaining game exactly and returns an optimal line
+    /// (preferring ones that complete boxes, then seeded-random among ties).
+    /// `nil` only if the position is somehow degenerate.
+    private func exactEndgameEdge(legal: [DotsAndBoxesEdge]) -> DotsAndBoxesEdge? {
+        let k = legal.count
+        guard k > 0, k <= 20 else { return nil }
+        var edgeIndex: [DotsAndBoxesEdge: Int] = [:]
+        for (i, e) in legal.enumerated() { edgeIndex[e] = i }
+
+        // Live boxes = unowned boxes; mask = their still-open sides.
+        var boxMasks: [UInt32] = []
+        var edgeBoxes = Array(repeating: [Int](), count: k)
+        for row in 0..<state.gridSize {
+            for col in 0..<state.gridSize where state.boxOwner[row][col] == nil {
+                let box = DotsAndBoxesBox(row: row, col: col)
+                var mask: UInt32 = 0
+                for e in box.edges() { if let i = edgeIndex[e] { mask |= 1 << UInt32(i) } }
+                guard mask != 0 else { continue }
+                let bi = boxMasks.count
+                boxMasks.append(mask)
+                for i in 0..<k where mask & (1 << UInt32(i)) != 0 { edgeBoxes[i].append(bi) }
+            }
+        }
+
+        let full: UInt32 = k == 32 ? .max : (1 << UInt32(k)) - 1
+        var memo = [Int16](repeating: Int16.min, count: 1 << k)
+
+        func completed(_ drawn: UInt32, _ edge: Int) -> Int {
+            let next = drawn | (1 << UInt32(edge))
+            var c = 0
+            for b in edgeBoxes[edge] where next & boxMasks[b] == boxMasks[b] { c += 1 }
+            return c
+        }
+        func solve(_ drawn: UInt32) -> Int {
+            if drawn == full { return 0 }
+            let cached = memo[Int(drawn)]
+            if cached != Int16.min { return Int(cached) }
+            var best = Int.min
+            for e in 0..<k where drawn & (1 << UInt32(e)) == 0 {
+                let c = completed(drawn, e)
+                let next = drawn | (1 << UInt32(e))
+                let v = c > 0 ? c + solve(next) : -solve(next)
+                if v > best { best = v }
+            }
+            memo[Int(drawn)] = Int16(best)
+            return best
+        }
+
+        var bestValue = Int.min
+        var scored: [(Int, Int, DotsAndBoxesEdge)] = [] // (value, boxesCompleted, edge)
+        for e in 0..<k {
+            let c = completed(0, e)
+            let next: UInt32 = 1 << UInt32(e)
+            let v = c > 0 ? c + solve(next) : -solve(next)
+            scored.append((v, c, legal[e]))
+            bestValue = max(bestValue, v)
+        }
+        let optimal = scored.filter { $0.0 == bestValue }
+        let mostBoxes = optimal.map(\.1).max() ?? 0
+        return pick(among: optimal.filter { $0.1 == mostBoxes }.map(\.2))
+    }
+
+    // MARK: Chain phase (chains + loops only)
+
+    private struct ChainComponent {
+        var boxes: [DotsAndBoxesBox]
+        var edges: [DotsAndBoxesEdge]
+        var isLoop: Bool
+        /// Boxes in this component with exactly one open side (capturable now).
+        var capturableBoxes: [DotsAndBoxesBox]
+        var size: Int { boxes.count }
+    }
+
+    private func openEdges(of box: DotsAndBoxesBox) -> [DotsAndBoxesEdge] {
+        box.edges().filter { state.claimedBy[$0] == nil }
+    }
+
+    /// Splits the board into chains and loops, or returns nil when any box
+    /// still has 3+ open sides (a junction: not yet a pure chain position).
+    private func chainComponents() -> [ChainComponent]? {
+        var degree: [DotsAndBoxesBox: Int] = [:]
+        var live: [DotsAndBoxesBox] = []
+        for row in 0..<state.gridSize {
+            for col in 0..<state.gridSize where state.boxOwner[row][col] == nil {
+                let box = DotsAndBoxesBox(row: row, col: col)
+                let d = openEdges(of: box).count
+                if d >= 3 { return nil }
+                if d == 0 { continue }
+                degree[box] = d
+                live.append(box)
+            }
+        }
+        var visited = Set<DotsAndBoxesBox>()
+        var comps: [ChainComponent] = []
+        for start in live where !visited.contains(start) {
+            var queue = [start]
+            visited.insert(start)
+            var boxes: [DotsAndBoxesBox] = []
+            var edgeSet = Set<DotsAndBoxesEdge>()
+            var hasGround = false
+            while let box = queue.popLast() {
+                boxes.append(box)
+                for e in openEdges(of: box) {
+                    edgeSet.insert(e)
+                    let adj = adjacentBoxes(to: e)
+                    if adj.count == 1 { hasGround = true }
+                    for other in adj where other != box && degree[other] != nil && !visited.contains(other) {
+                        visited.insert(other)
+                        queue.append(other)
+                    }
+                }
+            }
+            let capturable = boxes.filter { degree[$0] == 1 }
+            let isLoop = capturable.isEmpty && !hasGround && boxes.allSatisfy { degree[$0] == 2 }
+            comps.append(ChainComponent(boxes: boxes, edges: Array(edgeSet), isLoop: isLoop,
+                                        capturableBoxes: capturable))
+        }
+        // Deterministic order (Set/queue iteration order must not leak).
+        func key(_ c: ChainComponent) -> Int {
+            c.boxes.map { $0.row * 100 + $0.col }.min() ?? 0
+        }
+        return comps.sorted { key($0) < key($1) }
+    }
+
+    /// Value, for the player FORCED TO OPEN a component, of the position
+    /// made only of untouched components `chains`/`loops` (sizes), assuming
+    /// best play by both (controller may decline: chains give 2, loops give
+    /// 4). Positive = opener nets that many boxes over the rest of the game.
+    private static var chainValueMemo: [String: Int] = [:]
+    private static func chainValue(chains: [Int], loops: [Int]) -> Int {
+        if chains.isEmpty && loops.isEmpty { return 0 }
+        let key = chains.map(String.init).joined(separator: ",") + "|" + loops.map(String.init).joined(separator: ",")
+        if let v = chainValueMemo[key] { return v }
+        var best = Int.min
+        var tried = Set<Int>()
+        for (i, n) in chains.enumerated() where !tried.contains(n) {
+            tried.insert(n)
+            var rest = chains; rest.remove(at: i)
+            let v = openerNet(chainLength: n, rest: (rest, loops))
+            best = max(best, v)
+        }
+        tried.removeAll()
+        for (i, n) in loops.enumerated() where !tried.contains(n) {
+            tried.insert(n)
+            var rest = loops; rest.remove(at: i)
+            let v = openerNet(loopLength: n, rest: (chains, rest))
+            best = max(best, v)
+        }
+        chainValueMemo[key] = best
+        return best
+    }
+
+    private static func openerNet(chainLength n: Int, rest: (chains: [Int], loops: [Int])) -> Int {
+        let v = chainValue(chains: rest.chains, loops: rest.loops)
+        let takeAll = -n - v
+        if n <= 2 { return takeAll } // 1-chain: nothing to decline; 2-chain opened in the middle: cannot be declined
+        return min(takeAll, 4 - n + v)
+    }
+
+    private static func openerNet(loopLength n: Int, rest: (chains: [Int], loops: [Int])) -> Int {
+        let v = chainValue(chains: rest.chains, loops: rest.loops)
+        return min(-n - v, 8 - n + v)
+    }
+
+    private func chainPhaseEdge(legal: [DotsAndBoxesEdge]) -> DotsAndBoxesEdge? {
+        guard let comps = chainComponents(), !comps.isEmpty else { return nil }
+        let open = comps.filter { !$0.capturableBoxes.isEmpty }
+        let closed = comps.filter { $0.capturableBoxes.isEmpty }
+        let chains = closed.filter { !$0.isLoop }.map(\.size).sorted()
+        let loops = closed.filter { $0.isLoop }.map(\.size).sorted()
+        let v = Self.chainValue(chains: chains, loops: loops)
+
+        if !open.isEmpty {
+            // Largest open component is the one we may decline on; clear the
+            // others first (deterministic order).
+            let target = open.max { $0.size < $1.size }!
+            if let other = open.first(where: { $0.boxes != target.boxes }),
+               let box = other.capturableBoxes.first, let edge = openEdges(of: box).first {
+                return edge
+            }
+            let m = target.size
+            let ends = target.capturableBoxes.count
+            if ends == 1, m == 2 {
+                if m - 4 - v > m + v, let edge = declineEdge(of: target) { return edge }
+            } else if ends == 2, m == 4 {
+                if m - 8 - v > m + v, let edge = declineEdge(of: target) { return edge }
+            }
+            // Capture: finish the capturable box (largest component first).
+            if let box = target.capturableBoxes.first, let edge = openEdges(of: box).first {
+                return edge
+            }
+            return nil
+        }
+
+        // Nothing to capture: open the component that costs least.
+        var bestNet = Int.min
+        var bestComps: [ChainComponent] = []
+        for c in closed {
+            var restChains = chains, restLoops = loops
+            if c.isLoop, let i = restLoops.firstIndex(of: c.size) { restLoops.remove(at: i) }
+            else if let i = restChains.firstIndex(of: c.size) { restChains.remove(at: i) }
+            let net = c.isLoop ? Self.openerNet(loopLength: c.size, rest: (restChains, restLoops))
+                               : Self.openerNet(chainLength: c.size, rest: (restChains, restLoops))
+            if net > bestNet { bestNet = net; bestComps = [c] } else if net == bestNet { bestComps.append(c) }
+        }
+        guard !bestComps.isEmpty else { return nil }
+        let chosen = bestComps[bestComps.count == 1 ? 0 : Int(rng.next() % UInt64(bestComps.count))]
+        return openingEdge(of: chosen)
+    }
+
+    /// The line that declines the last boxes of an open chain (draw the far
+    /// end, leaving a two-box domino) or the middle of a half-eaten loop
+    /// (leaving two dominoes).
+    private func declineEdge(of comp: ChainComponent) -> DotsAndBoxesEdge? {
+        if comp.capturableBoxes.count == 1 {
+            // Two boxes: capturable A and its neighbour B; decline by drawing
+            // B's OTHER open side.
+            guard let a = comp.capturableBoxes.first, let aEdge = openEdges(of: a).first,
+                  let b = comp.boxes.first(where: { $0 != a }) else { return nil }
+            return openEdges(of: b).first { $0 != aEdge }
+        }
+        // Four-box open loop path A-B-C-D: draw the edge between B and C,
+        // i.e. the open edge whose two boxes are both NOT capturable.
+        return comp.edges.first { e in
+            let adj = adjacentBoxes(to: e)
+            return adj.count == 2 && adj.allSatisfy { box in !comp.capturableBoxes.contains(box) }
+        }
+    }
+
+    /// The line to draw to open `comp` as cheaply as possible: a 1-chain's
+    /// only box, a 2-chain in the middle (hard-hearted: no decline), a
+    /// longer chain at an end, a loop anywhere.
+    private func openingEdge(of comp: ChainComponent) -> DotsAndBoxesEdge? {
+        let sorted = comp.edges.sorted {
+            ($0.orientation.rawValue, $0.row, $0.col) < ($1.orientation.rawValue, $1.row, $1.col)
+        }
+        if comp.isLoop { return sorted.first }
+        if comp.size == 1 { return sorted.first }
+        if comp.size == 2 {
+            return sorted.first { adjacentBoxes(to: $0).count == 2 } ?? sorted.first
+        }
+        // End line: a border line (one adjacent box), preferring the ends.
+        return sorted.first { adjacentBoxes(to: $0).count == 1 } ?? sorted.first
     }
 
     /// Boxes that would reach 4 filled sides if `edge` were drawn next —

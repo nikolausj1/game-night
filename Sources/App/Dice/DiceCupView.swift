@@ -74,6 +74,15 @@ struct DiceCupView: View {
             updatePourTipEligibility()
         }
         .onDisappear { model.setTurnActive(false) }
+        .onChange(of: client.diceState) { old, new in
+            // The table's own roll result coming home: the first state
+            // change after a pour has had time to settle echoes back as a
+            // soft double-tap (see CupHaptics.tableEcho). Declared BEFORE
+            // the isMyTurn handler below so it fires while the haptic
+            // engine is still up (setTurnActive(false) defers its stop).
+            guard let new, new != old else { return }
+            model.noteTableUpdate()
+        }
         .onChange(of: client.diceState?.isMyTurn) { _, isMyTurn in
             model.setTurnActive(isMyTurn == true)
             scheduleAutoPourIfAsked(isMyTurn == true)
@@ -559,6 +568,12 @@ final class DiceCupModel {
 
     @ObservationIgnored private let motion = CMMotionManager()
     @ObservationIgnored private let audio = CupAudio()
+    /// The cup's Core Haptics voice (contacts, rattle texture, pour ramp,
+    /// table echo) — see CupHaptics. The 3D scene drives its contact and
+    /// rattle voices; this model fires the pour and the table echo.
+    @ObservationIgnored let haptics = CupHaptics()
+    @ObservationIgnored private var pouredAt = Date.distantPast
+    @ObservationIgnored private var echoed = false
     @ObservationIgnored private var active = false
     @ObservationIgnored private var lastJolt = Date.distantPast
     @ObservationIgnored private var lastUpdate: Date?
@@ -568,11 +583,28 @@ final class DiceCupModel {
         active = on
         if on {
             hasPoured = false
+            echoed = false
             energy = 0
+            haptics.start()
             start()
         } else {
             stop()
+            // Deferred so a table-echo double-tap triggered by the very
+            // update that ended this turn still gets to play.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self, !self.active else { return }
+                self.haptics.stop()
+            }
         }
+    }
+
+    /// Called on every dice-state change from the table. After a pour has
+    /// had >1.2s to settle (real dice take ~1.5-3s), the first change is the
+    /// roll result arriving — echo it once as a soft double-tap.
+    func noteTableUpdate() {
+        guard hasPoured, !echoed, Date().timeIntervalSince(pouredAt) > 1.2 else { return }
+        echoed = true
+        haptics.tableEcho()
     }
 
     private func start() {
@@ -626,9 +658,10 @@ final class DiceCupModel {
     private func pour() {
         guard active, !hasPoured else { return }
         hasPoured = true
+        pouredAt = Date()
         let intensity = min(1.5, max(0.3, 0.3 + energy))
         audio.playPour()
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        haptics.pour(intensity: intensity)
         onPour?(intensity)
     }
 }

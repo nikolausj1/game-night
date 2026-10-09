@@ -20,7 +20,13 @@ struct CardFaceView: View {
                 case .uno(let color, let symbol):
                     UnoCardFaceView(color: color, symbol: symbol)
                 }
+                // Real-stock material over the printed face: linen weave,
+                // ink pickup, edge wear. UNO's saturated fields get a much
+                // lighter hand (and no ink pits) so the color isn't dulled.
+                materialOverlay(width: w)
             }
+            // Contain the multiply/screen blends to this card's own pixels.
+            .compositingGroup()
         }
         .aspectRatio(CardStyle.aspectRatio, contentMode: .fit)
         // The printed pips/corner indices are a pile of individually
@@ -31,6 +37,19 @@ struct CardFaceView: View {
     }
 
     // MARK: stock
+
+    @ViewBuilder
+    private func materialOverlay(width w: CGFloat) -> some View {
+        let seed = CardStock.seed(card.id)
+        switch card.kind {
+        case .standard:
+            CardMaterial(width: w, seed: seed, linen: 1, ink: 1, wear: 1)
+        case .wizard, .jester:
+            CardMaterial(width: w, seed: seed, linen: 0.6, ink: 0.4, wear: 0.9)
+        case .uno:
+            CardMaterial(width: w, seed: seed, linen: 0.30, ink: 0, wear: 0.5)
+        }
+    }
 
     /// Deterministic per-card "wear" in 0..<1000, from the card's own stable
     /// `id` — same djb2-style hash `TableGeometry.jitterDegrees` uses for

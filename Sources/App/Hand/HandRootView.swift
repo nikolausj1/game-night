@@ -90,7 +90,11 @@ struct HandRootView: View {
 
     @ViewBuilder
     private var connectedContent: some View {
-        if client.cribbageSnapshot != nil {
+        if let sideGameState = client.sideGameState {
+            // Generic side-game mode: the registry picks the hand view by
+            // kind (see SideGameRegistry.entries).
+            SideGameRegistry.handView(kind: sideGameState.kind, client: client)
+        } else if client.cribbageSnapshot != nil {
             // Cribbage mode: the table is running a cribbage game — this
             // phone is a cribbage hand, not the trick-game card UI below.
             CribbageHandView(client: client, onLeave: onLeave)
@@ -127,7 +131,9 @@ struct HandRootView: View {
             } else {
                 BidEntryView(client: client)
             }
-        case .dealing, .playing, .trickComplete:
+        case .dealing, .playing, .trickComplete, .passing:
+            // Hearts passing: the hand stays up; the pass-3 selection UI
+            // lands with the Hearts/Spades UI wave (HandView reads phase).
             HandView(client: client, onLeave: onLeave)
         case .roundComplete, .gameOver:
             HandRecapView(client: client)

@@ -9,6 +9,9 @@ struct SeatPlateView: View {
     /// plate, local "down" is therefore always the table's rim.
     var edgeAngle: Angle = .degrees(0)
 
+    /// Where the table lamp sits relative to this plate (see `TableLamp`).
+    @State private var lamp = LampSample()
+
     private var isTheirTurn: Bool {
         guard let round = state.round else { return false }
         switch state.phase {
@@ -55,30 +58,58 @@ struct SeatPlateView: View {
         .padding(.horizontal, 16)
         .padding(.top, 9)
         .padding(.bottom, 11)
-        .background(
-            // A rim tab, not a floating pill: rounded toward the felt,
-            // squared where it meets the rail, with a brass seam along
-            // the table edge — reads as fixed to the side of the table.
-            UnevenRoundedRectangle(topLeadingRadius: 15, bottomLeadingRadius: 4,
-                                   bottomTrailingRadius: 4, topTrailingRadius: 15,
-                                   style: .continuous)
-                .fill(.black.opacity(0.42))
-                .overlay(alignment: .bottom) {
-                    Rectangle()
-                        .fill(CardStyle.gold.opacity(0.55))
-                        .frame(height: 2)
-                        .padding(.horizontal, 3)
-                }
-                .overlay(
-                    UnevenRoundedRectangle(topLeadingRadius: 15, bottomLeadingRadius: 4,
+        .background(plateBackground)
+        .lampSample($lamp)
+        .animation(.easeInOut(duration: 0.3), value: isTheirTurn)
+    }
+
+    /// A rim tab, not a floating pill: rounded toward the felt, squared
+    /// where it meets the rail, with a brass seam along the table edge —
+    /// reads as fixed to the side of the table. The brass is lit by the
+    /// table lamp: the bevel catches light on the lamp-facing edge and falls
+    /// to bronze on the far one, and the drop shadow is cast away from it.
+    private var plateBackground: some View {
+        let toward = lamp.toward(rotatedBy: edgeAngle)
+        // Gradient axis runs lamp-side -> far side, in the plate's own frame.
+        let lit = UnitPoint(x: 0.5 + toward.dx * 0.5, y: 0.5 + toward.dy * 0.5)
+        let far = UnitPoint(x: 0.5 - toward.dx * 0.5, y: 0.5 - toward.dy * 0.5)
+        let shape = UnevenRoundedRectangle(topLeadingRadius: 15, bottomLeadingRadius: 4,
                                            bottomTrailingRadius: 4, topTrailingRadius: 15,
                                            style: .continuous)
-                        .strokeBorder(isTheirTurn ? color : .white.opacity(0.08),
-                                      lineWidth: isTheirTurn ? 2.5 : 1)
-                )
-                .shadow(color: isTheirTurn ? color.opacity(0.65) : .clear, radius: 10)
-        )
-        .animation(.easeInOut(duration: 0.3), value: isTheirTurn)
+        let k = 0.55 + 0.45 * lamp.light
+        return shape
+            .fill(.black.opacity(0.42))
+            .overlay(
+                // Lamp sheen across the tab's face, lamp-facing side first.
+                shape.fill(LinearGradient(colors: [TableLamp.warmTint.opacity(0.13 * k), .clear],
+                                          startPoint: lit, endPoint: far))
+                    .blendMode(.plusLighter)
+            )
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(LinearGradient(colors: [TableLamp.brassLit.opacity(0.85 * k),
+                                                  CardStyle.gold.opacity(0.55),
+                                                  TableLamp.brassShade.opacity(0.9)],
+                                         startPoint: .leading, endPoint: .trailing))
+                    .frame(height: 2)
+                    .padding(.horizontal, 3)
+            }
+            .overlay(
+                // Brass bevel: bright where it faces the lamp, bronze in
+                // its own shadow. A turn glow replaces it in the seat color.
+                shape.strokeBorder(
+                    isTheirTurn
+                        ? AnyShapeStyle(color)
+                        : AnyShapeStyle(LinearGradient(
+                            colors: [TableLamp.brassLit.opacity(0.62 * k),
+                                     CardStyle.gold.opacity(0.22),
+                                     TableLamp.brassShade.opacity(0.75)],
+                            startPoint: lit, endPoint: far)),
+                    lineWidth: isTheirTurn ? 2.5 : 1.4)
+            )
+            .shadow(color: isTheirTurn ? color.opacity(0.65) : .clear, radius: 10)
+            .shadow(color: .black.opacity(0.38), radius: 4,
+                    x: -toward.dx * 3, y: -toward.dy * 3)
     }
 
     /// A small brass dealer button: the same specular/emboss language as the

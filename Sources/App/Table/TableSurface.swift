@@ -66,6 +66,116 @@ struct TableSkin: Identifiable, Hashable {
     }
 }
 
+// MARK: - The lamp
+
+/// ONE warm overhead lamp over the table, shared by every surface that
+/// wants to feel lit by it: the felt pool and falloff and the rail's shadow
+/// (TableSurface), the brass bevel on seat plates (SeatPlateView), the deck's
+/// side-stack shading (DeckAndTrumpView), the rail-hand card backs
+/// (RailHandFan), and the lobby's place settings (AttractMode).
+///
+/// Coordinates are UNIT points over the whole table container (the full
+/// screen, same convention as `TableGeometry`). Views that live inside the
+/// table and want to know "where is the lamp from me?" use `.lampSample($s)`
+/// below, which measures the view's own center in the window and hands
+/// back a direction + a 0...1 light level. Nothing is a hard-coded
+/// per-view guess any more: move `center` here and everything follows.
+enum TableLamp {
+    /// Lamp position, unit coords. A touch above the geometric middle:
+    /// the bulb hangs over the play area, not over the dealer's lap.
+    static let center = CGPoint(x: 0.5, y: 0.40)
+    /// The lamp's reach as a fraction of the container's half-diagonal.
+    static let reach: CGFloat = 1.0
+    /// The bulb's color: warm tungsten, never white.
+    static let warmTint = Color(red: 1.00, green: 0.86, blue: 0.62)
+    /// Brass catching the lamp (specular) and brass in shadow.
+    static let brassLit = Color(red: 0.99, green: 0.90, blue: 0.66)
+    static let brassShade = Color(red: 0.36, green: 0.26, blue: 0.12)
+
+    static func point(in size: CGSize) -> CGPoint {
+        CGPoint(x: center.x * size.width, y: center.y * size.height)
+    }
+
+    static func radius(in size: CGSize) -> CGFloat {
+        hypot(size.width, size.height) / 2 * reach
+    }
+
+    /// 1 directly under the lamp, easing smoothly toward 0 at `radius`.
+    static func light(at point: CGPoint, in size: CGSize) -> Double {
+        let lamp = Self.point(in: size)
+        let d = hypot(point.x - lamp.x, point.y - lamp.y) / max(radius(in: size), 1)
+        let t = min(max(Double(d), 0), 1)
+        return 0.5 + 0.5 * cos(t * .pi) // cosine ease: wide pool, soft edge
+    }
+
+    /// Unit vector from `point` toward the lamp (screen coords, y down).
+    static func direction(from point: CGPoint, in size: CGSize) -> CGVector {
+        let lamp = Self.point(in: size)
+        let dx = lamp.x - point.x, dy = lamp.y - point.y
+        let len = max(hypot(dx, dy), 0.001)
+        return CGVector(dx: dx / len, dy: dy / len)
+    }
+
+    /// The container size lamp math runs against: the key window's bounds
+    /// (the table is always full-screen).
+    static var containerSize: CGSize {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let window = scenes.flatMap(\.windows).first(where: \.isKeyWindow) ?? scenes.first?.windows.first
+        return window?.bounds.size ?? CGSize(width: 1366, height: 1024)
+    }
+}
+
+/// What a view sees of the lamp from where it sits.
+struct LampSample: Equatable {
+    /// Unit vector pointing from the view toward the lamp, in WINDOW space.
+    var toward = CGVector(dx: 0, dy: -1)
+    /// 0 (far dim corner) ... 1 (right under the bulb).
+    var light: Double = 0.7
+
+    /// The same direction in the frame of a view rotated by `angle` (a seat
+    /// plate turned to face its rim): local = R(-angle) * window.
+    func toward(rotatedBy angle: Angle) -> CGVector {
+        let c = cos(-angle.radians), s = sin(-angle.radians)
+        return CGVector(dx: toward.dx * c - toward.dy * s, dy: toward.dx * s + toward.dy * c)
+    }
+}
+
+private struct LampSampler: ViewModifier {
+    @Binding var sample: LampSample
+
+    func body(content: Content) -> some View {
+        content.background(
+            GeometryReader { geo in
+                let frame = geo.frame(in: .global)
+                Color.clear
+                    .onAppear { update(frame) }
+                    .onChange(of: frame) { _, new in update(new) }
+            }
+        )
+    }
+
+    private func update(_ frame: CGRect) {
+        let size = TableLamp.containerSize
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        let v = TableLamp.direction(from: center, in: size)
+        let next = LampSample(toward: v, light: TableLamp.light(at: center, in: size))
+        // Quantized so a card in flight doesn't churn a state write per frame.
+        if abs(next.light - sample.light) > 0.02
+            || abs(next.toward.dx - sample.toward.dx) > 0.03
+            || abs(next.toward.dy - sample.toward.dy) > 0.03 {
+            sample = next
+        }
+    }
+}
+
+extension View {
+    /// Measure this view's position against the table lamp. Costs one
+    /// background GeometryReader; writes are quantized.
+    func lampSample(_ sample: Binding<LampSample>) -> some View {
+        modifier(LampSampler(sample: sample))
+    }
+}
+
 /// The physical stage: walnut rail around a felt playing surface, lit from
 /// above. Everything on the table draws over this. Reads the player's
 /// chosen `TableSkin` from `ThemeStore`; the FeltTexture/WalnutTexture image
@@ -96,7 +206,8 @@ struct TableSurface: View {
             // out of alignment with itself.
             let feltSize = CGSize(width: max(geo.size.width - 28, 1),
                                   height: max(geo.size.height - 28, 1))
-            let lampRadius = hypot(feltSize.width, feltSize.height) / 2
+            let lampRadius = TableLamp.radius(in: feltSize)
+            let lampUnit = UnitPoint(x: TableLamp.center.x, y: TableLamp.center.y)
 
             ZStack {
                 // Walnut rail: photographic grain under a lighting gradient.
@@ -109,6 +220,15 @@ struct TableSurface: View {
                 LinearGradient(colors: [.white.opacity(0.08), .clear, .black.opacity(0.22)],
                                startPoint: .top, endPoint: .bottom)
                     .ignoresSafeArea()
+                // The lamp on the walnut: a warm sheen on the rail nearest
+                // the bulb, falling to deep shade at the far corners.
+                RadialGradient(colors: [TableLamp.warmTint.opacity(0.20),
+                                        TableLamp.warmTint.opacity(0.05),
+                                        .black.opacity(0.28)],
+                               center: lampUnit,
+                               startRadius: 0, endRadius: lampRadius * 1.05)
+                    .ignoresSafeArea()
+                    .blendMode(.softLight)
                 // Felt inset with a soft inner shadow where it meets the
                 // rail. The fill carries the whole lamp: bright highlight at
                 // center, through the felt's base tone, out to the vignette
@@ -124,7 +244,7 @@ struct TableSurface: View {
                                                 // felt tone above it — no separate mix step needed,
                                                 // and nothing iOS-18-only (deployment target is 17).
                                                 .black.opacity(skin.vignetteStrength)],
-                                       center: .center,
+                                       center: UnitPoint(x: TableLamp.center.x, y: TableLamp.center.y),
                                        startRadius: lampRadius * 0.065,
                                        endRadius: lampRadius)
                     )
@@ -152,10 +272,45 @@ struct TableSurface: View {
                             .padding(6)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 38, style: .continuous)
-                            .strokeBorder(.black.opacity(0.45), lineWidth: 10)
-                            .blur(radius: 8)
+                        // The lamp's pool: a warm patch of light on the felt,
+                        // brightest under the bulb, gone well before the rail.
+                        RadialGradient(colors: [TableLamp.warmTint.opacity(0.17),
+                                                TableLamp.warmTint.opacity(0.06),
+                                                .clear],
+                                       center: lampUnit,
+                                       startRadius: 0, endRadius: lampRadius * 0.62)
+                            .blendMode(.screen)
                             .clipShape(RoundedRectangle(cornerRadius: 38, style: .continuous))
+                            .allowsHitTesting(false)
+                    )
+                    .overlay(
+                        // Rail shadow where felt meets walnut: the lip's
+                        // occlusion, deepest where the lamp reaches least
+                        // (the mask thickens the ring toward the far edges).
+                        RoundedRectangle(cornerRadius: 38, style: .continuous)
+                            .strokeBorder(.black.opacity(0.6), lineWidth: 12)
+                            .blur(radius: 8)
+                            .mask(
+                                RadialGradient(colors: [.black.opacity(0.55), .black],
+                                               center: lampUnit,
+                                               startRadius: lampRadius * 0.45,
+                                               endRadius: lampRadius * 1.0)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 38, style: .continuous))
+                            .allowsHitTesting(false)
+                    )
+                    .overlay(
+                        // The raised lip itself catching the light: a hairline
+                        // of lit walnut at the edge nearest the bulb, dark on
+                        // the far side.
+                        RoundedRectangle(cornerRadius: 38, style: .continuous)
+                            .strokeBorder(
+                                LinearGradient(colors: [TableLamp.warmTint.opacity(0.26),
+                                                        .clear,
+                                                        .black.opacity(0.35)],
+                                               startPoint: .top, endPoint: .bottom),
+                                lineWidth: 2)
+                            .allowsHitTesting(false)
                     )
                     .padding(14)
             }

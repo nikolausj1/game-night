@@ -450,13 +450,15 @@ final class DiceGameController {
         turnSeat = next
     }
 
-    /// Bots shake an imaginary cup for a moment, then pour.
+    /// Bots shake an imaginary cup for a moment, then pour. LCR has no
+    /// decisions (the dice are the whole game), so a bot's personality only
+    /// shows in its tempo: snappy bots 0.7x, deliberate bots 1.4x the base beat.
     private func scheduleBotIfNeeded() {
         guard !gameOver, !rollInFlight, pendingTransfers.isEmpty,
               seats[turnSeat].isBot else { return }
         let expectedTurn = turnSeat
         let expectedVersion = stateVersion
-        let delay = Double.random(in: 1.2...2.0)
+        let delay = BotPersonality.forName(seats[expectedTurn].name).randomDelay(1.2...2.0)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !self.gameOver, !self.rollInFlight,
                   self.turnSeat == expectedTurn,

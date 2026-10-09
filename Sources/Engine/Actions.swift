@@ -16,6 +16,15 @@ public enum PlayerAction: Codable, Sendable, Equatable {
     /// table-layout hints for the host UI; the engine tracks zone membership.
     case freeMoveCard(cardID: String, to: FreePlayZone, x: Double, y: Double, rotation: Double)
     case requestUndo
+    /// Hearts passing phase: commit the cards (card IDs, exactly 3) this seat
+    /// passes in the round's direction. May be re-sent to change the pick
+    /// until the last seat commits; the swap then happens atomically.
+    case passCards([String])
+    /// Spades (when `rules.spadesBlindNil` is on): bid nil BEFORE looking at
+    /// the hand. Stored as `round.bids[seat] = 0` plus the seat in
+    /// `round.blindNilSeats`. A plain nil is simply `placeBid(0)` (in spades
+    /// a bid of 0 IS nil).
+    case bidBlindNil
 }
 
 /// Actions only the host iPad can take.
@@ -69,4 +78,23 @@ public enum GameEvent: Codable, Sendable, Equatable {
     /// Free Play: `TableAction.flipTopCard` popped this card face-up beside
     /// the deck (it's already on the discard pile by the time this fires).
     case topCardFlipped(Card)
+    /// Hearts: this seat committed its passing cards (identity stays hidden).
+    case passSubmitted(seat: Int)
+    /// Hearts: the swap happened - `from` handed 3 cards to `to`. One event
+    /// per seat, emitted together just before play begins.
+    case cardsPassed(from: Int, to: Int)
+    /// Hearts: the first heart (or discarded heart) was just played, so
+    /// hearts may now be led.
+    case heartsBroken
+    /// Hearts: this seat took every point card. Emitted at round end, before
+    /// `.roundScored`.
+    case shotTheMoon(seat: Int)
+    /// Spades: the first spade was just played, so spades may now be led.
+    case spadesBroken
+    /// Spades: this seat bid blind nil. Always accompanied by the ordinary
+    /// `.bidPlaced(seat:bid:0)` (a nil bid is bid 0).
+    case blindNilBid(seat: Int)
+    /// Spades: a nil / blind nil bidder's result, emitted at round end
+    /// (before `.roundScored`). `made` = took no tricks.
+    case nilResult(seat: Int, made: Bool)
 }

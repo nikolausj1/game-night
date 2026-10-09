@@ -1,4 +1,5 @@
 import Foundation
+import os
 import MultipeerConnectivity
 import Observation
 
@@ -183,6 +184,18 @@ final class GameHostController {
     // MARK: - Cribbage (lives outside the card engine, same coexistence
     // rule as dice — see `startCribbage`)
 
+    /// Generic side game (Battleship, Gin Rummy, Go Fish, Liar's Dice, ...):
+    /// hosted outside the card engine exactly like cribbage, but through the
+    /// `SideGameHost` protocol + `SideGamePayload` wire so each game plugs
+    /// in with no edits here. Mutually exclusive with `engine`,
+    /// `cribbageEngine`, and dice mode — TableRootView checks it first.
+    private(set) var sideGame: (any SideGameHost)?
+    private(set) var sideGameSeatByDevice: [String: Int] = [:]
+    private(set) var sideGameSeatNames: [Int: String] = [:]
+    private(set) var sideGameBotSeats: Set<Int> = []
+    private var lastSideGameSeats: [SeatSpec] = []
+    private var lastSideGameFactory: (([SeatSpec], UInt64) -> any SideGameHost)?
+
     private(set) var cribbageEngine: CribbageEngine?
     /// Seats (always 0/1) driven by CribbageBot instead of a phone.
     private(set) var cribbageBotSeats: Set<Int> = []
@@ -263,7 +276,93 @@ final class GameHostController {
         cribbageRecentEvents = []
         cribbageBotTimer?.invalidate()
         cribbageBotTimer = nil
+        sideGame?.end()
+        sideGame = nil
+        sideGameSeatByDevice = [:]
+        sideGameSeatNames = [:]
+        sideGameBotSeats = []
         stateVersion += 1
+    }
+
+    // MARK: side-game lifecycle (generic; see SideGameHost)
+
+    /// Start any `SideGameHost`. `factory` builds the game from the seat
+    /// specs + a seed (kept for "Play again"). Humans map onto connected
+    /// lobby players in lobby order, bots are the game's own business
+    /// (it reads `sideGameBotSeats`) — the exact seat contract cribbage
+    /// uses. Broadcasts `.tableReset` first so every remote sheds its old
+    /// screen, then welcomes seated phones and pushes their first state.
+    func startSideGame(seats specs: [SeatSpec], seed: UInt64,
+                       factory: @escaping ([SeatSpec], UInt64) -> any SideGameHost) {
+        lastSideGameSeats = specs
+        lastSideGameFactory = factory
+        var deviceMap: [String: Int] = [:]
+        var names: [Int: String] = [:]
+        var bots: Set<Int> = []
+        var humanIndex = 0
+        for spec in specs {
+            if spec.isBot {
+                names[spec.id] = spec.name
+                bots.insert(spec.id)
+            } else if humanIndex < lobbyPlayers.count {
+                let player = lobbyPlayers[humanIndex]
+                humanIndex += 1
+                names[spec.id] = spec.name.isEmpty ? player.name : spec.name
+                deviceMap[player.deviceID] = spec.id
+            } else {
+                names[spec.id] = spec.name
+            }
+        }
+        sideGame?.end()
+        sideGameSeatByDevice = deviceMap
+        sideGameSeatNames = names
+        sideGameBotSeats = bots
+        session.broadcast(.tableReset)
+        let game = factory(specs, seed)
+        game.onChanged = { [weak self] in self?.sideGameEmit() }
+        sideGame = game
+        for (deviceID, seat) in deviceMap {
+            for (peer, device) in deviceByPeer where device == deviceID {
+                session.send(.welcome(seat: seat), to: [peer])
+            }
+        }
+        stateVersion += 1
+        sideGameEmit()
+    }
+
+    /// "Play again": same seats, fresh seed, same game.
+    func restartSideGame() {
+        guard let factory = lastSideGameFactory, !lastSideGameSeats.isEmpty else { return }
+        startSideGame(seats: lastSideGameSeats,
+                      seed: UInt64.random(in: UInt64.min...UInt64.max), factory: factory)
+    }
+
+    /// Typed convenience for the table UI to drive a side game directly
+    /// (table-side taps on a public element, e.g. the dealer's deal
+    /// button). Seat -1 marks "the table itself" — games treat it as
+    /// authoritative/unseated.
+    func sideGameTableAction(_ payload: SideGamePayload) {
+        sideGame?.handle(action: payload, from: -1)
+    }
+
+    /// After every side-game mutation: events to everyone, each seated
+    /// phone its own redacted state, table UI invalidated.
+    private func sideGameEmit() {
+        guard let sideGame else { return }
+        stateVersion += 1
+        if let events = sideGame.drainEvents() {
+            session.broadcast(.sideGameEvents(events))
+        }
+        pushSideGameStates()
+    }
+
+    private func pushSideGameStates() {
+        guard let sideGame else { return }
+        for (peer, deviceID) in deviceByPeer {
+            guard let seat = sideGameSeatByDevice[deviceID],
+                  let state = sideGame.state(for: seat) else { continue }
+            session.send(.sideGameState(state), to: [peer])
+        }
     }
 
     // MARK: cribbage lifecycle (driven by the table UI)
@@ -443,6 +542,7 @@ final class GameHostController {
     private func handle(_ msg: NetMessage, from peer: MCPeerID) {
         switch msg {
         case .hello(let name, let deviceID):
+            Logger(subsystem: "com.levelup.gamenight", category: "Host").info("hello from \(name)")
             // Ghost hygiene: this device may be returning with a brand-new
             // peer identity (that's the reconnect design). Forget any old
             // peer that claimed the same deviceID so nothing double-routes.
@@ -460,6 +560,13 @@ final class GameHostController {
                 // path a returning phone takes — `onDiceHello` (below)
                 // never fires here. No-ops unless free-play dice is on.
                 sendFreePlayDiceState(toDevice: deviceID)
+            } else if let seat = sideGameSeatByDevice[deviceID], let sideGame {
+                // Side-game reclaim: same device returns mid-game → same
+                // seat, its current redacted state.
+                session.send(.welcome(seat: seat), to: [peer])
+                if let state = sideGame.state(for: seat) {
+                    session.send(.sideGameState(state), to: [peer])
+                }
             } else if let seat = cribbageSeatByDevice[deviceID], let cribbageEngine {
                 // Cribbage reclaim: same device returns mid-hand → same
                 // seat, exact hand — mirrors the card-engine branch above.
@@ -547,6 +654,17 @@ final class GameHostController {
             }
             cribbageEmit(cribbageEngine.apply(action, from: seat))
 
+        case .sideGameAction(let payload):
+            guard let sideGame, payload.kind == sideGame.kind,
+                  let deviceID = deviceByPeer[peer],
+                  let seat = sideGameSeatByDevice[deviceID] else {
+                // Unroutable (stale phone, wrong kind): shed its screen.
+                session.send(.tableReset, to: [peer])
+                return
+            }
+            sideGame.handle(action: payload, from: seat)
+        case .sideGameState, .sideGameEvents:
+            break // table-outbound only
         case .cribbageEvents, .cribbageSnapshot:
             break // host-outbound only
 

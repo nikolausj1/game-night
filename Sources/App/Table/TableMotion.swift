@@ -23,6 +23,11 @@ final class TableMotion {
     var onNudge: ((CGVector, Double) -> Void)?
     /// A real thump: intensity 1…3.
     var onBump: ((Double) -> Void)?
+    /// Planar direction (screen space, unit-ish) of the most recent bump,
+    /// set just before `onBump` fires. The strike's side is the side this
+    /// points toward, so FeltSim can kick cards harder near the hit edge.
+    /// Existing `onBump` clients (dice tables) can ignore it.
+    private(set) var lastBumpDirection = CGVector(dx: 0, dy: 1)
 
     @ObservationIgnored private let manager = CMMotionManager()
     @ObservationIgnored private var lastNudgeAt = Date.distantPast
@@ -55,6 +60,8 @@ final class TableMotion {
             // Bump: a genuine knock. Threshold drops as sensitivity rises.
             if magnitude > 0.55 / sens, now.timeIntervalSince(lastBumpAt) > 0.4 {
                 lastBumpAt = now
+                let planar = max(0.0001, sqrt(a.x * a.x + a.y * a.y))
+                lastBumpDirection = CGVector(dx: a.x / planar, dy: -a.y / planar)
                 onBump?(min(3.0, 1.0 + magnitude * 1.6 * sens))
                 return
             }

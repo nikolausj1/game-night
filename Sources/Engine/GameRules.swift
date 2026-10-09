@@ -22,11 +22,13 @@ public extension GameKind {
         case .crazyEights: return CrazyEightsRules()
         case .uno: return UnoRules()
         case .freePlay: return FreePlayRules()
+        case .hearts: return HeartsRules()
+        case .spades: return SpadesRules()
         }
     }
 }
 
-/// Shared trick math for Wizard and Oh Hell. Oh Hell decks contain no
+/// Shared trick math for Wizard, Oh Hell, Hearts and Spades. Oh Hell decks contain no
 /// wizards/jesters, so the special-card branches simply never fire there.
 enum TrickMath {
     /// The suit that must be followed, given the trick so far.

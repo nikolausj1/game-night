@@ -1,5 +1,6 @@
 import SwiftUI
 import SceneKit
+import Observation
 
 /// The table's 3D dice layer: a transparent SCNView floating over the
 /// felt. A persistent POOL of up to 3 real dice lives here for the whole
@@ -39,6 +40,23 @@ struct DiceTableSceneView: UIViewRepresentable {
     var loadedCount: Int = 0
     var autoCup: Bool = false
     var mouthScreen: CGPoint? = nil
+    /// POUR (night 2): where the roller's cup MOUTH is on screen (same
+    /// coordinate space as `mouthScreen`) when a roll launches — dice now
+    /// emerge from there instead of from a seat anchor. Optional: when nil
+    /// the coordinator uses the last `mouthScreen` it saw for that seat
+    /// (it's non-nil all through the loading phase, which always precedes
+    /// the roll) and, failing that (bots have no cup), derives it from
+    /// `anchor` with the same plate -> cup -> mouth geometry DiceTableView
+    /// uses. So existing call sites keep working untouched.
+    var pourMouthScreen: CGPoint? = nil
+    /// POUR (night 2): how the phone was tilted when it poured, seat-
+    /// relative and unit-ish: `dx` -1...1 (+ = the roller's right) steers
+    /// the fan left/right (up to ~26 degrees), `dy` -1...1 (+ = away from the
+    /// roller, toward the table center) scales the carry (+-15%). nil = no
+    /// tilt info on the wire (today's `.dicePour(intensity:)` carries only
+    /// intensity): the pour fans straight at the table center and spread
+    /// comes from intensity alone. See the report for the wire addition.
+    var pourTilt: CGVector? = nil
     /// Fired once per die that lands in the cup (drag-drop OR auto-glide).
     var onDieLoaded: (Int) -> Void = { _ in }
     /// Pool indices a game controller has marked HELD right now (Yahtzee-
@@ -74,7 +92,8 @@ struct DiceTableSceneView: UIViewRepresentable {
                                              loaded: loadedCount, autoCup: autoCup,
                                              mouthScreen: mouthScreen)
         context.coordinator.setHeld(heldIndices)
-        context.coordinator.requestRoll(roll, anchor: anchor)
+        context.coordinator.requestRoll(roll, anchor: anchor,
+                                        mouth: pourMouthScreen, tilt: pourTilt)
     }
 
     func makeCoordinator() -> DiceTableSceneCoordinator { DiceTableSceneCoordinator() }
@@ -208,6 +227,18 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     private var resistanceTiers: [Int] = []
 
     private var contactThrottle: DiceContactThrottle?
+
+    /// Pour (night 2). Last cup-mouth screen point seen per seat while its
+    /// cup was open (`updateCupLoading`), reused when that seat's roll
+    /// launches — the cup layer is gone by then (rollInFlight hides it).
+    private var lastMouthBySeat: [Int: CGPoint] = [:]
+    private var pendingMouth: CGPoint?
+    private var pendingTilt: CGVector?
+    /// Indices (into `activeIndices`) of dice whose staged release from
+    /// the cup mouth hasn't fired yet. While non-empty the settle logic
+    /// stays out of the way: a die parked hidden at y = -400 is perfectly
+    /// "still" and would otherwise read as settled/tier-2.
+    private var pendingRelease: Set<Int> = []
 
     /// Reduce Motion: captured per-roll (non-View code, so we read the
     /// system flag directly rather than threading an environment value
@@ -369,6 +400,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
             worldHeight = newHeight
             worldWidth = newWidth
             wallInset = feltInsetPoints * newHeight / size.height
+            lastMouthBySeat.removeAll() // screen geometry changed
             rebuildWalls()
         }
 
@@ -383,7 +415,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
 
         if let pending = pendingRoll {
             pendingRoll = nil
-            launch(pending, anchor: pendingAnchor)
+            launch(pending, anchor: pendingAnchor, mouth: pendingMouth, tilt: pendingTilt)
         }
     }
 
@@ -451,6 +483,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     /// glide) only fires on a genuine turn change.
     func updateCupLoading(seat: Int?, required: Int, loaded: Int, autoCup: Bool, mouthScreen: CGPoint?) {
         self.mouthScreen = mouthScreen
+        if let seat, let mouthScreen { lastMouthBySeat[seat] = mouthScreen }
         if autoCup {
             dragSeat = nil
             if seat == nil {
@@ -700,7 +733,8 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
 
     /// Idempotent per roll id — updateUIView calls this on every SwiftUI
     /// pass, only a NEW id launches dice.
-    func requestRoll(_ roll: DiceGameController.Roll?, anchor: CGPoint) {
+    func requestRoll(_ roll: DiceGameController.Roll?, anchor: CGPoint,
+                     mouth: CGPoint? = nil, tilt: CGVector? = nil) {
         // Captured on EVERY pass, not just a launching one — `heldTraySlot`
         // wants the current roller's edge even between rolls (e.g. while a
         // Yahtzee player is still deciding what to hold).
@@ -710,16 +744,49 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         guard let view, view.bounds.width > 10, !pool.isEmpty else {
             pendingRoll = roll
             pendingAnchor = anchor
+            pendingMouth = mouth
+            pendingTilt = tilt
             return
         }
-        launch(roll, anchor: anchor)
+        launch(roll, anchor: anchor, mouth: mouth, tilt: tilt)
     }
 
-    private func launch(_ roll: DiceGameController.Roll, anchor: CGPoint) {
+    // MARK: pour geometry
+
+    /// The roller's cup mouth, in this view's screen space: explicit
+    /// override, else the last mouth seen for that seat, else derived from
+    /// the seat anchor with the exact plate -> cup -> mouth math
+    /// DiceTableView uses (`cupCenter` + `TableCupView.mouthOffset`).
+    private func resolvedMouthScreen(seat: Int, anchor: CGPoint, explicit: CGPoint?,
+                                     size: CGSize) -> CGPoint {
+        if let explicit { return explicit }
+        if let cached = lastMouthBySeat[seat] { return cached }
+        let plate = CGPoint(x: anchor.x * size.width, y: anchor.y * size.height)
+        let center = CGPoint(x: size.width * 0.5, y: size.height * 0.47)
+        let ox = plate.x - center.x, oy = plate.y - center.y
+        let len = max(1, hypot(ox, oy))
+        let cup = CGPoint(x: plate.x + ox / len * 92, y: plate.y + oy / len * 92)
+        let dLeft = anchor.x, dRight = 1 - anchor.x, dTop = anchor.y, dBottom = 1 - anchor.y
+        let nearest = min(dLeft, dRight, dTop, dBottom)
+        let edge: TableCupView.RailEdge =
+            nearest == dBottom ? .bottom : nearest == dTop ? .top : nearest == dLeft ? .left : .right
+        let off = TableCupView.mouthOffset(for: edge)
+        return CGPoint(x: cup.x + off.dx, y: cup.y + off.dy)
+    }
+
+    /// Height of the cup mouth above the felt while pouring, world units
+    /// (a die is 2; the cup sprite stands ~3.5 dice tall and tips toward
+    /// the table, so the mouth hangs about 3 dice up).
+    private static let mouthHeight: CGFloat = 6.0
+
+    private func launch(_ roll: DiceGameController.Roll, anchor: CGPoint,
+                        mouth: CGPoint?, tilt: CGVector?) {
         ensurePool()
         guard !pool.isEmpty else {
             pendingRoll = roll
             pendingAnchor = anchor
+            pendingMouth = mouth
+            pendingTilt = tilt
             return
         }
 
@@ -763,68 +830,77 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         rollMotionReduced = UIAccessibility.isReduceMotionEnabled
         scene.physicsWorld.speed = rollMotionReduced ? 3.0 : 1.0
 
-        // Entry point: ABOVE the roller's edge of the felt, clamped inside
-        // the rails. Real dice arrive from a cup held over the table: they
-        // spawn high near the roller, travel toward the middle AND down,
-        // and their first contact with the felt is a BOUNCE mid-tumble —
-        // never a flat puck-slide in from the rail. Since these are the
-        // SAME dice that were just sitting hidden in that roller's cup,
-        // this entry point IS the cup's position — pouring them back out.
+        // POUR: dice EMERGE from the roller's cup mouth. Where the mouth is
+        // on screen (explicit > remembered from the loading phase > derived
+        // from the seat anchor) is unprojected onto the felt at mouth
+        // height, then clamped inside the rails — the cup sprite bleeds
+        // past the rail, but the invisible walls would shove a die spawned
+        // inside them (the clamp moves a spawn at most ~1 die width).
         let halfW = worldWidth / 2 - wallInset - Dice3D.side
         let halfH = worldHeight / 2 - wallInset - Dice3D.side
-        // The cup is tipped out OVER the felt, not at the rim: pull the
-        // entry point ~25% toward center so first contact lands on open
-        // felt instead of against the roller's own plate.
-        let entryX = max(-halfW, min(halfW, (anchor.x - 0.5) * worldWidth * 0.75))
-        let entryZ = max(-halfH, min(halfH, (anchor.y - 0.5) * worldHeight * 0.75))
-        let heading = atan2(-entryZ, -entryX) // toward world center
+        let size = view?.bounds.size ?? CGSize(width: 1024, height: 768)
+        let mouthScreen = resolvedMouthScreen(seat: roll.seat, anchor: anchor,
+                                              explicit: mouth, size: size)
+        var mouthWorld = view.flatMap { feltPoint(forScreen: mouthScreen, in: $0,
+                                                  liftedY: Self.mouthHeight) }
+            ?? SCNVector3(0, Self.mouthHeight, 0)
+        mouthWorld.x = Float(max(-halfW, min(halfW, CGFloat(mouthWorld.x))))
+        mouthWorld.z = Float(max(-halfH, min(halfH, CGFloat(mouthWorld.z))))
+        let mouthX = CGFloat(mouthWorld.x), mouthZ = CGFloat(mouthWorld.z)
+        // Toward the table center; the phone's tilt (when the wire carries
+        // it) steers the fan up to ~26 degrees to the roller's right/left.
+        var heading = atan2(-mouthZ, -mouthX)
+        var carry: CGFloat = 1
+        if let tilt {
+            heading += max(-1, min(1, tilt.dx)) * 0.45
+            carry += max(-1, min(1, tilt.dy)) * 0.15
+        }
 
         let norm = min(1, max(0, (roll.intensity - 0.3) / 1.2))
-        // A harder pour = flatter, faster arc from a little higher up.
-        let baseSpeed = 10.0 + 12.0 * norm         // horizontal carry
-        let dropHeight = 26.0 + 10.0 * norm        // cup height above the felt
-        let plungeSpeed = 22.0 + 10.0 * norm       // downward launch (cup tips out)
+        // Hard pour = faster carry and a wider fan. The dice leave the mouth
+        // nearly level (a slight downward tip), NOT plunging from above.
+        let baseSpeed = (11.0 + 13.0 * norm) * carry
+        let tipSpeed = 2.5 + 3.5 * norm
+        let fanStep = 0.09 + 0.07 * norm
+        // Staged release: tilt first, then one die at a time, ~75ms apart.
+        let firstRelease: TimeInterval = rollMotionReduced ? 0 : 0.22
+        let stagger: TimeInterval = rollMotionReduced ? 0 : 0.075
 
+        pendingRelease = Set(dice.indices)
         for (i, die) in dice.enumerated() {
-            let poolIndex = activeIndices[i]
-            die.physicsBody?.type = .dynamic
-            die.isHidden = false
+            // Park hidden and inert until its turn out of the mouth.
+            die.physicsBody?.type = .kinematic
+            die.isHidden = true
+            die.position = SCNVector3(0, -400, 0)
             die.scale = SCNVector3(1, 1, 1)
             die.opacity = rollMotionReduced ? 0 : 1
-            // Fan the dice out perpendicular to the throw line, and stagger
-            // their heights slightly — a cupful never leaves as one layer.
-            let lateral = (CGFloat(i) - CGFloat(dice.count - 1) / 2) * Dice3D.side * 1.4
-            die.position = SCNVector3(
-                entryX + -sin(heading) * lateral + .random(in: -0.5...0.5),
-                dropHeight + CGFloat(i) * Dice3D.side * 0.8 + .random(in: -1.5...1.5),
-                entryZ + cos(heading) * lateral + .random(in: -0.5...0.5))
-            // Random initial orientation so no two throws start alike.
-            die.eulerAngles = SCNVector3(CGFloat.random(in: 0..<(2 * .pi)),
-                                         CGFloat.random(in: 0..<(2 * .pi)),
-                                         CGFloat.random(in: 0..<(2 * .pi)))
-
-            let aim = heading + CGFloat.random(in: -0.16...0.16)
-                + (CGFloat(i) - CGFloat(dice.count - 1) / 2) * 0.13
-            let speed = baseSpeed * CGFloat.random(in: 0.85...1.15)
-            die.physicsBody?.velocity = SCNVector3(
-                cos(aim) * speed,
-                -plungeSpeed * CGFloat.random(in: 0.85...1.15),
-                sin(aim) * speed)
-            // Strong tumble: faces visibly cycle because the cube really spins.
-            let spin = CGFloat.random(in: 18...34)
-            let ax = CGFloat.random(in: -1...1)
-            let ay = CGFloat.random(in: -1...1)
-            let az = CGFloat.random(in: -1...1)
-            let length = max(0.001, sqrt(ax * ax + ay * ay + az * az))
-            die.physicsBody?.angularVelocity = SCNVector4(ax / length, ay / length,
-                                                          az / length, spin)
-            die.physicsBody?.damping = 0.1
-            die.physicsBody?.angularDamping = Dice3D.angularDamping
-            die.physicsBody?.rollingFriction = Dice3D.rollingFriction
-
+            let poolIndex = activeIndices[i]
             let shadow = poolShadows[poolIndex]
             shadow.isHidden = rollMotionReduced
             shadow.opacity = rollMotionReduced ? 0 : shadow.opacity
+
+            let delay = firstRelease + Double(i) * stagger + Double.random(in: 0...0.02)
+            let release = { [weak self] in
+                guard let self, self.activeRollID == roll.id, !self.reported,
+                      self.pendingRelease.contains(i) else { return }
+                if i == 0, norm > 0.55, !self.rollMotionReduced, TableMotion.isEnabled {
+                    // A hard pour jolts the table: the same hook a real
+                    // knock on the iPad uses (knock SFX + dice re-tumble).
+                    TableMotion.shared.onBump?(1.0 + 1.3 * norm)
+                }
+                self.release(die: die, order: i, of: dice.count, mouthX: mouthX, mouthZ: mouthZ,
+                             heading: heading, baseSpeed: baseSpeed, tipSpeed: tipSpeed,
+                             fanStep: fanStep)
+            }
+            if delay <= 0 {
+                DispatchQueue.main.async(execute: release) // after activeRollID is set below
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: release)
+            }
+        }
+        if !rollMotionReduced {
+            TablePourState.shared.begin(seat: roll.seat, intensity: roll.intensity,
+                                        releaseSpan: firstRelease + Double(dice.count) * stagger)
         }
 
         activeRollID = roll.id
@@ -837,6 +913,51 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
                                 $0.presentation.simdWorldOrientation) }
         resistanceTiers = Array(repeating: 0, count: dice.count)
         updateRenderingContinuity()
+    }
+
+    /// One die leaves the cup mouth: placed at the mouth (a hair of
+    /// scatter, a slight stagger along the throw line so a cupful isn't one
+    /// layer), launched along its own fan angle with a nearly level carry
+    /// and a strong random tumble, then handed to physics like any thrown
+    /// die. `order`/`of` place it in the fan (centered on `heading`).
+    private func release(die: DieNode, order: Int, of count: Int, mouthX: CGFloat, mouthZ: CGFloat,
+                         heading: CGFloat, baseSpeed: CGFloat, tipSpeed: CGFloat, fanStep: CGFloat) {
+        guard let activeIndex = activeDice.firstIndex(where: { $0 === die }) else { return }
+        let aim = heading + (CGFloat(order) - CGFloat(count - 1) / 2) * fanStep
+            + CGFloat.random(in: -0.06...0.06)
+        let speed = baseSpeed * CGFloat.random(in: 0.88...1.12)
+        // A short line out of the mouth: each later die starts a touch
+        // further back along the throw line, so they leave in a stream.
+        let back = CGFloat(order) * 0.35
+        die.physicsBody?.type = .dynamic
+        die.isHidden = false
+        die.position = SCNVector3(
+            mouthX - cos(aim) * back + .random(in: -0.45...0.45),
+            Self.mouthHeight + .random(in: -0.4...0.6),
+            mouthZ - sin(aim) * back + .random(in: -0.45...0.45))
+        die.eulerAngles = SCNVector3(CGFloat.random(in: 0..<(2 * .pi)),
+                                     CGFloat.random(in: 0..<(2 * .pi)),
+                                     CGFloat.random(in: 0..<(2 * .pi)))
+        die.physicsBody?.velocity = SCNVector3(
+            cos(aim) * speed,
+            -tipSpeed * CGFloat.random(in: 0.8...1.2) + CGFloat.random(in: 0...1.5),
+            sin(aim) * speed)
+        // Strong tumble: faces visibly cycle because the cube really spins.
+        let spin = CGFloat.random(in: 18...34)
+        let ax = CGFloat.random(in: -1...1), ay = CGFloat.random(in: -1...1)
+        let az = CGFloat.random(in: -1...1)
+        let length = max(0.001, sqrt(ax * ax + ay * ay + az * az))
+        die.physicsBody?.angularVelocity = SCNVector4(ax / length, ay / length, az / length, spin)
+        die.physicsBody?.damping = 0.1
+        die.physicsBody?.angularDamping = Dice3D.angularDamping
+        die.physicsBody?.rollingFriction = Dice3D.rollingFriction
+        if lastPoses.indices.contains(activeIndex) {
+            lastPoses[activeIndex] = (die.simdWorldPosition, die.simdWorldOrientation)
+        }
+        if resistanceTiers.indices.contains(activeIndex) { resistanceTiers[activeIndex] = 0 }
+        pendingRelease.remove(order)
+        TableSFX.shared.playDiceContact(.die, strength: 0.25)
+        beginSettleWindow(0.2)
     }
 
     // MARK: hold / set-aside primitive
@@ -938,6 +1059,19 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
         }
         let dt = Float(time - last)
         lastFrameTime = time
+
+        // Still pouring dice out of the cup mouth: keep poses fresh, keep
+        // the settle clock at zero, and skip the settle/tier logic (a die
+        // parked at y = -400 is "still" and would read as settled).
+        if !pendingRelease.isEmpty {
+            for index in dice.indices {
+                let node = dice[index].presentation
+                lastPoses[index] = (node.simdWorldPosition, node.simdWorldOrientation)
+            }
+            rollStartTime = nil
+            settledSince = nil
+            return
+        }
 
         var maxLinear: Float = 0   // units/s
         var maxAngular: Float = 0  // rad/s
@@ -1079,6 +1213,7 @@ final class DiceTableSceneCoordinator: NSObject, SCNSceneRendererDelegate,
     private func finishRoll() {
         guard !reported, let rollID = activeRollID else { return }
         reported = true
+        pendingRelease.removeAll()
         let dice = activeDice
         // Style-tagged so an LCR pool and a pip pool can ride the exact
         // same `onResult` callback — see `DieResult`. The whole pool is
@@ -1186,4 +1321,112 @@ final class DieHoldRingNode: SCNNode {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) unsupported") }
+}
+
+
+// MARK: - Pour state (the cup tips toward the table)
+
+/// Published by `DiceTableSceneCoordinator.launch` for the duration of a
+/// pour, so the cup SPRITE (TableCupView — not owned by the scene) can tip
+/// toward the table while the dice leave its mouth. Read-only for views.
+///
+/// Timeline for one pour (seconds from launch): `progress` eases 0 -> 1
+/// over 0.26s (cup tips), holds while the dice leave the mouth (first at
+/// 0.22s, one more every ~75ms), then eases back to 0 over 0.45s once the
+/// last die is out (cup rights itself); `seat` returns to nil when done.
+///
+/// CONTRACT for the cup layer (DiceTableView.cupLayer / TableCupView):
+/// 1. Keep drawing the roller's cup while `TablePourState.shared.seat`
+///    is non-nil — `activeCupSeat` goes nil the instant a roll is in flight,
+///    which would otherwise drop the cup the moment it should tip.
+///    e.g. `if let seat = activeCupSeat ?? TablePourState.shared.seat { ... }`
+/// 2. Apply `.tablePourTilt(seat:edge:)` (below) to the TableCupView — it
+///    reads `progress` and does the foreshortened tip.
+@Observable
+final class TablePourState {
+    static let shared = TablePourState()
+
+    /// The seat whose cup is mid-pour; nil when idle.
+    private(set) var seat: Int?
+    /// 0 (upright) ... 1 (fully tipped), eased.
+    private(set) var progress: Double = 0
+    /// The roll intensity (0.3...1.5) — harder pours tip further.
+    private(set) var intensity: Double = 0
+
+    @ObservationIgnored private var timer: Timer?
+    @ObservationIgnored private var startedAt = CACurrentMediaTime()
+    @ObservationIgnored private var holdUntil: TimeInterval = 0.5
+    private static let tipIn: TimeInterval = 0.26
+    private static let recover: TimeInterval = 0.45
+
+    func begin(seat: Int, intensity: Double, releaseSpan: TimeInterval) {
+        self.seat = seat
+        self.intensity = intensity
+        startedAt = CACurrentMediaTime()
+        holdUntil = max(Self.tipIn, releaseSpan + 0.15)
+        timer?.invalidate()
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+        tick()
+    }
+
+    private func tick() {
+        let t = CACurrentMediaTime() - startedAt
+        if t < Self.tipIn {
+            let x = t / Self.tipIn
+            progress = 1 - pow(1 - x, 3) // easeOutCubic: snaps down, settles
+        } else if t < holdUntil {
+            progress = 1
+        } else if t < holdUntil + Self.recover {
+            let x = (t - holdUntil) / Self.recover
+            progress = 1 - (x * x * (3 - 2 * x)) // smoothstep back up
+        } else {
+            progress = 0
+            seat = nil
+            timer?.invalidate()
+            timer = nil
+        }
+    }
+}
+
+/// The reference tip for a TableCupView: foreshortens the sprite along the
+/// pour axis (mouth end recedes, base end rises toward the eye), grows it a
+/// touch, and slides it a few points toward the table center — all scaled by
+/// `TablePourState.progress` for this seat. Apply OUTSIDE the cup's own
+/// rail rotation (it works in screen space, using `edge` for the axis).
+struct TablePourTiltModifier: ViewModifier {
+    let seat: Int
+    let edge: TableCupView.RailEdge
+
+    func body(content: Content) -> some View {
+        let state = TablePourState.shared
+        let p = state.seat == seat ? state.progress : 0
+        let hard = min(1, max(0, (state.intensity - 0.3) / 1.2))
+        let degrees = p * (42 + 20 * hard)
+        // Unit vector from the cup toward the table center, screen space.
+        let d: CGVector
+        switch edge {
+        case .bottom: d = CGVector(dx: 0, dy: -1)
+        case .top: d = CGVector(dx: 0, dy: 1)
+        case .left: d = CGVector(dx: 1, dy: 0)
+        case .right: d = CGVector(dx: -1, dy: 0)
+        }
+        // Horizontal pour axis (cup on the top/bottom rail) rotates about
+        // the screen X axis; vertical (left/right rail) about Y. The sign
+        // makes the MOUTH end recede for every edge.
+        let axis: (x: CGFloat, y: CGFloat, z: CGFloat) = d.dy != 0 ? (1, 0, 0) : (0, 1, 0)
+        let sign: Double = (d.dy != 0 ? d.dy : -d.dx) > 0 ? -1 : 1
+        return content
+            .rotation3DEffect(.degrees(sign * degrees), axis: axis, anchor: .center, perspective: 0.45)
+            .scaleEffect(1 + 0.08 * p)
+            .offset(x: d.dx * 10 * p, y: d.dy * 10 * p)
+    }
+}
+
+extension View {
+    /// See `TablePourState` for the full contract.
+    func tablePourTilt(seat: Int, edge: TableCupView.RailEdge) -> some View {
+        modifier(TablePourTiltModifier(seat: seat, edge: edge))
+    }
 }

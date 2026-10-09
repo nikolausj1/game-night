@@ -48,6 +48,9 @@ struct DeckAndTrumpView: View {
     /// flutter phase.
     @State private var shuffleFlutterJitter: Double = 0
 
+    /// Where the table lamp sits relative to the pile (see `TableLamp`).
+    @State private var lamp = LampSample()
+
     var body: some View {
         HStack(spacing: 26) {
             deckStack
@@ -62,6 +65,7 @@ struct DeckAndTrumpView: View {
                     .background(Capsule().fill(.black.opacity(0.4)))
             }
         }
+        .lampSample($lamp)
         .onChange(of: state.round?.trumpCard) { _, newCard in
             handleTrumpChange(newCard)
         }
@@ -75,6 +79,8 @@ struct DeckAndTrumpView: View {
         let width: CGFloat = cardWidth
         let layers = min(isFreePlay ? 5 : 3, max(deckCount, 1))
         return ZStack {
+            // The pile's cast shadow, thrown away from the lamp.
+            DeckCastShadow(width: width, layers: layers, lamp: lamp)
             // Buried cards show only their paper EDGES — plain stock, no
             // art — so the pile reads as one deck, not interleaved cards.
             // Only the top card wears the printed back.
@@ -86,21 +92,12 @@ struct DeckAndTrumpView: View {
                         CardView(card: Card(id: "deck\(layer)", kind: .standard(suit: .spades, rank: 2)),
                                  faceUp: false)
                             .frame(width: width)
+                            .overlay(DeckTopShade(width: width, lamp: lamp))
                             .offset(x: CGFloat(layer) * -2.0, y: CGFloat(layer) * -2.5)
                             .rotationEffect(.degrees(Double(layer) * -0.8))
                     }
                 } else {
-                    RoundedRectangle(cornerRadius: CardStyle.cornerRadius(width: width),
-                                     style: .continuous)
-                        .fill(CardStyle.stockBottom)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: CardStyle.cornerRadius(width: width),
-                                             style: .continuous)
-                                .strokeBorder(.black.opacity(0.10), lineWidth: 0.5)
-                        )
-                        .aspectRatio(CardStyle.aspectRatio, contentMode: .fit)
-                        .frame(width: width)
-                        .shadow(color: .black.opacity(0.18), radius: 1.5, y: 1)
+                    DeckEdgeLayer(width: width, lamp: lamp)
                         .offset(x: CGFloat(layer) * -2.0, y: CGFloat(layer) * -2.5)
                         .rotationEffect(.degrees(Double(layer) * -0.8))
                 }
@@ -270,5 +267,163 @@ struct DeckAndTrumpView: View {
         } completion: {
             shuffleActive = false
         }
+    }
+}
+
+
+// MARK: - Lamp shading (shared by the game deck and the lobby deck)
+
+/// A buried card's paper edge: plain stock lit by the table lamp. The face
+/// toward the lamp warms, the far one falls to shade, so a three-high stack
+/// reads as a block of paper under a light instead of three flat tans.
+struct DeckEdgeLayer: View {
+    let width: CGFloat
+    let lamp: LampSample
+
+    var body: some View {
+        let r = CardStyle.cornerRadius(width: width)
+        let lit = UnitPoint(x: 0.5 + lamp.toward.dx * 0.5, y: 0.5 + lamp.toward.dy * 0.5)
+        let far = UnitPoint(x: 0.5 - lamp.toward.dx * 0.5, y: 0.5 - lamp.toward.dy * 0.5)
+        let k = 0.5 + 0.5 * lamp.light
+        return RoundedRectangle(cornerRadius: r, style: .continuous)
+            .fill(CardStyle.stockBottom)
+            .overlay(
+                RoundedRectangle(cornerRadius: r, style: .continuous)
+                    .fill(LinearGradient(colors: [TableLamp.warmTint.opacity(0.22 * k),
+                                                  .black.opacity(0.10 + 0.22 * (1 - lamp.light))],
+                                         startPoint: lit, endPoint: far))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: r, style: .continuous)
+                    .strokeBorder(.black.opacity(0.14), lineWidth: 0.5)
+            )
+            .aspectRatio(CardStyle.aspectRatio, contentMode: .fit)
+            .frame(width: width)
+            .shadow(color: .black.opacity(0.20), radius: 1.5,
+                    x: -lamp.toward.dx * 1.2, y: -lamp.toward.dy * 1.2)
+    }
+}
+
+/// The top card's face-down back, graded by the lamp: a warm cast on the
+/// lamp-facing side, a soft darkening on the far side.
+struct DeckTopShade: View {
+    let width: CGFloat
+    let lamp: LampSample
+
+    var body: some View {
+        let r = CardStyle.cornerRadius(width: width)
+        let lit = UnitPoint(x: 0.5 + lamp.toward.dx * 0.5, y: 0.5 + lamp.toward.dy * 0.5)
+        let far = UnitPoint(x: 0.5 - lamp.toward.dx * 0.5, y: 0.5 - lamp.toward.dy * 0.5)
+        RoundedRectangle(cornerRadius: r, style: .continuous)
+            .fill(LinearGradient(colors: [TableLamp.warmTint.opacity(0.10 * (0.5 + 0.5 * lamp.light)),
+                                          .black.opacity(0.06 + 0.16 * (1 - lamp.light))],
+                                 startPoint: lit, endPoint: far))
+            .allowsHitTesting(false)
+    }
+}
+
+/// Soft contact shadow under the pile, cast away from the lamp.
+struct DeckCastShadow: View {
+    let width: CGFloat
+    let layers: Int
+    let lamp: LampSample
+
+    var body: some View {
+        let r = CardStyle.cornerRadius(width: width)
+        RoundedRectangle(cornerRadius: r, style: .continuous)
+            .fill(.black.opacity(0.34))
+            .aspectRatio(CardStyle.aspectRatio, contentMode: .fit)
+            .frame(width: width)
+            .blur(radius: 5 + CGFloat(layers))
+            .offset(x: -lamp.toward.dx * (4 + CGFloat(layers)),
+                    y: -lamp.toward.dy * (4 + CGFloat(layers)) + 2)
+            .allowsHitTesting(false)
+    }
+}
+
+/// A standalone draw pile for the lobby (no `GameState` needed): the same
+/// stack and lamp shading as the table's, with the same riffle flourish
+/// (split, three flutters, snap) driven by bumping `riffleTrigger`.
+struct LobbyDeckView: View {
+    var cardWidth: CGFloat = 104
+    /// Bump to run one riffle.
+    var riffleTrigger: Int = 0
+
+    @State private var lamp = LampSample()
+    @State private var active = false
+    @State private var split: CGFloat = 0
+    @State private var splitAngle: Double = 0
+    @State private var jitter: Double = 0
+
+    private let layers = 4
+
+    var body: some View {
+        ZStack {
+            DeckCastShadow(width: cardWidth, layers: layers, lamp: lamp)
+            ForEach(0..<layers, id: \.self) { layer in
+                let dx = CGFloat(layer) * -2.0
+                let dy = CGFloat(layer) * -2.5
+                let rot = Double(layer) * -0.8
+                if layer == layers - 1 {
+                    if active {
+                        halves(dx: dx, dy: dy, rot: rot)
+                    } else {
+                        top(id: "lobbyDeck")
+                            .offset(x: dx, y: dy)
+                            .rotationEffect(.degrees(rot))
+                    }
+                } else {
+                    DeckEdgeLayer(width: cardWidth, lamp: lamp)
+                        .offset(x: dx, y: dy)
+                        .rotationEffect(.degrees(rot))
+                }
+            }
+        }
+        .lampSample($lamp)
+        .onChange(of: riffleTrigger) { _, _ in riffle() }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func top(id: String) -> some View {
+        CardView(card: Card(id: id, kind: .standard(suit: .spades, rank: 2)), faceUp: false)
+            .frame(width: cardWidth)
+            .overlay(DeckTopShade(width: cardWidth, lamp: lamp))
+    }
+
+    private func halves(dx: CGFloat, dy: CGFloat, rot: Double) -> some View {
+        ZStack {
+            top(id: "lobbyDeckA")
+                .offset(x: dx - split, y: dy)
+                .rotationEffect(.degrees(rot - splitAngle - jitter))
+            top(id: "lobbyDeckB")
+                .offset(x: dx + split, y: dy)
+                .rotationEffect(.degrees(rot + splitAngle + jitter))
+        }
+    }
+
+    /// Same beats as the table deck: 0.12s split, 3 x 0.12s flutter, 0.22s snap.
+    private func riffle() {
+        guard !active else { return }
+        active = true
+        TableSFX.shared.play(.shuffle)
+        split = 0; splitAngle = 0; jitter = 0
+        withAnimation(.easeOut(duration: 0.12)) {
+            split = 14; splitAngle = 12
+        } completion: { flutter(remaining: 3) }
+    }
+
+    private func flutter(remaining: Int) {
+        guard remaining > 0 else {
+            TableSFX.shared.play(.cardFlip)
+            withAnimation(.easeIn(duration: 0.22)) {
+                split = 0; splitAngle = 0; jitter = 0
+            } completion: { active = false }
+            return
+        }
+        let sign: Double = remaining.isMultiple(of: 2) ? 1 : -1
+        withAnimation(.easeInOut(duration: 0.12)) {
+            jitter = sign * 4
+        } completion: { flutter(remaining: remaining - 1) }
     }
 }

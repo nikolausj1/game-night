@@ -93,6 +93,7 @@ extension HostSession: MCSessionDelegate {
         DispatchQueue.main.async {
             switch state {
             case .connected:
+            self.log.info("peer connected: \(peerID.displayName)") // verify.sh join assertion greps this
                 if !self.connectedPeers.contains(peerID) { self.connectedPeers.append(peerID) }
                 self.onPeerChange?(peerID, true)
             case .notConnected:

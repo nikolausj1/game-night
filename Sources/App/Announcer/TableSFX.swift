@@ -83,6 +83,15 @@ final class TableSFX {
         case diceRailKnock = "dice_rail_knock"
         /// Very short, very quiet — one die coming to rest. Same tool.
         case diceSettleTick = "dice_settle_tick"
+
+        // MARK: coin bank (CoinSim) — metal on metal. Synthesized locally
+        // by `tools/generate_coin_sfx.py`; pooled like the dice contacts.
+        case coinClink1 = "coin_clink_1"
+        case coinClink2 = "coin_clink_2"
+        case coinClink3 = "coin_clink_3"
+        /// The dropped-coin whirr: pings that accelerate into a buzz, then
+        /// two settle ticks (~1.1 s, matched to CoinEdgeState.fallDuration).
+        case coinSpinDown = "coin_spin_down"
     }
 
     /// Polite default playback volumes per effect (0...1) — the
@@ -126,6 +135,7 @@ final class TableSFX {
     private static let contactEffects: [Effect] = [
         .diceRattle1, .diceRattle2, .diceRattle3,
         .diceFeltThud, .diceRailKnock, .diceSettleTick,
+        .coinClink1, .coinClink2, .coinClink3, .coinSpinDown,
     ]
 
     private init() {
@@ -251,6 +261,55 @@ final class TableSFX {
         player.rate = Float(max(0.5, min(2.0, jitteredRate)))
         player.volume = Float(curve.volumeRange.lowerBound
             + s * (curve.volumeRange.upperBound - curve.volumeRange.lowerBound))
+        if player.isPlaying { player.stop() }
+        player.currentTime = 0
+        player.play()
+    }
+
+    // MARK: - Coins (CoinSim)
+
+    /// One metallic coin-on-coin clink, layered by `strength` (0...1) the
+    /// same way `playDiceContact` layers by class: a pitch-varied ping from
+    /// the three-take bank, plus (from a firm hit up) the existing dull felt
+    /// thud underneath for body, plus a second, higher ping on a hard hit.
+    func playCoinClink(strength: Double) {
+        let s = max(0, min(1, strength))
+        guard s > 0.04 else { return }
+        playCoinPing(volume: 0.10 + 0.50 * s, rate: 0.92 + 0.30 * s)
+        if s > 0.35 { playDiceContact(.felt, strength: (s - 0.2) * 0.8) }
+        if s > 0.7 { playCoinPing(volume: 0.22 * s, rate: 1.30 + 0.1 * s) }
+    }
+
+    /// A coin against the wooden rail: the existing rail knock with a
+    /// small metal ping on top.
+    func playCoinRail(strength: Double) {
+        let s = max(0, min(1, strength))
+        guard s > 0.05 else { return }
+        playDiceContact(.rail, strength: s * 0.7)
+        playCoinPing(volume: 0.06 + 0.26 * s, rate: 0.85 + 0.2 * s)
+    }
+
+    /// The edge-roll finish: the dropped-coin whirr.
+    func playCoinSpinDown() {
+        guard let pool = contactPools[.coinSpinDown], !pool.isEmpty else { return }
+        let cursor = (contactPoolCursor[.coinSpinDown] ?? 0) % pool.count
+        contactPoolCursor[.coinSpinDown] = cursor + 1
+        let player = pool[cursor]
+        player.rate = 1.0
+        player.volume = 0.5
+        if player.isPlaying { player.stop() }
+        player.currentTime = 0
+        player.play()
+    }
+
+    private func playCoinPing(volume: Double, rate: Double) {
+        let effect = [Effect.coinClink1, .coinClink2, .coinClink3].randomElement()!
+        guard let pool = contactPools[effect], !pool.isEmpty else { return }
+        let cursor = (contactPoolCursor[effect] ?? 0) % pool.count
+        contactPoolCursor[effect] = cursor + 1
+        let player = pool[cursor]
+        player.rate = Float(max(0.5, min(2.0, rate + Double.random(in: -0.04...0.04))))
+        player.volume = Float(max(0, min(1, volume)))
         if player.isPlaying { player.stop() }
         player.currentTime = 0
         player.play()

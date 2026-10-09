@@ -7,6 +7,7 @@ enum BotDecision: Equatable {
     case chooseTrump  // Wizard, phase .choosingTrump (wizard flipped)
     case declareSuit  // Crazy Eights / UNO, phase .choosingTrump (eight/wild)
     case play         // phase .playing: play a card or draw
+    case pass         // Hearts, phase .passing: choose 3 cards to pass
 }
 
 /// A strategy answers one decision with one PlayerAction (or nil to stand
@@ -23,6 +24,7 @@ enum BotStrategyFactory {
         case .wizard, .ohHell: return TrickTakingBotStrategy()
         case .crazyEights: return CrazyEightsBotStrategy()
         case .uno: return UnoBotStrategy()
+        case .hearts, .spades: return EngineTrickBotStrategy()
         case .freePlay: return nil // no rules, no turns, no bot
         }
     }
@@ -48,5 +50,14 @@ extension BotStrategy {
         let direction = state.round?.direction ?? 1
         let raw = (seat + direction) % count
         return raw < 0 ? raw + count : raw
+    }
+}
+
+/// Hearts and Spades: the engine ships its own full strategy
+/// (`TrickBots` in Sources/Engine — passing, bids incl. nil, partner-aware
+/// play), so the app-side strategy just defers to it for every decision.
+struct EngineTrickBotStrategy: BotStrategy {
+    func action(_ decision: BotDecision, state: GameState, seat: Int) -> PlayerAction? {
+        TrickBots.action(for: state, seat: seat)
     }
 }

@@ -24,6 +24,12 @@ struct TableRootView: View {
                 case .shutBox(let c):
                     ShutBoxTableView(controller: c, onClose: { diceLauncher.end() })
                 }
+            } else if let sideGame = host.sideGame {
+                // Generic side games (Battleship, Gin Rummy, ...): the
+                // registry picks the table view by kind. Checked before
+                // the menu like cribbage — `host.state` stays nil.
+                SideGameRegistry.tableView(kind: sideGame.kind, host: host,
+                                           onClose: { host.closeTable() })
             } else if host.cribbageEngine != nil {
                 // Cribbage lives outside the card engine, same coexistence
                 // rule as dice above: `host.state` stays nil the whole
@@ -67,6 +73,33 @@ struct TableRootView: View {
             // names). Mirrors MenuView's own `-autoStartLcr`/`-autoStartUno`
             // hooks; lives here instead since MenuView isn't this wave's
             // file to edit.
+            // Side-game harnesses (overnight 2): all-bot tables that play
+            // themselves, reachable without MenuView. Each guards on an
+            // idle table exactly like -autoStartCribbage below.
+            if host.state == nil, host.sideGame == nil, host.cribbageEngine == nil {
+                _ = KidsPackIntegration.autoStartIfRequested(host)
+            }
+            if CommandLine.arguments.contains("-autoStartLiarsDice"),
+               host.state == nil, host.sideGame == nil, host.cribbageEngine == nil {
+                LiarsDiceHost.launchAllBotDemo(on: host)
+            }
+            if CommandLine.arguments.contains("-autoStartBlackjack"),
+               host.state == nil, host.sideGame == nil, host.cribbageEngine == nil {
+                BlackjackLaunch.start(on: host,
+                                      allBots: CommandLine.arguments.contains("-blackjackAllBots"))
+            }
+            if host.state == nil, host.sideGame == nil, host.cribbageEngine == nil {
+                GinRummyLaunch.autoStartIfRequested(host: host) // -autoStartGinRummy
+            }
+            if CommandLine.arguments.contains("-autoStartBattleship"),
+               host.state == nil, host.sideGame == nil, host.cribbageEngine == nil {
+                let seats = BotRoster.random(count: 2).enumerated().map {
+                    SeatSpec(id: $0.offset, name: $0.element.name, isBot: true)
+                }
+                host.startSideGame(seats: seats, seed: UInt64.random(in: UInt64.min...UInt64.max)) {
+                    BattleshipHost(seats: $0, seed: $1)
+                }
+            }
             if CommandLine.arguments.contains("-autoStartCribbage"),
                host.state == nil, host.cribbageEngine == nil {
                 let bots = BotRoster.random(count: 2)

@@ -177,14 +177,29 @@ public enum QuartoRules {
         }
     }
 
+    /// True when the four cells are all filled and share at least one
+    /// attribute. Bitmask form of `sharedAttributes(...).isEmpty == false`:
+    /// the AND of the ids has a 1-bit where every piece has the attribute
+    /// set, and the NOR has a 1-bit where every piece has it clear. No
+    /// allocation, which matters because the bot calls this millions of times.
+    @inline(__always)
+    static func lineIsComplete(_ line: [Int], board: [Int?]) -> Bool {
+        var all = 0xF, any = 0
+        for cell in line {
+            guard let id = board[cell] else { return false }
+            all &= id
+            any |= id
+        }
+        return (all | (~any & 0xF)) != 0
+    }
+
     /// The first complete, attribute-sharing line found on `board`, if any.
     /// Checking all lines (at most 19, 4 cells each) every call is cheap
     /// enough at this board size that there's no need to scope the search
     /// to lines touching the just-placed cell.
     public static func winningLine(board: [Int?], includeSquares: Bool) -> (line: [Int], attributes: [QuartoAttribute])? {
-        for line in QuartoLines.lines(includeSquares: includeSquares) {
-            let shared = sharedAttributes(line, board: board)
-            if !shared.isEmpty { return (line, shared) }
+        for line in QuartoLines.lines(includeSquares: includeSquares) where lineIsComplete(line, board: board) {
+            return (line, sharedAttributes(line, board: board))
         }
         return nil
     }
@@ -193,12 +208,16 @@ public enum QuartoRules {
     /// "is handing over this piece safe?" is `winningPlacements(...).isEmpty`.
     public static func winningPlacements(piece: Int, board: [Int?], includeSquares: Bool) -> [Int] {
         var result: [Int] = []
+        var trial = board
+        let lines = QuartoLines.lines(includeSquares: includeSquares)
         for cell in 0..<16 where board[cell] == nil {
-            var trial = board
             trial[cell] = piece
-            if winningLine(board: trial, includeSquares: includeSquares) != nil {
+            // Only a line through `cell` can newly complete.
+            for line in lines where line.contains(cell) && lineIsComplete(line, board: trial) {
                 result.append(cell)
+                break
             }
+            trial[cell] = nil
         }
         return result
     }
@@ -337,41 +356,81 @@ public final class QuartoEngine {
 /// so a slow device or a wide position still returns *something* well
 /// inside `timeLimit` instead of blowing past it.
 public enum QuartoBot {
-    public static let defaultTimeLimit: TimeInterval = 0.85
+    /// Wall-clock is NOT used to bound the search (that made the chosen move
+    /// depend on CPU load). The cap is a deterministic node budget: the
+    /// number of search nodes expanded across ALL iterative-deepening
+    /// passes. Measured on a Mac (loaded): ~2000 nodes is ~15-30ms in -O and
+    /// ~0.4s average / ~0.8s worst unoptimized (Debug); a full depth-6 pass
+    /// never exceeds ~10.5k nodes, so 2000 always completes depth 4 and
+    /// usually depth 5-6. The same state + seed always searches exactly the
+    /// same tree and so yields the same move under any CPU load.
+    public static let defaultNodeBudget = 2000
+    /// Kept only as a generous SANITY ceiling for tests and callers; it does
+    /// not influence the search.
+    public static let wallClockSanityLimit: TimeInterval = 2.0
     private static let beamWidth = 6
-    private static let targetTurns = 3
+    public static let targetTurns = 3
     private static let winScore = 100_000
+
+    /// Mutable per-decision search bookkeeping.
+    private struct Budget {
+        var nodes = 0
+        let limit: Int
+        var exhausted: Bool { nodes >= limit }
+    }
 
     /// `seed` makes the choice reproducible (tie-breaks and beam order are
     /// seed-derived, never `Bool.random()`/`Array.shuffled()` off the
     /// system RNG) — the same state + seed always yields the same move, so
     /// bot-vs-bot games and regression tests can replay exactly.
-    public static func decide(state: QuartoState, seed: UInt64, timeLimit: TimeInterval = defaultTimeLimit) -> QuartoAction {
+    ///
+    /// `maxTurns` lets a personality shave or add search depth (default 3
+    /// turns = 6 plies); the node budget still caps the real cost.
+    public static func decide(state: QuartoState, seed: UInt64,
+                              nodeBudget: Int = defaultNodeBudget,
+                              maxTurns: Int = targetTurns) -> QuartoAction {
+        decideCounting(state: state, seed: seed, nodeBudget: nodeBudget, maxTurns: maxTurns).action
+    }
+
+    /// Same as `decide`, also reporting nodes spent and the deepest fully
+    /// completed depth (for tests / tuning).
+    public static func decideCounting(state: QuartoState, seed: UInt64,
+                                      nodeBudget: Int = defaultNodeBudget,
+                                      maxTurns: Int = targetTurns)
+        -> (action: QuartoAction, nodes: Int, depth: Int) {
         precondition(state.phase != .gameOver, "QuartoBot.decide called on a finished game")
-        var rng = SeededGenerator(seed: seed &+ UInt64(state.moveCount) &* 0x9E37_79B9_7F4A_7C15)
-        let deadline = Date().addingTimeInterval(timeLimit)
         let maximizingPlayer = state.currentPlayer
 
+        var budget = Budget(limit: max(nodeBudget, 1))
         var bestAction: QuartoAction?
+        var completedDepth = 0
         var depth = 2
-        let maxDepth = targetTurns * 2
+        let maxDepth = max(1, maxTurns) * 2
         while depth <= maxDepth {
+            // Fresh RNG per pass so a pass's move ordering never depends on
+            // how many nodes earlier passes consumed.
+            var rng = SeededGenerator(seed: seed &+ UInt64(state.moveCount) &* 0x9E37_79B9_7F4A_7C15 &+ UInt64(depth))
             let result = search(state: state, depth: depth, alpha: -winScore * 10, beta: winScore * 10,
-                                maximizingPlayer: maximizingPlayer, deadline: deadline, rng: &rng)
-            if let action = result.action { bestAction = action }
-            if Date() >= deadline { break }
+                                maximizingPlayer: maximizingPlayer, budget: &budget, rng: &rng)
+            // A pass cut short by the budget is partial and unreliable: keep
+            // the last COMPLETED pass (the shallowest pass always counts so
+            // there is always an answer).
+            if budget.exhausted && bestAction != nil { break }
+            if let action = result.action { bestAction = action; completedDepth = depth }
+            if budget.exhausted { break }
             depth += 1
         }
         // candidateActions is never empty for a non-gameOver state, so this
         // fallback is just defensive — search always finds SOME action.
-        return bestAction ?? candidateActions(state: state).first!
+        return (bestAction ?? candidateActions(state: state).first!, budget.nodes, completedDepth)
     }
 
     // MARK: search
 
     private static func search(state: QuartoState, depth: Int, alpha: Int, beta: Int,
-                               maximizingPlayer: Int, deadline: Date,
+                               maximizingPlayer: Int, budget: inout Budget,
                                rng: inout SeededGenerator) -> (score: Int, action: QuartoAction?) {
+        budget.nodes += 1
         if state.phase == .gameOver || depth == 0 {
             return (evaluate(state: state, maximizingPlayer: maximizingPlayer, plyBudget: depth), nil)
         }
@@ -388,7 +447,7 @@ public enum QuartoBot {
         for action in candidates {
             let child = QuartoRules.apply(action, to: state)
             let childResult = search(state: child, depth: depth - 1, alpha: alpha, beta: beta,
-                                     maximizingPlayer: maximizingPlayer, deadline: deadline, rng: &rng)
+                                     maximizingPlayer: maximizingPlayer, budget: &budget, rng: &rng)
             if maximizing {
                 if bestAction == nil || childResult.score > bestScore {
                     bestScore = childResult.score; bestAction = action
@@ -401,7 +460,7 @@ public enum QuartoBot {
                 beta = min(beta, bestScore)
             }
             if beta <= alpha { break }
-            if Date() >= deadline { break }
+            if budget.exhausted { break }
         }
         return (bestScore, bestAction)
     }

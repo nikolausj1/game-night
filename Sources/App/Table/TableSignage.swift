@@ -115,7 +115,8 @@ extension TableCalloutCenter {
 
         case .dealt, .bidPlaced, .biddingComplete, .trumpRevealed, .trickWon,
              .roundScored, .gameWon, .illegalAttempt, .undone, .cardDealt,
-             .topCardFlipped:
+             .topCardFlipped, .passSubmitted, .cardsPassed, .heartsBroken,
+             .shotTheMoon, .spadesBroken, .blindNilBid, .nilResult:
             break
         }
     }

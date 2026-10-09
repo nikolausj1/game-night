@@ -23,6 +23,9 @@ public enum Phase: Codable, Sendable, Equatable {
     /// Wizard: dealer picks trump after a wizard flip.
     /// Crazy Eights: the seat that just played an eight picks the suit.
     case choosingTrump(seat: Int)
+    /// Hearts: every seat simultaneously picks 3 cards to pass
+    /// (`PlayerAction.passCards`); play opens when the last seat commits.
+    case passing
     case playing
     case trickComplete(winnerSeat: Int)
     case roundComplete
@@ -63,6 +66,20 @@ public struct RoundState: Codable, Sendable, Equatable {
     /// UNO: accumulated draw-two / wild-draw-four penalty awaiting the next
     /// player (stack or absorb). Other games leave it at 0.
     public var pendingDraw: Int
+    /// Hearts: this round's passing direction (nil in every other game).
+    public var passDirection: PassDirection?
+    /// Hearts, `.passing` only: card IDs each seat has committed to pass.
+    /// ClientSnapshot redacts other seats' entries to "?" placeholders.
+    public var passSelections: [Int: [String]]
+    /// Hearts: card IDs each seat RECEIVED in this round's pass, so the hand
+    /// can highlight them. Snapshots keep only the viewing seat's entry.
+    public var passReceived: [Int: [String]]
+    /// Hearts: a heart has been played this round, so hearts may be led.
+    public var heartsBroken: Bool
+    /// Spades: a spade has been played this round, so spades may be led.
+    public var spadesBroken: Bool
+    /// Spades: seats that bid blind nil this round (their bid is 0).
+    public var blindNilSeats: [Int]
 
     public init(
         roundNumber: Int,
@@ -77,7 +94,13 @@ public struct RoundState: Codable, Sendable, Equatable {
         leadSeat: Int,
         turnSeat: Int,
         direction: Int = 1,
-        pendingDraw: Int = 0
+        pendingDraw: Int = 0,
+        passDirection: PassDirection? = nil,
+        passSelections: [Int: [String]] = [:],
+        passReceived: [Int: [String]] = [:],
+        heartsBroken: Bool = false,
+        spadesBroken: Bool = false,
+        blindNilSeats: [Int] = []
     ) {
         self.roundNumber = roundNumber
         self.cardsPerPlayer = cardsPerPlayer
@@ -92,12 +115,19 @@ public struct RoundState: Codable, Sendable, Equatable {
         self.turnSeat = turnSeat
         self.direction = direction
         self.pendingDraw = pendingDraw
+        self.passDirection = passDirection
+        self.passSelections = passSelections
+        self.passReceived = passReceived
+        self.heartsBroken = heartsBroken
+        self.spadesBroken = spadesBroken
+        self.blindNilSeats = blindNilSeats
     }
 
     private enum CodingKeys: String, CodingKey {
         case roundNumber, cardsPerPlayer, dealerSeat, trumpCard, trumpSuit
         case bids, tricksWon, currentTrick, completedTricks, leadSeat, turnSeat
         case direction, pendingDraw
+        case passDirection, passSelections, passReceived, heartsBroken, spadesBroken, blindNilSeats
     }
 
     /// Custom decode so states encoded before the UNO fields existed still
@@ -117,6 +147,12 @@ public struct RoundState: Codable, Sendable, Equatable {
         turnSeat = try container.decode(Int.self, forKey: .turnSeat)
         direction = try container.decodeIfPresent(Int.self, forKey: .direction) ?? 1
         pendingDraw = try container.decodeIfPresent(Int.self, forKey: .pendingDraw) ?? 0
+        passDirection = try container.decodeIfPresent(PassDirection.self, forKey: .passDirection)
+        passSelections = try container.decodeIfPresent([Int: [String]].self, forKey: .passSelections) ?? [:]
+        passReceived = try container.decodeIfPresent([Int: [String]].self, forKey: .passReceived) ?? [:]
+        heartsBroken = try container.decodeIfPresent(Bool.self, forKey: .heartsBroken) ?? false
+        spadesBroken = try container.decodeIfPresent(Bool.self, forKey: .spadesBroken) ?? false
+        blindNilSeats = try container.decodeIfPresent([Int].self, forKey: .blindNilSeats) ?? []
     }
 }
 
@@ -125,12 +161,61 @@ public struct CompletedRound: Codable, Sendable, Equatable {
     public let cardsPerPlayer: Int
     public let bids: [Int: Int]
     public let tricksWon: [Int: Int]
+    /// Score-limit games (hearts, spades): the score each seat gained (or
+    /// lost) this round, exactly as applied to its running total. In
+    /// partnership spades both partners carry the same team delta. Empty for
+    /// bid-and-hit games, which derive scores from `bids`/`tricksWon`.
+    public let scoreDeltas: [Int: Int]
+    /// Hearts: raw point-card points each seat captured (hearts 1 each,
+    /// queen of spades 13) before any moon adjustment.
+    public let heartsPoints: [Int: Int]
+    /// Hearts: the seat that shot the moon this round, if any.
+    public let moonShooter: Int?
+    /// Spades: bags carried after this round, per seat (partners share the
+    /// team's count). The next round reads the latest entry.
+    public let bagsAfter: [Int: Int]
+    /// Spades: for each nil / blind nil bidder, whether it was made.
+    public let nilMade: [Int: Bool]
 
-    public init(roundNumber: Int, cardsPerPlayer: Int, bids: [Int: Int], tricksWon: [Int: Int]) {
+    public init(
+        roundNumber: Int,
+        cardsPerPlayer: Int,
+        bids: [Int: Int],
+        tricksWon: [Int: Int],
+        scoreDeltas: [Int: Int] = [:],
+        heartsPoints: [Int: Int] = [:],
+        moonShooter: Int? = nil,
+        bagsAfter: [Int: Int] = [:],
+        nilMade: [Int: Bool] = [:]
+    ) {
         self.roundNumber = roundNumber
         self.cardsPerPlayer = cardsPerPlayer
         self.bids = bids
         self.tricksWon = tricksWon
+        self.scoreDeltas = scoreDeltas
+        self.heartsPoints = heartsPoints
+        self.moonShooter = moonShooter
+        self.bagsAfter = bagsAfter
+        self.nilMade = nilMade
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case roundNumber, cardsPerPlayer, bids, tricksWon
+        case scoreDeltas, heartsPoints, moonShooter, bagsAfter, nilMade
+    }
+
+    /// Older histories predate the score-limit fields; they default empty.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        roundNumber = try container.decode(Int.self, forKey: .roundNumber)
+        cardsPerPlayer = try container.decode(Int.self, forKey: .cardsPerPlayer)
+        bids = try container.decode([Int: Int].self, forKey: .bids)
+        tricksWon = try container.decode([Int: Int].self, forKey: .tricksWon)
+        scoreDeltas = try container.decodeIfPresent([Int: Int].self, forKey: .scoreDeltas) ?? [:]
+        heartsPoints = try container.decodeIfPresent([Int: Int].self, forKey: .heartsPoints) ?? [:]
+        moonShooter = try container.decodeIfPresent(Int.self, forKey: .moonShooter)
+        bagsAfter = try container.decodeIfPresent([Int: Int].self, forKey: .bagsAfter) ?? [:]
+        nilMade = try container.decodeIfPresent([Int: Bool].self, forKey: .nilMade) ?? [:]
     }
 }
 
@@ -252,12 +337,22 @@ public extension GameState {
     /// contents; only cards already public (trump flip, current trick,
     /// discards) appear outside `myHand`.
     func snapshot(for seat: Int) -> ClientSnapshot {
-        ClientSnapshot(
+        // Hearts passing: other seats' committed cards and received cards
+        // are private. Their commitment (and count) stays visible.
+        var visibleRound = round
+        if var r = visibleRound, !(r.passSelections.isEmpty && r.passReceived.isEmpty) {
+            r.passSelections = r.passSelections.reduce(into: [:]) { acc, entry in
+                acc[entry.key] = entry.key == seat ? entry.value : Array(repeating: "?", count: entry.value.count)
+            }
+            r.passReceived = r.passReceived.filter { $0.key == seat }
+            visibleRound = r
+        }
+        return ClientSnapshot(
             gameKind: gameKind,
             rules: rules,
             seats: seats,
             phase: phase,
-            round: round,
+            round: visibleRound,
             roundHistory: roundHistory,
             mySeat: seat,
             myHand: hands[seat] ?? [],

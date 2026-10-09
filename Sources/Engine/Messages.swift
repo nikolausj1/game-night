@@ -66,6 +66,13 @@ public enum NetMessage: Codable, Sendable, Equatable {
     /// Cribbage, table → each phone: that seat's personalized, redacted
     /// view. Mirrors `.snapshot` (`ClientSnapshot`).
     case cribbageSnapshot(CribbageSnapshot)
+    /// Generic side games (Battleship, Gin Rummy, Go Fish, Liar's Dice,
+    /// ...): opaque Codable payloads keyed by the game's `kind` string.
+    /// See `SideGamePayload`. Phone → table action; table → each phone its
+    /// redacted state; table → everyone the events an action produced.
+    case sideGameAction(SideGamePayload)
+    case sideGameState(SideGamePayload)
+    case sideGameEvents(SideGamePayload)
 }
 
 public enum NetCodec {

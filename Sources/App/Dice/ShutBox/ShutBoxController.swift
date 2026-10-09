@@ -334,15 +334,19 @@ final class ShutBoxController {
             handleBust(seat: seat)
             return
         }
-        let chosen = Set(Self.botPreferredSubset(subsets).map { $0 - 1 })
+        let personality = BotPersonality.forName(seats[seat].name)
+        // Exact expected-score choice (see `ShutBoxStrategy`); the old
+        // fewest-tiles heuristic is the fallback if the DP ever finds nothing.
+        let best = ShutBoxStrategy.chooseSet(standing: standing, sum: sum) ?? Self.botPreferredSubset(subsets)
+        let chosen = Set(best.map { $0 - 1 })
         statusLine = "\(seats[seat].name) is thinking…"
         stateVersion += 1
         broadcast()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + personality.randomDelay(0.5...0.9)) { [weak self] in
             guard let self, self.turnSeat == seat, !self.gameOver else { return }
             self.selected = chosen
             self.stateVersion += 1
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + personality.randomDelay(0.45...0.65)) { [weak self] in
                 guard let self, self.turnSeat == seat, !self.gameOver else { return }
                 self.flipTiles(chosen, seat: seat)
                 self.selected.removeAll()
@@ -364,21 +368,12 @@ final class ShutBoxController {
         } ?? subsets[0]
     }
 
-    /// Whether a bot should switch to one die once it's unlocked: compare
-    /// the fraction of outcomes that leave AT LEAST ONE legal set with one
-    /// die (faces 1...6, 6 equally likely outcomes) vs. two (sums 2...12
-    /// over the true 36-combination distribution) against the board as it
-    /// stands RIGHT NOW, and take whichever has the lower bust chance —
-    /// "one-die when beneficial by expectation."
+    /// Whether a bot should switch to one die once it's unlocked: the exact
+    /// expected final score with one die vs. two, from the board as it
+    /// stands right now (`ShutBoxStrategy`'s solved table).
     private func botDecideOneDie() -> Bool {
         guard oneDieAvailable else { return false }
-        var oneDieHits = 0
-        for face in 1...6 where !legalSubsets(forSum: face).isEmpty { oneDieHits += 1 }
-        var twoDiceHits = 0
-        for a in 1...6 { for b in 1...6 where !legalSubsets(forSum: a + b).isEmpty { twoDiceHits += 1 } }
-        let pOne = Double(oneDieHits) / 6.0
-        let pTwo = Double(twoDiceHits) / 36.0
-        return pOne > pTwo
+        return ShutBoxStrategy.shouldUseOneDie(standing: standing)
     }
 
     private func scheduleBotIfNeeded() {
@@ -386,7 +381,7 @@ final class ShutBoxController {
               seats.indices.contains(turnSeat), seats[turnSeat].isBot else { return }
         let expectedTurn = turnSeat
         let expectedVersion = stateVersion
-        let delay = Double.random(in: 1.0...1.8)
+        let delay = BotPersonality.forName(seats[expectedTurn].name).randomDelay(1.0...1.8)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !self.gameOver, !self.rollInFlight,
                   self.turnSeat == expectedTurn, self.stateVersion == expectedVersion else { return }

@@ -78,7 +78,9 @@ final class BotDirector {
         else { return }
 
         scheduledSeat = seat
-        var delay = Double.random(in: 0.9...2.0)
+        // Tempo is the bot's stable personality (snappy 0.7x ... deliberate 1.4x).
+        let name = state.seats.indices.contains(seat) ? state.seats[seat].playerName : ""
+        var delay = BotPersonality.forName(name).randomDelay(0.9...2.0)
         if savoringSeats.remove(seat) != nil { delay += 0.5 }
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             self?.fire(seat: seat, decision: decision)
@@ -117,6 +119,13 @@ final class BotDirector {
         case .playing:
             guard state.gameKind != .freePlay, let round = state.round else { return nil }
             return (round.turnSeat, .play)
+        case .passing:
+            // Everyone passes at once; serve the lowest seat still owing a
+            // selection. evaluate() re-fires after each bot pass, so bots
+            // chain through; a slow human simply holds the ones after it.
+            guard let round = state.round else { return nil }
+            let pending = state.seats.indices.first { round.passSelections[$0] == nil }
+            return pending.map { ($0, .pass) }
         case .lobby, .dealing, .trickComplete, .roundComplete, .gameOver:
             return nil
         }

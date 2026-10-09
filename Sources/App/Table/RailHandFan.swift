@@ -51,6 +51,11 @@ struct RailHandFan: View {
     /// Degrees of splay per card away from the fan's center.
     private let anglePerCard: Double = 4.0
 
+    /// Where the table lamp sits relative to this hand (see `TableLamp`).
+    /// The fan is mounted in the plate's rotated frame, so the lamp is
+    /// always local "up" (toward the felt); only the distance matters.
+    @State private var lamp = LampSample()
+
     private var shown: Int { min(count, visualCap) }
     /// Horizontal advance per card — real cards laid this tight (~70%
     /// overlap) still read as a full hand, not a card show. Tightens
@@ -81,6 +86,7 @@ struct RailHandFan: View {
             }
         }
         .frame(height: peekHeight, alignment: .top)
+        .lampSample($lamp)
         .animation(.spring(response: 0.4, dampingFraction: 0.78), value: count)
     }
 
@@ -109,6 +115,7 @@ struct RailHandFan: View {
                     // frame makes the card report (and paint at) its real
                     // size regardless of what the parent offers.
                     .frame(width: cardWidth, height: cardHeight)
+                    .overlay(lampShade)
                     // Pivot far below the peek strip: the fan arcs like
                     // cards pinched at a base we never see, tips spreading
                     // as they poke up into view.
@@ -125,6 +132,28 @@ struct RailHandFan: View {
         // No `.clipped()` here — see the type doc. The frame above is for
         // LAYOUT (keeps the plate snug against the peek strip); the actual
         // card art is full height and bleeds past it toward the rail.
+    }
+
+    /// The lamp on a card back held out at the rail: the card's near end
+    /// (the part we see) gets a warm hairline catch; the whole back darkens
+    /// the farther the hand sits from the bulb, and more toward the unseen
+    /// far end of the card.
+    private var lampShade: some View {
+        let r = CardStyle.cornerRadius(width: cardWidth)
+        let away = 1 - lamp.light // 0 under the lamp, 1 far corner
+        return RoundedRectangle(cornerRadius: r, style: .continuous)
+            .fill(LinearGradient(stops: [
+                .init(color: TableLamp.warmTint.opacity(0.10 * lamp.light), location: 0),
+                .init(color: .black.opacity(0.05 + 0.20 * away), location: 0.22),
+                .init(color: .black.opacity(0.18 + 0.30 * away), location: 1),
+            ], startPoint: .top, endPoint: .bottom))
+            .overlay(
+                RoundedRectangle(cornerRadius: r, style: .continuous)
+                    .strokeBorder(LinearGradient(colors: [.white.opacity(0.20 * lamp.light), .clear],
+                                                 startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.25)),
+                                  lineWidth: 1)
+            )
+            .allowsHitTesting(false)
     }
 
     /// Overflow label: the felt's serif-and-gold voice, small enough to

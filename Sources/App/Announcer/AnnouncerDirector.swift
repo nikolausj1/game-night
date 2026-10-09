@@ -78,6 +78,18 @@ final class AnnouncerDirector {
 
             case .topCardFlipped:
                 sfx.play(.cardFlip) // mechanical: same flip sound as a trump reveal; no announcer line
+
+            case .passSubmitted, .cardsPassed, .nilResult:
+                break // quiet mechanics; the table banners carry them
+
+            case .heartsBroken, .spadesBroken:
+                sfx.play(.tableKnock) // the moment the suit opens up
+
+            case .shotTheMoon:
+                sfx.play(.fanfareWin) // the rare big one
+
+            case .blindNilBid:
+                sfx.play(.chipPlace)
             }
         }
     }

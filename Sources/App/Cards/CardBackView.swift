@@ -56,7 +56,13 @@ struct CardBackView: View {
                     .strokeBorder(CardStyle.stockTop, lineWidth: border)
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .strokeBorder(.black.opacity(0.10), lineWidth: 0.5)
+                // Same stock as the face: linen over the printed art, a
+                // touch lighter so the back art keeps its depth.
+                CardMaterial(width: w, seed: 0,
+                             linen: resolvedImageName == nil ? 0.8 : 0.55,
+                             ink: 0.25, wear: 0.9)
             }
+            .compositingGroup()
         }
         .aspectRatio(CardStyle.aspectRatio, contentMode: .fit)
     }
@@ -103,6 +109,7 @@ struct CardView: View {
     /// 0 = resting on felt, 1 = held aloft mid-drag.
     var elevation: CGFloat = 0
     @Environment(\.unoDeckStyle) private var unoDeckStyle
+    @Environment(\.cardSheen) private var sheen
 
     var body: some View {
         ZStack {
@@ -112,6 +119,20 @@ struct CardView: View {
                 UnoCardBackView()
             } else {
                 CardBackView()
+            }
+        }
+        // Glossy-stock sheen (hand fan only — nil elsewhere, so table
+        // and menu cards pay nothing). One gradient, clipped to the card.
+        .overlay {
+            if let sheen {
+                CardSheenLayer(sheen: sheen, elevation: elevation)
+            }
+        }
+        // Paper thickness: a dark edge-stack line peeking out below/right,
+        // growing as the card lifts.
+        .background {
+            GeometryReader { geo in
+                CardEdgeStack(width: geo.size.width, elevation: elevation)
             }
         }
         .compositingGroup()
